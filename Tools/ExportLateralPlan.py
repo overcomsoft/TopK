@@ -132,35 +132,27 @@ def get_bottom_footprint(obb_3d):
     
     [인자 (Arguments)]
     - obb_3d (dict): 배관의 OBB 3D 8개 모퉁이 점 좌표 정보 딕셔너리
-      * lbb/rbb/rtb/ltb: Bottom에 해당하는 정점들 (Local 기준)
-      * lbf/rbf/rtf/ltf: Top에 해당하는 정점들 (Local 기준)
-      
+    
     [반환값 (Returns)]
     - list of tuple (float, float, float): 정렬된 순서의 3D 바닥면 꼭짓점 좌표 리스트 (4개 점)
     
     [주요 변수 및 기하 동작]
-    - faces: 육면체의 6개 면을 구성하는 정점 묶음 리스트
-    - best_face: 각 면의 정점들의 Z값 평균을 내어, 가장 바닥에 평평하게 닿아있는 면(최저 평균 Z값 면)을 바닥면으로 낙점
+    - vertices: OBB의 8개 꼭짓점 좌표 리스트
+    - bottom_vertices: Z 좌표(월드 고도)가 가장 낮은 4개의 정점(실제 바닥을 형성하는 꼭짓점들)을 선별
     - cx, cy: 바닥면 4개 정점의 XY 투영 중심점 좌표 (각도 정렬을 위한 기준 원점)
     - angle(p): math.atan2 함수를 활용해 중심점(cx, cy) 대비 꼭짓점의 극좌표 각도를 반환하는 내부 헬퍼 함수
     """
-    faces = [
-        [obb_3d['lbb'], obb_3d['rbb'], obb_3d['rbf'], obb_3d['lbf']], # 바닥면 영역 (Local Bottom)
-        [obb_3d['ltb'], obb_3d['rtb'], obb_3d['rtf'], obb_3d['ltf']], # 천장면 영역 (Local Top)
-        [obb_3d['lbb'], obb_3d['rbb'], obb_3d['rtb'], obb_3d['ltb']], # 배면 영역 (Local Back)
-        [obb_3d['lbf'], obb_3d['rbf'], obb_3d['rtf'], obb_3d['ltf']], # 정면 영역 (Local Front)
-        [obb_3d['lbb'], obb_3d['ltb'], obb_3d['ltf'], obb_3d['lbf']], # 좌측면 영역 (Local Left)
-        [obb_3d['rbb'], obb_3d['rtb'], obb_3d['rtf'], obb_3d['rbf']]  # 우측면 영역 (Local Right)
-    ]
-    # Z 좌표가 가장 낮은 정점들의 조합을 지닌 물리적 바닥 다각형 선택
-    best_face = min(faces, key=lambda f: sum(p[2] for p in f) / 4.0)
+    vertices = list(obb_3d.values())
+    # 월드 좌표계 Z축 기준 가장 낮은 4개 점을 바닥면으로 견고하게 선별 (인덱스 꼬임 문제 해결)
+    bottom_vertices = sorted(vertices, key=lambda p: p[2])[:4]
     
     # 2D(XY 평면) 상에서 선분이 꼬이지 않도록 4개 점을 중심 기준으로 극좌표 각도 정렬 진행
-    cx = sum(p[0] for p in best_face) / 4.0
-    cy = sum(p[1] for p in best_face) / 4.0
+    cx = sum(p[0] for p in bottom_vertices) / 4.0
+    cy = sum(p[1] for p in bottom_vertices) / 4.0
     def angle(p):
         return math.atan2(p[1] - cy, p[0] - cx)
-    return sorted(best_face, key=angle)
+    return sorted(bottom_vertices, key=angle)
+
 
 def fetch_data(conn):
     """

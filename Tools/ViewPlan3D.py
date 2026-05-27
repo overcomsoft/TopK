@@ -132,6 +132,32 @@ def generate_sphere_geometry(cx, cy, cz, r, num_lat=6, num_lon=8):
         
     return vertices, faces
 
+def sort_box_vertices(vertices):
+    """
+    Sorts 8 vertices of a cuboid into a standard predictable order:
+    - The first 4 (indices 0, 1, 2, 3) are bottom vertices ordered CCW on the XY plane.
+    - The last 4 (indices 4, 5, 6, 7) are corresponding top vertices directly above 0, 1, 2, 3.
+    """
+    # 1. Sort all 8 vertices by Z to separate bottom 4 and top 4
+    sorted_by_z = sorted(vertices, key=lambda p: p[2])
+    bottom_4 = sorted_by_z[:4]
+    top_4 = sorted_by_z[4:]
+    
+    # 2. Sort bottom 4 CCW on XY plane
+    cx = sum(p[0] for p in bottom_4) / 4.0
+    cy = sum(p[1] for p in bottom_4) / 4.0
+    def angle(p):
+        return math.atan2(p[1] - cy, p[0] - cx)
+    bottom_sorted = sorted(bottom_4, key=angle)
+    
+    # 3. Match each top vertex to the closest bottom vertex in the XY plane
+    top_sorted = []
+    for b in bottom_sorted:
+        best_t = min(top_4, key=lambda t: (t[0]-b[0])**2 + (t[1]-b[1])**2)
+        top_sorted.append(best_t)
+        
+    return bottom_sorted + top_sorted
+
 def fetch_category_data(cur, table_name, utility_map, level_filter, limit=None):
     """
     지정된 테이블로부터 OBB 및 PoC 정보를 데이터베이스로부터 쿼리하여 리스트로 정리합니다.
@@ -179,6 +205,8 @@ def fetch_category_data(cur, table_name, utility_map, level_filter, limit=None):
             (rtf_x, rtf_y, rtf_z),
             (ltf_x, ltf_y, ltf_z)
         ]
+        vertices = sort_box_vertices(vertices)
+
         
         pocs = []
         if poc_pos:
@@ -362,6 +390,7 @@ def main():
     for row in cur.fetchall():
         vertices = list(row[3:27])
         vertices = [tuple(vertices[i:i+3]) for i in range(0, 24, 3)]
+        vertices = sort_box_vertices(vertices)
         pocs = []
         poc_ids, poc_pos, poc_sizes = row[27:30]
         if poc_pos:
@@ -399,12 +428,15 @@ def main():
     
     # Box 면(Face) 템플릿 (12개 삼각면 정의)
     box_faces = [
-        [0, 1, 5], [0, 5, 4], # Bottom
-        [3, 6, 2], [3, 7, 6], # Top
-        [0, 2, 1], [0, 3, 2], # Back
-        [4, 5, 6], [4, 6, 7], # Front
-        [0, 7, 3], [0, 4, 7], # Left
-        [1, 2, 6], [1, 6, 5]  # Right
+        # Bottom face (looking from below, CW to face outward)
+        [0, 3, 2], [0, 2, 1],
+        # Top face (looking from above, CCW to face outward)
+        [4, 5, 6], [4, 6, 7],
+        # Side faces
+        [0, 1, 5], [0, 5, 4], # Side 1 (0-1-5-4)
+        [1, 2, 6], [1, 6, 5], # Side 2 (1-2-6-5)
+        [2, 3, 7], [2, 7, 6], # Side 3 (2-3-7-6)
+        [3, 0, 4], [3, 4, 7]  # Side 4 (3-0-4-7)
     ]
     
     all_pocs = []
