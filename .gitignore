@@ -1,0 +1,41 @@
+# =============================================================================
+# Git Ignore 스펙 - TopKGen 프로젝트
+# =============================================================================
+
+# Visual Studio 및 IDE 관련 설정 파일 격리
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# C# / .NET 빌드 및 컴파일 산출물 제외
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Python 컴파일 및 캐시 격리
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# 데이터베이스 및 대용량 원본 파일 제외
+*.db
+*.dbf
+*.shp
+*.shx
+*.dxf
+*.png
+*.html
+
+# 특정 output 디렉토리 및 scratch 임시 디렉토리 전면 격리
+data/output/
+scratch/

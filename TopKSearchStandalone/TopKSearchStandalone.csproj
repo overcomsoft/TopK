@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    TopKSearchStandalone.csproj
+    ===========================================================================
+    목적 : Top-K 경로 유사도 검색 엔진 (단일 파일 C# 구현, 콘솔 실행).
+    사용 : dotnet run  (도움말 출력)
+           또는 TopKSearchStandalone.cs 파일 하나만 타 프로젝트에 복사해
+           클래스 라이브러리로 사용 가능.
+    의존 : Npgsql (PostgreSQL + pgvector 접근)만 필요.
+    ===========================================================================
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>RoutingAI.Standalone</RootNamespace>
+    <AssemblyName>TopKSearchStandalone</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- PostgreSQL 드라이버 — pgvector extension과 자동 호환 -->
+    <PackageReference Include="Npgsql" Version="8.0.3" />
+  </ItemGroup>
+
+</Project>
