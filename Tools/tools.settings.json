@@ -1,0 +1,10 @@
+{
+  "db": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "DDW_AI_DB",
+    "user": "postgres",
+    "password": "dinno"
+  },
+  "outDir": "D:\\DINNO\\DEV\\AI-AutoRouting\\TopKGen\\data\\output"
+}

@@ -1,0 +1,28 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
+DROP TABLE IF EXISTS "TB_ROUTE_GROUP_PATTERN" CASCADE;
+
+CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
+    "GROUP_ID" text PRIMARY KEY,
+    "TAG_GROUP_NM" text NOT NULL,
+    "UTILITY" text NOT NULL,
+    "N_MEMBERS" integer NOT NULL,
+    "AVG_SIMILARITY" double precision NOT NULL,
+    "TRUNK_Z" double precision NOT NULL,
+    "TRUNK_XY_SPREAD" double precision NOT NULL,
+    "PITCH_MM" double precision NOT NULL,
+    "N_ORTHO_BENDS" integer NOT NULL,
+    "MEMBER_GUIDS" jsonb NOT NULL,
+    "PATTERN_SEQ" text,
+    "SECTION_BOUNDS" jsonb,
+    "FEAT" vector(60),
+    "FEAT_JSON" jsonb,
+    "CREATED_AT" timestamp without time zone DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS "IX_TRGP_KEY"
+ON "TB_ROUTE_GROUP_PATTERN" ("TAG_GROUP_NM", "UTILITY");
+
+CREATE INDEX IF NOT EXISTS "IX_TRGP_FEAT_HNSW"
+ON "TB_ROUTE_GROUP_PATTERN" USING hnsw ("FEAT" vector_l2_ops);
+

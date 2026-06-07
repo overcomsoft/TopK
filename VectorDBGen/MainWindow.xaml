@@ -1,0 +1,291 @@
+<Window x:Class="VectorDBGen.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="VectorDB 생성"
+        Width="1100" Height="780"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        Background="#FFF5F5F5">
+
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 헤더 -->
+        <TextBlock Grid.Row="0" FontSize="16" FontWeight="Bold" Foreground="#FF2070C0"
+                   Text="VectorDB 생성 (Top-K 검색용 벡터 일괄 빌드)" />
+
+        <!-- 안내 -->
+        <Border Grid.Row="1" Background="#FFE8F0FA" BorderBrush="#FFB0C8E8"
+                BorderThickness="1" CornerRadius="3" Padding="8,4" Margin="0,6">
+            <TextBlock FontSize="11" Foreground="#FF335577" TextWrapping="Wrap">
+                <Run Text="PostgreSQL의 벡터 테이블(TB_ROUTE_FEATURE_VECTOR / TB_ROUTE_CONTEXT_VECTOR / TB_ROUTE_DESIGN_GROUP / TB_ROUTE_SEGMENT_TEMPLATE)을 일괄 빌드합니다. Python 엔진 로그가 실시간으로 표시됩니다."/>
+            </TextBlock>
+        </Border>
+
+        <!-- DB 접속 정보 -->
+        <Border Grid.Row="2" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1"
+                CornerRadius="3" Padding="8" Margin="0,0,0,4">
+            <StackPanel>
+                <TextBlock Text="PostgreSQL 접속 정보" FontWeight="SemiBold"
+                           Foreground="#FF444444" Margin="0,0,0,6"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="70"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="160"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Host:" VerticalAlignment="Center"
+                               FontSize="11" Margin="0,0,4,0"/>
+                    <TextBox x:Name="TxtHost" Grid.Column="1" Height="22" Padding="2" FontSize="11"
+                             TextChanged="DbField_Changed"/>
+                    <TextBlock Grid.Column="2" Text="Port:" VerticalAlignment="Center"
+                               FontSize="11" Margin="8,0,4,0"/>
+                    <TextBox x:Name="TxtPort" Grid.Column="3" Height="22" Padding="2" FontSize="11"
+                             TextChanged="DbField_Changed"/>
+                    <TextBlock Grid.Column="4" Text="Database:" VerticalAlignment="Center"
+                               FontSize="11" Margin="8,0,4,0"/>
+                    <TextBox x:Name="TxtDbname" Grid.Column="5" Height="22" Padding="2" FontSize="11"
+                             TextChanged="DbField_Changed"/>
+                    <TextBlock Grid.Column="6" Text="User:" VerticalAlignment="Center"
+                               FontSize="11" Margin="8,0,4,0"/>
+                    <TextBox x:Name="TxtUser" Grid.Column="7" Height="22" Padding="2" FontSize="11"
+                             TextChanged="DbField_Changed"/>
+                    <TextBlock Grid.Column="8" Text="Password:" VerticalAlignment="Center"
+                               FontSize="11" Margin="8,0,4,0"/>
+                    <PasswordBox x:Name="TxtPassword" Grid.Column="9" Height="22" Padding="2" FontSize="11"
+                                 PasswordChanged="DbField_Changed"/>
+                    <Button x:Name="BtnConnect" Grid.Column="10" Content="접속 테스트"
+                            MinWidth="90" Padding="8,2" Margin="10,0,0,0"
+                            Click="BtnConnect_Click"/>
+                    <TextBlock x:Name="TxtConnStatus" Grid.Column="11" VerticalAlignment="Center"
+                               FontSize="11" FontWeight="SemiBold" Margin="10,0,0,0"
+                               Text="● 미접속" Foreground="#FFB00020"/>
+                </Grid>
+                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                    <Button x:Name="BtnInitSchema" Content="스키마 초기화 (DDL)"
+                            MinWidth="140" Padding="8,2" IsEnabled="False"
+                            Click="BtnInitSchema_Click"
+                            ToolTip="선택된 빌더에 필요한 테이블/인덱스를 생성합니다 (CREATE IF NOT EXISTS, 기존 데이터 보존)."/>
+                    <Button x:Name="BtnRebuildTable" Content="테이블 재생성"
+                            MinWidth="100" Padding="8,2" Margin="6,0,0,0" IsEnabled="False"
+                            Background="#FFC62828" Foreground="White" FontWeight="SemiBold"
+                            BorderBrush="#FFB71C1C"
+                            Click="BtnRebuildTable_Click"
+                            ToolTip="선택 빌더의 대상 테이블을 DROP CASCADE 후 DDL로 재생성합니다. 기존 데이터 전부 삭제됨 — 주의."/>
+                    <Button x:Name="BtnCreateAllTables" Content="전체 벡터 테이블 생성"
+                            MinWidth="150" Padding="8,2" Margin="6,0,0,0" IsEnabled="False"
+                            Background="#FF4C7F3E" Foreground="White" FontWeight="SemiBold"
+                            BorderBrush="#FF3D6632"
+                            Click="BtnCreateAllTables_Click"
+                            ToolTip="Feature/Context/AutoDesign DDL 3종을 일괄 실행 (CREATE IF NOT EXISTS, 기존 데이터 보존)."/>
+                    <Button x:Name="BtnExportReport" Content="리포트 엑셀 저장"
+                            MinWidth="130" Padding="8,2" Margin="6,0,0,0" IsEnabled="False"
+                            Click="BtnExportReport_Click"
+                            ToolTip="가장 최근 DDL 실행 리포트를 .xlsx 파일로 저장."/>
+                </StackPanel>
+                <TextBlock Text="※ 스키마 초기화: 존재하지 않는 테이블만 생성 (안전). 테이블 재생성: 기존 테이블 DROP 후 재생성 (데이터 삭제). 전체 생성: 3개 DDL 일괄 적용. 리포트는 실행 후 활성."
+                           FontSize="10" Foreground="#FF888888" FontStyle="Italic"
+                           Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 빌더 선택 -->
+        <Grid Grid.Row="3" Margin="0,4,0,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="360"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="빌더:" VerticalAlignment="Center"
+                       FontWeight="SemiBold" Margin="0,0,6,0"/>
+            <ComboBox x:Name="CmbBuilder" Grid.Column="1" SelectionChanged="CmbBuilder_SelectionChanged"
+                      VerticalAlignment="Center" Padding="4,2" FontSize="12">
+                <ComboBoxItem Content="1. Feature Vector (TB_ROUTE_FEATURE_VECTOR · 30D)" Tag="feature"/>
+                <ComboBoxItem Content="2. Context Vector (TB_ROUTE_CONTEXT_VECTOR · 24D)" Tag="context"/>
+                <ComboBoxItem Content="3. Design Group (TB_ROUTE_DESIGN_GROUP)" Tag="group"/>
+                <ComboBoxItem Content="4. Segment Template (TB_ROUTE_SEGMENT_TEMPLATE)" Tag="segment"/>
+            </ComboBox>
+            <TextBlock x:Name="TxtDbInfo" Grid.Column="2" VerticalAlignment="Center"
+                       FontFamily="Consolas" FontSize="11" Foreground="#FF666666"
+                       Margin="12,0,0,0" TextTrimming="CharacterEllipsis"/>
+        </Grid>
+
+        <!-- 파라미터 영역 -->
+        <Border Grid.Row="4" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1"
+                CornerRadius="3" Padding="8" Margin="0,0,0,4">
+            <StackPanel>
+                <!-- Feature Vector -->
+                <StackPanel x:Name="PnlFeature" Visibility="Collapsed">
+                    <TextBlock Text="Feature Vector 빌드 옵션 (TB_ROUTE_PATH → TB_ROUTE_FEATURE_VECTOR)"
+                               FontWeight="SemiBold" Foreground="#FF444444" Margin="0,0,0,6"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="정규화 파라미터 저장:"
+                                   VerticalAlignment="Center" Margin="0,0,6,2" FontSize="11"/>
+                        <TextBox x:Name="TxtSaveNorm" Grid.Row="0" Grid.Column="1"
+                                 Height="22" Padding="2" Margin="0,0,4,2" FontSize="11"
+                                 Text="../data/FeatureVectors/db_norm_params.json"/>
+                        <Button Grid.Row="0" Grid.Column="2" Content="..." Width="26" Height="22"
+                                Click="BtnBrowseSaveNorm_Click" Margin="0,0,0,2"/>
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="벡터 JSON 저장(선택):"
+                                   VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
+                        <TextBox x:Name="TxtSaveJson" Grid.Row="1" Grid.Column="1"
+                                 Height="22" Padding="2" Margin="0,0,4,0" FontSize="11"
+                                 Text=""/>
+                        <Button Grid.Row="1" Grid.Column="2" Content="..." Width="26" Height="22"
+                                Click="BtnBrowseSaveJson_Click"/>
+                    </Grid>
+                    <TextBlock Text="※ TB_ROUTE_FEATURE_VECTOR 전체 삭제 후 재생성합니다. 수천 건 규모는 수 초 내."
+                               FontSize="10" Foreground="#FF888888" FontStyle="Italic" Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Context Vector -->
+                <StackPanel x:Name="PnlContext" Visibility="Collapsed">
+                    <TextBlock Text="Context Vector 빌드 옵션 (BIM 장애물 기반 24D)"
+                               FontWeight="SemiBold" Foreground="#FF444444" Margin="0,0,0,6"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Start 반경(mm):" VerticalAlignment="Center"
+                                   Margin="0,0,6,0" FontSize="11"/>
+                        <TextBox x:Name="TxtStartRadius" Grid.Column="1" Text="1000"
+                                 Height="22" Padding="2" FontSize="11"/>
+                        <TextBlock Grid.Column="2" Text="End 반경(mm):" VerticalAlignment="Center"
+                                   Margin="12,0,6,0" FontSize="11"/>
+                        <TextBox x:Name="TxtEndRadius" Grid.Column="3" Text="2000"
+                                 Height="22" Padding="2" FontSize="11"/>
+                        <TextBlock Grid.Column="4" Text="Limit(개발용):" VerticalAlignment="Center"
+                                   Margin="12,0,6,0" FontSize="11"/>
+                        <TextBox x:Name="TxtCtxLimit" Grid.Column="5" Text=""
+                                 Height="22" Padding="2" FontSize="11"/>
+                    </Grid>
+                    <TextBlock Text="※ 8,828건 기준 약 70초. TB_ROUTE_CONTEXT_VECTOR 전체 삭제 후 재생성."
+                               FontSize="10" Foreground="#FF888888" FontStyle="Italic" Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Design Group -->
+                <StackPanel x:Name="PnlGroup" Visibility="Collapsed">
+                    <TextBlock Text="Design Group 빌드 옵션 (TB_ROUTE_DESIGN_GROUP)"
+                               FontWeight="SemiBold" Foreground="#FF444444" Margin="0,0,0,6"/>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="최소 멤버 수:" VerticalAlignment="Center"
+                                   Margin="0,0,6,0" FontSize="11"/>
+                        <TextBox x:Name="TxtMinMembers" Text="3" Width="70"
+                                 Height="22" Padding="2" FontSize="11"/>
+                        <TextBlock Text="(공정+장비+유틸 조합을 N건 이상 가진 그룹만 등록)"
+                                   FontSize="10" Foreground="#FF888888" FontStyle="Italic"
+                                   VerticalAlignment="Center" Margin="10,0,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Segment Template -->
+                <StackPanel x:Name="PnlSegment" Visibility="Collapsed">
+                    <TextBlock Text="Segment Template 빌드 옵션 (TB_ROUTE_SEGMENT_TEMPLATE)"
+                               FontWeight="SemiBold" Foreground="#FF444444" Margin="0,0,0,6"/>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="역할 필터:" VerticalAlignment="Center"
+                                   Margin="0,0,6,0" FontSize="11"/>
+                        <ComboBox x:Name="CmbSegRole" Width="180" Height="22" FontSize="11">
+                            <ComboBoxItem Content="(전체)" Tag="" IsSelected="True"/>
+                            <ComboBoxItem Content="A_EQUIP_STUB" Tag="A_EQUIP_STUB"/>
+                            <ComboBoxItem Content="B_BRIDGE" Tag="B_BRIDGE"/>
+                            <ComboBoxItem Content="C_DUCT_ENTRY" Tag="C_DUCT_ENTRY"/>
+                        </ComboBox>
+                        <TextBlock Text="(비워두면 A/B/C 세 역할 모두 빌드)"
+                                   FontSize="10" Foreground="#FF888888" FontStyle="Italic"
+                                   VerticalAlignment="Center" Margin="10,0,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- 실행 버튼 + 상태 -->
+        <Grid Grid.Row="5" Margin="0,4,0,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="BtnRun" Grid.Column="0" Content="실행" MinWidth="110" Padding="10,4"
+                    Click="BtnRun_Click" Background="#FF2070C0" Foreground="White"
+                    FontWeight="SemiBold" Margin="0,0,8,0" IsEnabled="False"/>
+            <Button x:Name="BtnRunAll" Grid.Column="1" Content="1~4 일괄 실행" MinWidth="140" Padding="10,4"
+                    Click="BtnRunAll_Click" Background="#FF4C7F3E" Foreground="White"
+                    FontWeight="SemiBold" Margin="0,0,8,0" IsEnabled="False"
+                    ToolTip="Feature → Context → Group → Segment 4단계를 순차 실행합니다 (각 단계마다 자동 사전 검사 + 누락 시 자동 DDL 포함)."/>
+            <Button x:Name="BtnCancel" Grid.Column="2" Content="취소" MinWidth="80" Padding="10,4"
+                    Click="BtnCancel_Click" IsEnabled="False" Margin="0,0,8,0"/>
+            <ProgressBar x:Name="PbRun" Grid.Column="3" Width="140" Height="22"
+                         IsIndeterminate="False" Visibility="Collapsed"/>
+            <TextBlock x:Name="TxtStatus" Grid.Column="4" VerticalAlignment="Center"
+                       FontFamily="Consolas" FontSize="11" Foreground="#FF444444"
+                       Margin="10,0,0,0"
+                       Text="대기 중 — 빌더를 선택하고 '실행' 또는 '1~4 일괄 실행'을 눌러주세요."/>
+        </Grid>
+
+        <!-- 출력 로그 -->
+        <Border Grid.Row="6" BorderBrush="#FFCCCCCC" BorderThickness="1" Background="#FF1E1E1E">
+            <TextBox x:Name="TxtLog"
+                     FontFamily="Consolas" FontSize="11"
+                     Foreground="#FFD4D4D4" Background="#FF1E1E1E"
+                     BorderThickness="0"
+                     IsReadOnly="True"
+                     TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     AcceptsReturn="True"
+                     Padding="6"/>
+        </Border>
+
+        <!-- 하단 버튼 -->
+        <Grid Grid.Row="7" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="BtnSaveLog" Grid.Column="0" Content="로그 저장" MinWidth="90"
+                    Padding="8,4" Click="BtnSaveLog_Click" Margin="0,0,8,0"/>
+            <Button x:Name="BtnClearLog" Grid.Column="1" Content="로그 지우기" MinWidth="90"
+                    Padding="8,4" Click="BtnClearLog_Click"/>
+            <Button Grid.Column="3" Content="닫기" MinWidth="80" Padding="8,4"
+                    Click="BtnClose_Click" IsCancel="True"/>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,25 @@
+# Visual Studio / .NET Core / WPF build artifacts
+.vs/
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.pdb
+
+# Python caches and local environment settings
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+venv/
+.venv/
+env/
+
+# Large generated data files & output dumps
+data/
+*.log
+*.html
+*.ini
+scratch/

@@ -1,0 +1,6 @@
+ezdxf
+matplotlib
+plotly
+psycopg2
+pyshp
+python-docx

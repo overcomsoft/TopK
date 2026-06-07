@@ -1,0 +1,11 @@
+import psycopg2
+conn = psycopg2.connect('host=localhost port=5432 dbname=DDW_AI_DB user=postgres password=dinno')
+cur = conn.cursor()
+cur.execute('SELECT COUNT(*) FROM "TB_LATERAL_PIPE" WHERE "OBB_LEFT_BOTTOM_BACK_X" IS NOT NULL')
+print("Lateral pipes with OBB:", cur.fetchall())
+cur.execute('SELECT COUNT(*) FROM "TB_DUCT" WHERE "OBB_LEFT_BOTTOM_BACK_X" IS NOT NULL')
+print("Ducts with OBB:", cur.fetchall())
+cur.execute('SELECT COUNT(*) FROM "TB_DUCT" WHERE "AABB_MINX" IS NOT NULL')
+print("Ducts with AABB_MINX:", cur.fetchall())
+cur.execute('SELECT COUNT(*) FROM "TB_EQUIPMENTS" WHERE "AABB_MINX" IS NOT NULL')
+print("Equipments with AABB_MINX:", cur.fetchall())
