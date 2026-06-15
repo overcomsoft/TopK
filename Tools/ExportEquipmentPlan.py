@@ -228,38 +228,41 @@ def fetch_data(conn):
     with conn.cursor() as cur:
         query = '''
             SELECT "INSTANCE_NAME",
-                   "AABB_MINX", "AABB_MINY", "AABB_MINZ",
-                   "AABB_MAXX", "AABB_MAXY", "AABB_MAXZ",
+                   "OBB_LEFT_BOTTOM_BACK_X", "OBB_LEFT_BOTTOM_BACK_Y", "OBB_LEFT_BOTTOM_BACK_Z",
+                   "OBB_RIGHT_BOTTOM_BACK_X", "OBB_RIGHT_BOTTOM_BACK_Y", "OBB_RIGHT_BOTTOM_BACK_Z",
+                   "OBB_RIGHT_TOP_BACK_X", "OBB_RIGHT_TOP_BACK_Y", "OBB_RIGHT_TOP_BACK_Z",
+                   "OBB_LEFT_TOP_BACK_X", "OBB_LEFT_TOP_BACK_Y", "OBB_LEFT_TOP_BACK_Z",
+                   "OBB_LEFT_BOTTOM_FRONT_X", "OBB_LEFT_BOTTOM_FRONT_Y", "OBB_LEFT_BOTTOM_FRONT_Z",
+                   "OBB_RIGHT_BOTTOM_FRONT_X", "OBB_RIGHT_BOTTOM_FRONT_Y", "OBB_RIGHT_BOTTOM_FRONT_Z",
+                   "OBB_RIGHT_TOP_FRONT_X", "OBB_RIGHT_TOP_FRONT_Y", "OBB_RIGHT_TOP_FRONT_Z",
+                   "OBB_LEFT_TOP_FRONT_X", "OBB_LEFT_TOP_FRONT_Y", "OBB_LEFT_TOP_FRONT_Z",
                    "POC_ID_LIST", "POC_POSITIONS_LIST", "POC_SIZES_LIST"
             FROM "TB_EQUIPMENTS"
-            WHERE "AABB_MINX" IS NOT NULL
+            WHERE "OBB_LEFT_BOTTOM_BACK_X" IS NOT NULL
         '''
         cur.execute(query)
         for row in cur.fetchall():
             (name,
-             min_x, min_y, min_z,
-             max_x, max_y, max_z,
+             obb_lbb_x, obb_lbb_y, obb_lbb_z,
+             obb_rbb_x, obb_rbb_y, obb_rbb_z,
+             obb_rtb_x, obb_rtb_y, obb_rtb_z,
+             obb_ltb_x, obb_ltb_y, obb_ltb_z,
+             obb_lbf_x, obb_lbf_y, obb_lbf_z,
+             obb_rbf_x, obb_rbf_y, obb_rbf_z,
+             obb_rtf_x, obb_rtf_y, obb_rtf_z,
+             obb_ltf_x, obb_ltf_y, obb_ltf_z,
              poc_ids, poc_pos, poc_sizes) = row
-             
-            lbb_x, lbb_y, lbb_z = min_x, min_y, min_z
-            rbb_x, rbb_y, rbb_z = max_x, min_y, min_z
-            rtb_x, rtb_y, rtb_z = max_x, max_y, min_z
-            ltb_x, ltb_y, ltb_z = min_x, max_y, min_z
-            lbf_x, lbf_y, lbf_z = min_x, min_y, max_z
-            rbf_x, rbf_y, rbf_z = max_x, min_y, max_z
-            rtf_x, rtf_y, rtf_z = max_x, max_y, max_z
-            ltf_x, ltf_y, ltf_z = min_x, max_y, max_z
              
             # 3D 상에서 육면체 OBB를 구성하기 위한 8개의 로컬 좌표 꼭짓점 세팅
             obb_3d = {
-                'lbb': (lbb_x, lbb_y, lbb_z),
-                'rbb': (rbb_x, rbb_y, rbb_z),
-                'rtb': (rtb_x, rtb_y, rtb_z),
-                'ltb': (ltb_x, ltb_y, ltb_z),
-                'lbf': (lbf_x, lbf_y, lbf_z),
-                'rbf': (rbf_x, rbf_y, rbf_z),
-                'rtf': (rtf_x, rtf_y, rtf_z),
-                'ltf': (ltf_x, ltf_y, ltf_z)
+                'lbb': (obb_lbb_x, obb_lbb_y, obb_lbb_z),
+                'rbb': (obb_rbb_x, obb_rbb_y, obb_rbb_z),
+                'rtb': (obb_rtb_x, obb_rtb_y, obb_rtb_z),
+                'ltb': (obb_ltb_x, obb_ltb_y, obb_ltb_z),
+                'lbf': (obb_lbf_x, obb_lbf_y, obb_lbf_z),
+                'rbf': (obb_rbf_x, obb_rbf_y, obb_rbf_z),
+                'rtf': (obb_rtf_x, obb_rtf_y, obb_rtf_z),
+                'ltf': (obb_ltf_x, obb_ltf_y, obb_ltf_z)
             }
             
             # 장비의 3D 바닥면 다각형 정점 계산 및 2D XY 평면 투영(폴리곤 정보 추출)

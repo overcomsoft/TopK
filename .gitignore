@@ -23,3 +23,16 @@ data/
 *.html
 *.ini
 scratch/
+Tools/tools.settings.json
+
+# 임시 테스트 및 개발 편의성 스크립트 격리
+check_db*.py
+list_*.py
+test_*.py
+analyze_*.py
+*.log
+Docs/out/
+*.pdf
+AI_DB.session.sql
+Tools/DDW_AI_DB.session.sql
+Extract_group_pattern.txt

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>AutoRouteFinder</AssemblyName>
+    <RootNamespace>AutoRouteFinder</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="8.0.3" />
+    <PackageReference Include="HelixToolkit.Wpf" Version="2.25.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- C++ Routing Engine 및 종속 DLL 복사 -->
+    <None Include="D:\DINNO\DEV\AI-AutoRouting\Routing3D\cpp\build\Release\*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\GroupPatternViewer\grouppatternviewer.settings.json" Link="grouppatternviewer.settings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AutoRoutingLibrary\AutoRoutingLibrary.csproj" />
+    <ProjectReference Include="..\TopKSearchStandalone\TopKSearchStandalone.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,100 @@
+<Window x:Class="GroupPatternViewer.GeneratePatternDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="패턴 데이터 생성 (DesignPatternAnalyzer.py)" Height="550" Width="650"
+        WindowStartupLocation="CenterOwner" Background="#FF252526" Foreground="#FFF1F1F1"
+        BorderBrush="#FF3F3F46" BorderThickness="1">
+    <Window.Resources>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#FF1E1E1E"/>
+            <Setter Property="Foreground" Value="#FFF1F1F1"/>
+            <Setter Property="BorderBrush" Value="#FF555555"/>
+            <Setter Property="Padding" Value="4"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#FF3E3E42"/>
+            <Setter Property="Foreground" Value="#FFF1F1F1"/>
+            <Setter Property="BorderBrush" Value="#FF555555"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#FF505054"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="border" Property="Background" Value="#FF2D2D30"/>
+                                <Setter Property="Foreground" Value="#FF7F7F7F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <GroupBox Header="데이터베이스 연결" Foreground="#FF007ACC" BorderBrush="#FF3F3F46" Margin="0,0,0,10" Padding="10">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="Host:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,5,5"/>
+                <TextBox x:Name="TxtHost" Grid.Row="0" Grid.Column="1" Margin="0,0,10,5"/>
+
+                <TextBlock Text="Port:" Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Margin="0,0,5,5"/>
+                <TextBox x:Name="TxtPort" Grid.Row="0" Grid.Column="3" Margin="0,0,0,5"/>
+
+                <TextBlock Text="DB:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,5,5"/>
+                <TextBox x:Name="TxtDb" Grid.Row="1" Grid.Column="1" Margin="0,0,10,5"/>
+
+                <TextBlock Text="User:" Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Margin="0,0,5,5"/>
+                <TextBox x:Name="TxtUser" Grid.Row="1" Grid.Column="3" Margin="0,0,0,5"/>
+
+                <TextBlock Text="Password:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,5,5"/>
+                <PasswordBox x:Name="TxtPassword" Grid.Row="2" Grid.Column="1" Margin="0,0,10,5" Background="#FF1E1E1E" Foreground="#FFF1F1F1" BorderBrush="#FF555555" Padding="4"/>
+
+                <Button x:Name="BtnTestDb" Grid.Row="2" Grid.Column="3" Content="DB 접속 테스트" Margin="0,0,0,5" Padding="10,2" Click="BtnTestDb_Click"/>
+            </Grid>
+        </GroupBox>
+
+        <GroupBox Header="실행 옵션" Foreground="#FF007ACC" BorderBrush="#FF3F3F46" Grid.Row="1" Margin="0,0,0,10" Padding="10">
+            <StackPanel>
+                <RadioButton x:Name="RdoRunAll" Content="스키마 초기화 및 전체 추출 (run-all)" IsChecked="True" Foreground="#FFF1F1F1" Margin="0,0,0,5"/>
+                <RadioButton x:Name="RdoExtract" Content="기존 스키마 유지 후 추출 (extract)" Foreground="#FFF1F1F1" Margin="0,0,0,10"/>
+                
+                <CheckBox x:Name="ChkDryRun" Content="Dry Run (DB 저장 없이 테스트 모드로 실행)" Foreground="#FFF1F1F1"/>
+            </StackPanel>
+        </GroupBox>
+
+        <GroupBox Header="실행 로그" Foreground="#FF007ACC" BorderBrush="#FF3F3F46" Grid.Row="2" Margin="0,0,0,10">
+            <TextBox x:Name="TxtOutput" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" AcceptsReturn="True" TextWrapping="NoWrap" Background="#FF1E1E1E" Foreground="#FFD4D4D4" BorderThickness="0" Margin="2"/>
+        </GroupBox>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="BtnRun" Content="실행" Width="100" Margin="0,0,10,0" Click="BtnRun_Click" Background="#FF007ACC"/>
+            <Button x:Name="BtnClose" Content="닫기" Width="80" Click="BtnClose_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
