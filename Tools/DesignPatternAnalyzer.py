@@ -89,15 +89,59 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
     "SECTION_BOUNDS" jsonb,
     {vector_col}
     "FEAT_JSON" jsonb,
+    "GEOM_3D" geometry(MultiPolygonZ, 0),
     "CREATED_AT" timestamp without time zone DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS "IX_TRGP_KEY"
 ON "TB_ROUTE_GROUP_PATTERN" ("TAG_GROUP_NM", "UTILITY");
 {vector_idx}
+CREATE INDEX IF NOT EXISTS "IX_TRGP_GEOM"
+ON "TB_ROUTE_GROUP_PATTERN" USING gist("GEOM_3D");
 """
 
 
 # --- Geometry & Math Helpers ---
+
+def section_bounds_to_wkt_multipolygonz(bounds):
+    """
+    SECTION_BOUNDS 내의 각 구간 AABB [min, max] 좌표를 6개의 3D 사각 패치 폴리곤 면으로 구성하고,
+    이를 PostGIS가 해독할 수 있는 단일 MULTIPOLYGON Z (...) WKT 문자열로 변환합니다.
+    """
+    if not bounds:
+        return None
+        
+    polygons = []
+    for b in bounds:
+        if 'min' not in b or 'max' not in b:
+            continue
+        minx, miny, minz = b['min']
+        maxx, maxy, maxz = b['max']
+        
+        # 6개 면 정의
+        faces = [
+            # Bottom (Z = minz)
+            [(minx, miny, minz), (maxx, miny, minz), (maxx, maxy, minz), (minx, maxy, minz), (minx, miny, minz)],
+            # Top (Z = maxz)
+            [(minx, miny, maxz), (minx, maxy, maxz), (maxx, maxy, maxz), (maxx, miny, maxz), (minx, miny, maxz)],
+            # Front (Y = miny)
+            [(minx, miny, minz), (minx, miny, maxz), (maxx, miny, maxz), (maxx, miny, minz), (minx, miny, minz)],
+            # Back (Y = maxy)
+            [(minx, maxy, minz), (maxx, maxy, minz), (maxx, maxy, maxz), (minx, maxy, maxz), (minx, maxy, minz)],
+            # Left (X = minx)
+            [(minx, miny, minz), (minx, maxy, minz), (minx, maxy, maxz), (minx, miny, maxz), (minx, miny, minz)],
+            # Right (X = maxx)
+            [(maxx, miny, minz), (maxx, miny, maxz), (maxx, maxy, maxz), (maxx, maxy, minz), (maxx, miny, minz)]
+        ]
+        
+        for f in faces:
+            coords_str = ", ".join(f"{pt[0]} {pt[1]} {pt[2]}" for pt in f)
+            polygons.append(f"(({coords_str}))")
+            
+    if not polygons:
+        return None
+        
+    return f"MULTIPOLYGON Z ({', '.join(polygons)})"
+
 
 def dist(a, b) -> float:
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
@@ -809,7 +853,7 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
         return
         
     has_vector = pgvector_installed(conn) and table_exists(conn, "TB_ROUTE_GROUP_PATTERN") and tool_config._load_config(None).get("db", {}).get("use_vector", True)
-    # Check if column FEAT exists in case table was created with fallback
+    # 테이블이 폴백(fallback) 스키마로 생성되었을 경우를 대비하여 FEAT 컬럼 존재 여부를 확인합니다.
     if has_vector:
         with conn.cursor() as cur:
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='TB_ROUTE_GROUP_PATTERN' AND column_name='FEAT'")
@@ -818,7 +862,7 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
     cols = [
         "GROUP_ID", "TAG_GROUP_NM", "UTILITY", "N_MEMBERS", "AVG_SIMILARITY",
         "TRUNK_Z", "TRUNK_XY_SPREAD", "PITCH_MM", "N_ORTHO_BENDS", "MEMBER_GUIDS",
-        "PATTERN_SEQ", "SECTION_BOUNDS", "FEAT_JSON"
+        "PATTERN_SEQ", "SECTION_BOUNDS", "FEAT_JSON", "GEOM_3D"
     ]
     if has_vector:
         cols.append("FEAT")
@@ -829,6 +873,8 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
             placeholders.append("%s::jsonb")
         elif c == "FEAT":
             placeholders.append("%s::vector")
+        elif c == "GEOM_3D":
+            placeholders.append("ST_GeomFromText(%s, 0)")
         else:
             placeholders.append("%s")
             
@@ -842,19 +888,20 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
     
     rows = []
     for b in bundles:
+        geom_wkt = section_bounds_to_wkt_multipolygonz(b.get('SECTION_BOUNDS'))
         row = [
             b['GROUP_ID'], b['TAG_GROUP_NM'], b['UTILITY'], b['N_MEMBERS'], b['AVG_SIMILARITY'],
             b['TRUNK_Z'], b['TRUNK_XY_SPREAD'], b['PITCH_MM'], b['N_ORTHO_BENDS'], json.dumps(b['MEMBER_GUIDS']),
-            b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['FEAT'])
+            b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['FEAT']), geom_wkt
         ]
         if has_vector:
-            # Format vector as PG array-like string e.g., '[1.0, 2.0, ...]'
+            # pgvector 특징 벡터 데이터를 PostgreSQL Array 포맷 문자열로 변환합니다. (예: '[1.0, 2.0, ...]')
             vec_literal = "[" + ",".join(f"{float(v):.9g}" for v in b['FEAT']) + "]"
             row.append(vec_literal)
         rows.append(row)
         
     with conn.cursor() as cur:
-        # Delete previous rows to ensure we have fresh extraction patterns
+        # 최신 분석된 설계 패턴을 새로 저장하기 위해 이전 레코드를 삭제합니다.
         cur.execute('DELETE FROM "TB_ROUTE_GROUP_PATTERN"')
         print("Cleared previous records in TB_ROUTE_GROUP_PATTERN.")
         

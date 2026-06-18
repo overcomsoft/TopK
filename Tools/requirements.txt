@@ -1,0 +1,6 @@
+# Tools 디렉토리 내 특징점 분석 및 추출 파이프라인 전용 라이브러리 요구사항
+psycopg2-binary
+scikit-learn
+fpdf2
+Pillow
+matplotlib

@@ -135,6 +135,13 @@ except Exception as _stub_ex:
     HAS_STUB_PATTERNS = False
     STUB_PATTERN_IMPORT_ERROR = _stub_ex
 
+try:
+    import ExtractVerticalGroup as vertical_group
+    HAS_VERTICAL_GROUP = True
+except Exception as _vert_ex:
+    vertical_group = None
+    HAS_VERTICAL_GROUP = False
+
 # DBSCAN 및 RDP 라이브러리가 없는 환경을 대비하여 순수 파이썬 구현 또는 라이브러리 fallback 사용
 try:
     from sklearn.cluster import DBSCAN
@@ -177,6 +184,8 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_FEATURE_ANCHOR" (
     "ANCHOR_POINT_JSON" jsonb,
     "FIRST_ELBOW_POINT_JSON" jsonb,
     "STUB_POINTS_JSON" jsonb,
+    "GEOM_3D" geometry(PointZ, 0),
+    "STUB_GEOM_3D" geometry(LineStringZ, 0),
     "CREATED_AT" timestamptz DEFAULT now(),
     UNIQUE("PROJECT_ID", "ROUTE_PATH_GUID", "ANCHOR_KIND")
 );
@@ -199,6 +208,7 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_FEATURE_STUB_TEMPLATE" (
     "AVG_LENGTH_MM" double precision,
     "REPRESENTATIVE_POINTS_JSON" jsonb,
     "AVG_FEAT_JSON" jsonb,
+    "GEOM_3D" geometry(LineStringZ, 0),
     "UPDATED_AT" timestamptz DEFAULT now()
 );
 
@@ -213,6 +223,7 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_FEATURE_BUNDLE_TEMPLATE" (
     "TRUNK_AXIS" text,
     "TRUNK_CENTERLINE_JSON" jsonb,
     "MEMBER_ROUTE_GUIDS_JSON" jsonb,
+    "GEOM_3D" geometry(LineStringZ, 0),
     "UPDATED_AT" timestamptz DEFAULT now(),
     UNIQUE("PROJECT_ID", "BUNDLE_ID")
 );
@@ -237,6 +248,7 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_FEATURE_OBSTACLE_RELATION" (
     "BEND_COUNT_AFTER" integer,
     "EXTRA_LENGTH_RATIO" double precision,
     "RELATION_SCORE" double precision,
+    "GEOM_3D" geometry(LineStringZ, 0),
     "CREATED_AT" timestamptz DEFAULT now()
 );
 
@@ -339,6 +351,23 @@ def points_to_wkt_linestring3d(pts):
         return None
     coords = ", ".join(f"{p[0]} {p[1]} {p[2]}" for p in pts)
     return f"LINESTRING Z ({coords})"
+
+def points_to_wkt_point3d(pt):
+    """
+    3D 포인트 [x, y, z] 또는 (x, y, z)를 'POINT Z (x y z)' WKT 형태로 변환합니다.
+    """
+    if not pt or len(pt) < 3:
+        return None
+    return f"POINT Z ({pt[0]} {pt[1]} {pt[2]})"
+
+def closest_point_on_aabb(pt, box):
+    """
+    AABB 박스 상에서 주어진 3D 포인트 pt와 가장 가까운 3D 좌표를 산출합니다.
+    """
+    cx = max(box['minx'], min(pt[0], box['maxx']))
+    cy = max(box['miny'], min(pt[1], box['maxy']))
+    cz = max(box['minz'], min(pt[2], box['maxz']))
+    return (cx, cy, cz)
 
 def parse_pipe_diameter(size_value):
     if size_value is None:
@@ -564,7 +593,8 @@ class DesignFeatureLearner:
 
     def prepare_tables(self):
         """
-        Create and migrate feature-learning tables. PostGIS is required; pgvector is enabled when available.
+        특징점 학습용 테이블 스키마를 구성하고 기존 DB 구조에 맞춰 컬럼 마이그레이션을 실행합니다.
+        PostGIS 설치가 필수이며, pgvector가 설치되어 있다면 이를 자동으로 연동합니다.
         """
         print("1. [Schema] Preparing design-feature tables...")
         with self.conn.cursor() as cur:
@@ -580,6 +610,10 @@ class DesignFeatureLearner:
                 print(f"   - [Notice] pgvector extension is not available or not permitted: {e}")
                 self.conn.rollback()
 
+        # 수직다발배관 테이블 구조 준비
+        if HAS_VERTICAL_GROUP and vertical_group:
+            vertical_group.prepare_tables(self.conn)
+
         with self.conn.cursor() as cur:
             cur.execute(DDL_SQL)
             if self.pgvector_enabled:
@@ -590,6 +624,11 @@ class DesignFeatureLearner:
                 ("TB_ROUTE_FEATURE_ANCHOR", "ANCHOR_POINT_JSON", 'ALTER TABLE "TB_ROUTE_FEATURE_ANCHOR" ADD COLUMN "ANCHOR_POINT_JSON" jsonb;'),
                 ("TB_ROUTE_FEATURE_ANCHOR", "FIRST_ELBOW_POINT_JSON", 'ALTER TABLE "TB_ROUTE_FEATURE_ANCHOR" ADD COLUMN "FIRST_ELBOW_POINT_JSON" jsonb;'),
                 ("TB_ROUTE_FEATURE_ANCHOR", "STUB_POINTS_JSON", 'ALTER TABLE "TB_ROUTE_FEATURE_ANCHOR" ADD COLUMN "STUB_POINTS_JSON" jsonb;'),
+                ("TB_ROUTE_FEATURE_ANCHOR", "GEOM_3D", 'ALTER TABLE "TB_ROUTE_FEATURE_ANCHOR" ADD COLUMN "GEOM_3D" geometry(PointZ, 0);'),
+                ("TB_ROUTE_FEATURE_ANCHOR", "STUB_GEOM_3D", 'ALTER TABLE "TB_ROUTE_FEATURE_ANCHOR" ADD COLUMN "STUB_GEOM_3D" geometry(LineStringZ, 0);'),
+                ("TB_ROUTE_FEATURE_STUB_TEMPLATE", "GEOM_3D", 'ALTER TABLE "TB_ROUTE_FEATURE_STUB_TEMPLATE" ADD COLUMN "GEOM_3D" geometry(LineStringZ, 0);'),
+                ("TB_ROUTE_FEATURE_BUNDLE_TEMPLATE", "GEOM_3D", 'ALTER TABLE "TB_ROUTE_FEATURE_BUNDLE_TEMPLATE" ADD COLUMN "GEOM_3D" geometry(LineStringZ, 0);'),
+                ("TB_ROUTE_FEATURE_OBSTACLE_RELATION", "GEOM_3D", 'ALTER TABLE "TB_ROUTE_FEATURE_OBSTACLE_RELATION" ADD COLUMN "GEOM_3D" geometry(LineStringZ, 0);'),
             ]
             for table_name, column_name, ddl in migrations:
                 cur.execute("""
@@ -599,6 +638,13 @@ class DesignFeatureLearner:
                 """, (table_name, column_name))
                 if not cur.fetchone():
                     cur.execute(ddl)
+
+            # 추가된 3D Geometry 필드들에 대한 공간 인덱스(GIST) 신설
+            cur.execute('CREATE INDEX IF NOT EXISTS "IX_TRF_ANCHOR_GEOM" ON "TB_ROUTE_FEATURE_ANCHOR" USING gist("GEOM_3D");')
+            cur.execute('CREATE INDEX IF NOT EXISTS "IX_TRF_ANCHOR_STUB_GEOM" ON "TB_ROUTE_FEATURE_ANCHOR" USING gist("STUB_GEOM_3D");')
+            cur.execute('CREATE INDEX IF NOT EXISTS "IX_TRF_STUB_TMPL_GEOM" ON "TB_ROUTE_FEATURE_STUB_TEMPLATE" USING gist("GEOM_3D");')
+            cur.execute('CREATE INDEX IF NOT EXISTS "IX_TRF_BUNDLE_TMPL_GEOM" ON "TB_ROUTE_FEATURE_BUNDLE_TEMPLATE" USING gist("GEOM_3D");')
+            cur.execute('CREATE INDEX IF NOT EXISTS "IX_TRF_OBS_REL_GEOM" ON "TB_ROUTE_FEATURE_OBSTACLE_RELATION" USING gist("GEOM_3D");')
 
             cur.execute("""
                 DELETE FROM "TB_ROUTE_FEATURE_ANCHOR" a
@@ -1004,12 +1050,12 @@ class DesignFeatureLearner:
         return "-".join(codes)
 
     def save_anchor_features(self):
-        """Persist per-route source/target PoC approach faces and the actual early stub points."""
+        """경로별 시점 및 종점 PoC 접속 방향 정보와 실제 초기 Stub 꺾임 궤적 3D 지오메트리를 영속 저장합니다."""
         sql = """
             INSERT INTO "TB_ROUTE_FEATURE_ANCHOR"
             ("PROJECT_ID", "ROUTE_PATH_GUID", "ANCHOR_KIND", "ANCHOR_NAME", "UTILITY_GROUP", "UTILITY", "FACE", "RISE_MM",
-             "CONFIDENCE", "ANCHOR_POINT_JSON", "FIRST_ELBOW_POINT_JSON", "STUB_POINTS_JSON")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
+             "CONFIDENCE", "ANCHOR_POINT_JSON", "FIRST_ELBOW_POINT_JSON", "STUB_POINTS_JSON", "GEOM_3D", "STUB_GEOM_3D")
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, ST_GeomFromText(%s, 0), ST_GeomFromText(%s, 0))
             ON CONFLICT ("PROJECT_ID", "ROUTE_PATH_GUID", "ANCHOR_KIND")
             DO UPDATE SET
                 "ANCHOR_NAME" = EXCLUDED."ANCHOR_NAME",
@@ -1021,6 +1067,8 @@ class DesignFeatureLearner:
                 "ANCHOR_POINT_JSON" = EXCLUDED."ANCHOR_POINT_JSON",
                 "FIRST_ELBOW_POINT_JSON" = EXCLUDED."FIRST_ELBOW_POINT_JSON",
                 "STUB_POINTS_JSON" = EXCLUDED."STUB_POINTS_JSON",
+                "GEOM_3D" = EXCLUDED."GEOM_3D",
+                "STUB_GEOM_3D" = EXCLUDED."STUB_GEOM_3D",
                 "CREATED_AT" = now();
         """
         with self.conn.cursor() as cur:
@@ -1036,8 +1084,15 @@ class DesignFeatureLearner:
                 start_stub = pts[:first_elbow_idx + 2]
                 end_stub = list(reversed(pts[last_elbow_idx:]))
                 meta = r['meta']
-                cur.execute(sql, (self.project_name, r['guid'], 'EQUIP', meta.get('eq_tag'), meta.get('utility_group'), meta.get('utility'), start_face, abs(pts[first_elbow_idx][2] - pts[0][2]), 1.0, json.dumps(pts[0]), json.dumps(pts[first_elbow_idx]), json.dumps(start_stub)))
-                cur.execute(sql, (self.project_name, r['guid'], 'TARGET', meta.get('eq_tag'), meta.get('utility_group'), meta.get('utility'), end_face, abs(pts[-1][2] - pts[last_elbow_idx][2]), 1.0, json.dumps(pts[-1]), json.dumps(pts[last_elbow_idx]), json.dumps(end_stub)))
+                
+                # WKT 계산
+                pt_start_wkt = points_to_wkt_point3d(pts[0])
+                pt_end_wkt = points_to_wkt_point3d(pts[-1])
+                start_stub_wkt = points_to_wkt_linestring3d(start_stub)
+                end_stub_wkt = points_to_wkt_linestring3d(end_stub)
+
+                cur.execute(sql, (self.project_name, r['guid'], 'EQUIP', meta.get('eq_tag'), meta.get('utility_group'), meta.get('utility'), start_face, abs(pts[first_elbow_idx][2] - pts[0][2]), 1.0, json.dumps(pts[0]), json.dumps(pts[first_elbow_idx]), json.dumps(start_stub), pt_start_wkt, start_stub_wkt))
+                cur.execute(sql, (self.project_name, r['guid'], 'TARGET', meta.get('eq_tag'), meta.get('utility_group'), meta.get('utility'), end_face, abs(pts[-1][2] - pts[last_elbow_idx][2]), 1.0, json.dumps(pts[-1]), json.dumps(pts[last_elbow_idx]), json.dumps(end_stub), pt_end_wkt, end_stub_wkt))
         self.conn.commit()
 
     def load_obstacles_for_routes(self):
@@ -1093,8 +1148,8 @@ class DesignFeatureLearner:
             INSERT INTO "TB_ROUTE_FEATURE_OBSTACLE_RELATION"
             ("PROJECT_ID", "ROUTE_PATH_GUID", "OBSTACLE_NAME", "OBSTACLE_TYPE", "OBSTACLE_AXIS", "UTILITY_GROUP", "UTILITY",
              "DIAMETER_MM", "NEAREST_DISTANCE_MM", "REQUIRED_CLEARANCE_MM", "CLEARANCE_MARGIN_MM", "BYPASS_SIDE", "BYPASS_AXIS",
-             "Z_DELTA_NEAR_OBSTACLE_MM", "BEND_COUNT_BEFORE", "BEND_COUNT_AFTER", "EXTRA_LENGTH_RATIO", "RELATION_SCORE")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             "Z_DELTA_NEAR_OBSTACLE_MM", "BEND_COUNT_BEFORE", "BEND_COUNT_AFTER", "EXTRA_LENGTH_RATIO", "RELATION_SCORE", "GEOM_3D")
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 0))
         """
         try:
             with self.conn.cursor() as cur:
@@ -1148,7 +1203,12 @@ class DesignFeatureLearner:
                         bypass_axis = get_dominant_face(pts[seg_index][0] - pts[seg_index - 1][0], pts[seg_index][1] - pts[seg_index - 1][1], pts[seg_index][2] - pts[seg_index - 1][2])
                         z_mid = (obs['minz'] + obs['maxz']) * 0.5
                         relation_score = max(0.0, (required_clearance + 1000.0 - nearest) / (required_clearance + 1000.0))
-                        cur.execute(insert_sql, (self.project_name, r['guid'], obs['name'], obs['obstacle_type'], obs['axis'], meta.get('utility_group'), meta.get('utility'), diameter, nearest, required_clearance, nearest - required_clearance, bypass_side_from_obstacle(near_pt, obs), bypass_axis, near_pt[2] - z_mid, before, after, route_length / straight, relation_score))
+                        
+                        # 최단선 geometry (배관 측 near_pt <-> 장애물 표면 최단접점)
+                        aabb_near_pt = closest_point_on_aabb(near_pt, obs)
+                        radar_wkt = points_to_wkt_linestring3d([near_pt, aabb_near_pt])
+
+                        cur.execute(insert_sql, (self.project_name, r['guid'], obs['name'], obs['obstacle_type'], obs['axis'], meta.get('utility_group'), meta.get('utility'), diameter, nearest, required_clearance, nearest - required_clearance, bypass_side_from_obstacle(near_pt, obs), bypass_axis, near_pt[2] - z_mid, before, after, route_length / straight, relation_score, radar_wkt))
                         count += 1
             self.conn.commit()
             self.obstacle_relation_count = count
@@ -1191,12 +1251,13 @@ class DesignFeatureLearner:
         insert_sql = """
             INSERT INTO "TB_ROUTE_FEATURE_STUB_TEMPLATE"
             ("TEMPLATE_ID", "PROJECT_ID", "STUB_KIND", "ANCHOR_KIND", "MAIN_EQUIPMENT_NAME", "UTILITY_GROUP", "UTILITY", "SIZE", "FACE",
-             "DIR_SEQ_JSON", "SAMPLE_COUNT", "AVG_RISE_MM", "AVG_OFFSET_MM", "AVG_LENGTH_MM", "REPRESENTATIVE_POINTS_JSON", "AVG_FEAT_JSON")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+             "DIR_SEQ_JSON", "SAMPLE_COUNT", "AVG_RISE_MM", "AVG_OFFSET_MM", "AVG_LENGTH_MM", "REPRESENTATIVE_POINTS_JSON", "AVG_FEAT_JSON", "GEOM_3D")
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb, %s::jsonb, ST_GeomFromText(%s, 0))
             ON CONFLICT ("TEMPLATE_ID")
             DO UPDATE SET "SAMPLE_COUNT" = EXCLUDED."SAMPLE_COUNT", "AVG_RISE_MM" = EXCLUDED."AVG_RISE_MM",
                 "AVG_OFFSET_MM" = EXCLUDED."AVG_OFFSET_MM", "AVG_LENGTH_MM" = EXCLUDED."AVG_LENGTH_MM",
                 "REPRESENTATIVE_POINTS_JSON" = EXCLUDED."REPRESENTATIVE_POINTS_JSON", "AVG_FEAT_JSON" = EXCLUDED."AVG_FEAT_JSON",
+                "GEOM_3D" = EXCLUDED."GEOM_3D",
                 "UPDATED_AT" = now();
         """
         def as_json(value):
@@ -1207,12 +1268,24 @@ class DesignFeatureLearner:
             if rows:
                 batch_data = []
                 for row in rows:
+                    # 대표 Stub 꺾임점 좌표 배열을 로드하여 WKT 3D LineString으로 변환
+                    pts_val = row['REPRESENTATIVE_STUB_POINTS']
+                    pts_list = []
+                    if isinstance(pts_val, str):
+                        try:
+                            pts_list = json.loads(pts_val)
+                        except Exception:
+                            pts_list = []
+                    elif isinstance(pts_val, list):
+                        pts_list = pts_val
+                    stub_wkt = points_to_wkt_linestring3d(pts_list)
+
                     batch_data.append((
                         row['TEMPLATE_ID'], self.project_name, row['STUB_KIND'], row['ANCHOR_KIND'],
                         row['MAIN_EQUIPMENT_NAME'], row['UTILITY_GROUP'], row['UTILITY'], row['SIZE'], row['FACE'],
                         json.dumps([x for x in str(row['DIR_SEQ'] or '').split(',') if x]),
                         row['SAMPLE_COUNT'], row['AVG_RISE_MM'], row['AVG_OFFSET_MM'], row['AVG_STUB_LENGTH_MM'],
-                        as_json(row['REPRESENTATIVE_STUB_POINTS']), as_json(row['AVG_FEAT_JSON'])
+                        as_json(row['REPRESENTATIVE_STUB_POINTS']), as_json(row['AVG_FEAT_JSON']), stub_wkt
                     ))
                 psycopg2.extras.execute_batch(cur, insert_sql, batch_data, page_size=200)
         self.conn.commit()
@@ -1228,15 +1301,19 @@ class DesignFeatureLearner:
         sql = """
             INSERT INTO "TB_ROUTE_FEATURE_BUNDLE_TEMPLATE"
             ("PROJECT_ID", "BUNDLE_ID", "UTILITY_GROUP", "UTILITY", "ROUTE_COUNT", "PREFERRED_RACK_ZS", "TRUNK_AXIS",
-             "TRUNK_CENTERLINE_JSON", "MEMBER_ROUTE_GUIDS_JSON")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+             "TRUNK_CENTERLINE_JSON", "MEMBER_ROUTE_GUIDS_JSON", "GEOM_3D")
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, ST_GeomFromText(%s, 0))
             ON CONFLICT ("PROJECT_ID", "BUNDLE_ID")
             DO UPDATE SET "ROUTE_COUNT" = EXCLUDED."ROUTE_COUNT", "PREFERRED_RACK_ZS" = EXCLUDED."PREFERRED_RACK_ZS",
                 "TRUNK_AXIS" = EXCLUDED."TRUNK_AXIS", "TRUNK_CENTERLINE_JSON" = EXCLUDED."TRUNK_CENTERLINE_JSON",
-                "MEMBER_ROUTE_GUIDS_JSON" = EXCLUDED."MEMBER_ROUTE_GUIDS_JSON", "UPDATED_AT" = now();
+                "MEMBER_ROUTE_GUIDS_JSON" = EXCLUDED."MEMBER_ROUTE_GUIDS_JSON", 
+                "GEOM_3D" = EXCLUDED."GEOM_3D",
+                "UPDATED_AT" = now();
         """
+        # 공용 척추선(backbone) 좌표 리스트를 WKT 3D LineString으로 변환
+        spine_wkt = points_to_wkt_linestring3d(spine_pts)
         with self.conn.cursor() as cur:
-            cur.execute(sql, (self.project_name, bundle_id, grp, grp, len(r_list), rack_zs, trunk_axis, json.dumps(spine_pts), json.dumps(route_guids)))
+            cur.execute(sql, (self.project_name, bundle_id, grp, grp, len(r_list), rack_zs, trunk_axis, json.dumps(spine_pts), json.dumps(route_guids), spine_wkt))
         self.conn.commit()
         self.bundle_template_count += 1
 
@@ -1431,6 +1508,14 @@ class DesignFeatureLearner:
         t5 = time.time()
         print(f"     * 장애물-배관 최단 거리 및 이격Margin 학습 완료 (소요시간: {t5 - t4:.2f}초)")
         
+        # 수직다발배관 입상 특징점 추출 및 저장 진행
+        if HAS_VERTICAL_GROUP and vertical_group:
+            vertical_group.extract_and_save_vertical_groups(self.conn, self.project_name, self.routes)
+            t_vert = time.time()
+            print(f"     * 수직다발배관 입상 특징점 추출 및 적재 완료 (소요시간: {t_vert - t5:.2f}초)")
+        else:
+            t_vert = t5
+            
         print("3. [특징 추출 및 학습] 유틸리티 그룹별 특징점 통계 분석 실행...")
         
         # 유틸리티 그룹별로 분류
