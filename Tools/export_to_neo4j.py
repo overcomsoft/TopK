@@ -3,6 +3,12 @@
 """
 export_to_neo4j.py
 
+# 기본 실행 (PostgreSQL 설정 자동 로드 및 비밀번호 자동 프로빙)
+python ./Tools/export_to_neo4j.py --project "CHILLER 002"
+# 만약 Neo4j 설치 시 비밀번호를 커스텀 설정한 경우
+python ./Tools/export_to_neo4j.py --project "CHILLER 002" --password "dinno3040"
+
+
 PostgreSQL에 적재된 다발배관(수평/수직), 공간(Space), 연결 패턴(Group Pattern), 
 장비 접속점(Anchor) 등의 설계 특징점 데이터를 Neo4j 지식그래프로 이관하는 자동화 파이프라인 스크립트입니다.
 """
@@ -123,30 +129,32 @@ def main():
 
             # (C) 장비 접속 앵커 정보 로드
             cur.execute("""
-                SELECT "ROUTE_PATH_GUID", "EQUIPMENT_NAME", "ANCHOR_PORT_NAME", "ANCHOR_PORT_DIRECTION"
+                SELECT "ROUTE_PATH_GUID", "ANCHOR_NAME", "ANCHOR_KIND", "FACE"
                 FROM "TB_ROUTE_FEATURE_ANCHOR"
-                WHERE "PROJECT_ID" = %s AND "EQUIPMENT_NAME" IS NOT NULL;
+                WHERE "PROJECT_ID" = %s AND "ANCHOR_NAME" IS NOT NULL;
             """, (args.project,))
             anchors = []
             for r in cur.fetchall():
                 anchors.append({
-                    "route_guid": r[0], "eq_name": r[1], "port_name": r[2], "direction": r[3]
+                    "route_guid": r[0], "eq_name": r[1], "anchor_kind": r[2], "direction": r[3]
                 })
             print(f"  * 장비 접속 앵커 데이터 로드 완료: {len(anchors)}개")
 
             # (D) 그룹 주행 패턴 (Corridor Pattern) 정보 로드
+            eq_names = set([b["eq_name"] for b in bundles] + [a["eq_name"] for a in anchors])
             cur.execute("""
-                SELECT "GROUP_ID", "EQUIPMENT_TAG", "UTILITY_GROUP", "MEMBER_COUNT", "MEMBER_GUIDS_JSON", "TRUNK_AXIS"
-                FROM "TB_ROUTE_GROUP_PATTERN"
-                WHERE "PROJECT_ID" = %s;
-            """, (args.project,))
+                SELECT "GROUP_ID", "TAG_GROUP_NM", "UTILITY", "N_MEMBERS", "MEMBER_GUIDS", "PATTERN_SEQ"
+                FROM "TB_ROUTE_GROUP_PATTERN";
+            """)
             group_patterns = []
             for r in cur.fetchall():
-                guids = r[4] if isinstance(r[4], list) else json.loads(r[4] or "[]")
-                group_patterns.append({
-                    "group_id": str(r[0]), "eq_tag": r[1], "utility": r[2], "count": int(r[3] or 0),
-                    "guids": guids, "axis": r[5]
-                })
+                tag_group_nm = r[1]
+                if tag_group_nm in eq_names or args.project in tag_group_nm:
+                    guids = r[4] if isinstance(r[4], list) else json.loads(r[4] or "[]")
+                    group_patterns.append({
+                        "group_id": str(r[0]), "eq_tag": tag_group_nm, "utility": r[2], "count": int(r[3] or 0),
+                        "guids": guids, "pattern_seq": r[5]
+                    })
             print(f"  * 그룹 주행 패턴 데이터 로드 완료: {len(group_patterns)}개")
 
         # 4. Neo4j 지식그래프 적재
@@ -208,7 +216,7 @@ def main():
                     MERGE (r:Route {guid: r_guid})
                     ON CREATE SET r.utility = $utility
                     MERGE (r)-[:MEMBER_OF]->(bg)
-                """, **b)
+                """, project_id=args.project, **b)
 
             # 장비 접속 앵커 관계망 생성
             print("  * Route - Equipment 간 앵커 포트 연결 관계(CONNECTED_TO) 설정 중...")
@@ -217,7 +225,7 @@ def main():
                     MATCH (r:Route {guid: $route_guid})
                     MATCH (e:Equipment {name: $eq_name})
                     MERGE (r)-[c:CONNECTED_TO]->(e)
-                    SET c.port = $port_name, c.direction = $direction
+                    SET c.kind = $anchor_kind, c.direction = $direction
                 """, **a)
 
             # 그룹 주행 패턴 (Corridor Pattern) 적재
@@ -228,7 +236,7 @@ def main():
                     CREATE (gp:CorridorPattern {
                         id: $group_id,
                         utility: $utility,
-                        axis: $axis,
+                        pattern_seq: $pattern_seq,
                         route_count: $count
                     })
                     CREATE (gp)-[:BELONGS_TO]->(p)
@@ -244,7 +252,7 @@ def main():
                 """, project_id=args.project, **gp)
 
         print("\n=======================================================")
-        print("🎉 Neo4j 지식그래프 이관 및 적재가 성공적으로 완료되었습니다!")
+        print("[SUCCESS] Neo4j 지식그래프 이관 및 적재가 성공적으로 완료되었습니다!")
         print("=======================================================")
 
     finally:
