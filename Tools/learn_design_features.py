@@ -590,6 +590,13 @@ class DesignFeatureLearner:
         self.obstacle_relation_count = 0
         self.bundle_template_count = 0
         self.pgvector_enabled = False
+        try:
+            with conn.cursor() as check_cur:
+                check_cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector';")
+                if check_cur.fetchone():
+                    self.pgvector_enabled = True
+        except Exception:
+            pass
 
     def prepare_tables(self):
         """
@@ -1388,6 +1395,24 @@ class DesignFeatureLearner:
         else:
             BBOX_MAX_X = BBOX_MAX_Y = BBOX_MAX_Z = DISPLACEMENT_MAX = TOTAL_LENGTH_MAX = 1.0
         
+        # Query obstacle relations for the project to calculate Env Cost (Index 22~24)
+        obs_relations = defaultdict(list)
+        relation_sql = """
+            SELECT "ROUTE_PATH_GUID", "CLEARANCE_MARGIN_MM", "Z_DELTA_NEAR_OBSTACLE_MM"
+            FROM "TB_ROUTE_FEATURE_OBSTACLE_RELATION"
+            WHERE "PROJECT_ID" = %s
+        """
+        try:
+            with self.conn.cursor() as rel_cur:
+                rel_cur.execute(relation_sql, (self.project_name,))
+                for row in rel_cur.fetchall():
+                    guid = row[0].strip()
+                    margin = row[1]
+                    z_delta = row[2]
+                    obs_relations[guid].append((margin, z_delta))
+        except Exception as rel_ex:
+            print(f"   - [Warning] Failed to fetch obstacle relations for vector creation: {rel_ex}")
+
         count = 0
         with self.conn.cursor() as cur:
             for r in self.routes:
@@ -1446,6 +1471,67 @@ class DesignFeatureLearner:
                         
                 vec[21] = max(-1.0, min(1.0, total_len / TOTAL_LENGTH_MAX))
                 
+                # Env Cost (Index 22 ~ 24)
+                guid = r['guid']
+                r_relations = obs_relations.get(guid, [])
+                if r_relations:
+                    margins = [rel[0] for rel in r_relations if rel[0] is not None]
+                    min_margin = min(margins) if margins else 300.0
+                    e1 = max(0.0, min(1.0, (300.0 - min_margin) / 300.0))
+                else:
+                    e1 = 0.0
+                    
+                straight = dist_3d(p0, pn)
+                straight_safe = straight if straight > 1e-9 else 1.0
+                overhead = (total_len / straight_safe) - 1.0
+                e2 = max(0.0, min(1.0, overhead / 0.5))
+                
+                if r_relations:
+                    z_deltas = [abs(rel[1]) for rel in r_relations if rel[1] is not None]
+                    max_z_delta = max(z_deltas) if z_deltas else 0.0
+                    e3 = max(0.0, min(1.0, max_z_delta / 1000.0))
+                else:
+                    e3 = 0.0
+                    
+                vec[22] = e1
+                vec[23] = e2
+                vec[24] = e3
+                
+                # Arrow Pattern (Index 25 ~ 29)
+                len_x = 0.0
+                len_y = 0.0
+                len_z = 0.0
+                for i in range(1, len(pts)):
+                    pt1 = pts[i-1]
+                    pt2 = pts[i]
+                    dx_seg = abs(pt2[0] - pt1[0])
+                    dy_seg = abs(pt2[1] - pt1[1])
+                    dz_seg = abs(pt2[2] - pt1[2])
+                    max_diff = max(dx_seg, dy_seg, dz_seg)
+                    seg_dist = dist_3d(pt1, pt2)
+                    if max_diff < 1e-6:
+                        continue
+                    if dx_seg == max_diff:
+                        len_x += seg_dist
+                    elif dy_seg == max_diff:
+                        len_y += seg_dist
+                    else:
+                        len_z += seg_dist
+                        
+                total_len_safe = total_len if total_len > 1e-9 else 1.0
+                rx = len_x / total_len_safe
+                ry = len_y / total_len_safe
+                rz = len_z / total_len_safe
+                
+                bend_count = len(route_bends(pts))
+                rbend = max(0.0, min(1.0, bend_count / 10.0))
+                
+                vec[25] = rx
+                vec[26] = ry
+                vec[27] = rz
+                vec[28] = rbend
+                vec[29] = 0.0
+                
                 for j in range(30):
                     vec[j] *= scale_factors[j]
                     
@@ -1491,10 +1577,15 @@ class DesignFeatureLearner:
         t1 = time.time()
         print(f"     * 개별 경로 3D 지오메트리 저장 완료 (소요시간: {t1 - t0:.2f}초)")
         
+        # 장애물-배관 최단 거리 분석 (유사설계 특징 벡터 생성 시 Env Cost에 활용하기 위해 먼저 실행)
+        self.save_obstacle_relations()
+        t_obs = time.time()
+        print(f"     * 장애물-배관 최단 거리 및 이격Margin 학습 완료 (소요시간: {t_obs - t1:.2f}초)")
+        
         # 30D 유사설계 특징 벡터 저장 진행
         self.save_route_similarity_vectors()
         t2 = time.time()
-        print(f"     * 유사 설계 특징 벡터 생성/적재 완료 (소요시간: {t2 - t1:.2f}초)")
+        print(f"     * 유사 설계 특징 벡터 생성/적재 완료 (소요시간: {t2 - t_obs:.2f}초)")
         
         self.save_anchor_features()
         t3 = time.time()
@@ -1504,17 +1595,13 @@ class DesignFeatureLearner:
         t4 = time.time()
         print(f"     * Stub 템플릿 추출 및 학습 완료 (소요시간: {t4 - t3:.2f}초)")
         
-        self.save_obstacle_relations()
-        t5 = time.time()
-        print(f"     * 장애물-배관 최단 거리 및 이격Margin 학습 완료 (소요시간: {t5 - t4:.2f}초)")
-        
         # 수직다발배관 입상 특징점 추출 및 저장 진행
         if HAS_VERTICAL_GROUP and vertical_group:
             vertical_group.extract_and_save_vertical_groups(self.conn, self.project_name, self.routes)
             t_vert = time.time()
-            print(f"     * 수직다발배관 입상 특징점 추출 및 적재 완료 (소요시간: {t_vert - t5:.2f}초)")
+            print(f"     * 수직다발배관 입상 특징점 추출 및 적재 완료 (소요시간: {t_vert - t4:.2f}초)")
         else:
-            t_vert = t5
+            t_vert = t4
             
         print("3. [특징 추출 및 학습] 유틸리티 그룹별 특징점 통계 분석 실행...")
         
