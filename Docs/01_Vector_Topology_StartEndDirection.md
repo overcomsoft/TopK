@@ -1,78 +1,125 @@
-# [설계 개발 문서] 배관 시점 및 종점 진입 방향(Start/End Direction) 특징 벡터 생성 상세 규격서
+# [설계 개발 문서] 01. Start/End Direction 토폴로지 벡터
 
-* **문서명**: 배관 시점 및 종점 진입 방향(Start/End Direction) 특징 벡터 생성 상세 규격서
-* **생성일자**: 2026년 6월 19일
-* **작성주체**: AI 자동 라우팅 엔진 개발팀
+## 업데이트 내용 및 일시
 
----
-
-## 1. 개요 및 분석 목적
-
-배관의 시점(시작점)과 종점(끝점)은 장비 노즐(Nozzle) 혹은 다른 목적지 배관과의 접속을 형성하는 가장 핵심적인 영역입니다. 
-자동 라우터가 기존 설계 데이터를 모방할 때, 장비 연결 단말 부근에서 배관이 어느 평면 방향(예: 수직 위 방향, 수평 X 방향 등)으로 진입/진출했는지 파악하여 유사한 도킹 각도의 설계 경로를 필터링하는 데 목적이 있습니다.
-
-본 문서는 30차원 특징 벡터(30D Feature Vector) 중 **0 ~ 2번 차원(Start Direction)** 및 **3 ~ 5번 차원(End Direction)**의 인코딩 상세 매핑과 연산 알고리즘을 정의합니다.
+- **업데이트 일시**: 2026-06-24 16:07:56 KST
+- **업데이트 대상 코드**: `D:\DINNO\DEV\AI-AutoRouting\TopKGen\Tools\Extract_Design_Pattern.py`
+- **공통 업데이트 내용**:
+  - 현재 `save_route_similarity_vectors()` 구현 기준으로 30D 특징 벡터 차원 정의를 재정리했습니다.
+  - `FEATURE_VECTOR` pgvector 저장과 `FEATURE_VECTOR_JSON` jsonb 저장 구조를 문서에 반영했습니다.
+  - 기존 DB에 `FEATURE_VECTOR_JSON` 컬럼이 없을 때 `prepare_tables()`에서 자동 마이그레이션하는 내용을 추가했습니다.
+  - 장애물 관계 특징은 `save_obstacle_relations()`가 먼저 계산되고, 이후 30D 벡터의 env cost 차원에서 재사용된다는 실행 순서를 명확히 했습니다.
 
 ---
 
-## 2. 전체 흐름도 (Overall Workflow)
 
-```mermaid
-flowchart TD
-    Raw["배관 좌표 데이터 수집<br>(TB_ROUTE_PATH / SEGMENTS)"] 
-    --> Snap["1. 미세 단편 좌표 스냅 보정"]
-    --> Dir["2. 장비(Source) 위치 대비 방향성 보정 (pts.reverse())"]
-    --> Extract["3. 시점 인접 벡터(p1-p0) 및 종점 인접 벡터(pn-1-pn) 추출"]
-    --> Norm["4. 유클리드 노름 정규화 (단위 방향 벡터)"]
-    --> ScaleL2["5. 가중치 스케일링 (W=0.20) & L2 정규화"]
-    --> DB[("6. 특징 벡터 테이블 적재 (TB_ROUTE_FEATURE_VECTOR)")]
-```
+## 1. 목적
 
----
+Start/End Direction은 기존 배관이 시작 PoC에서 어떤 방향으로 출발하고, 종단 PoC에 어떤 방향으로 접근하는지를 나타내는 토폴로지 특징입니다. 자동경로 탐색에서는 초기 확장 방향과 종단 접근 방향이 설계 품질에 큰 영향을 주므로, 30D 벡터에서 가장 높은 가중치 그룹 중 하나로 사용합니다.
 
-## 3. 원본 데이터 (Source Data Definition)
+| 차원 | 의미 | 값 범위 | 가중치 그룹 |
+|---:|---|---|---|
+| 0 | 시작 방향 X 성분 | -1~1 | `start_topology` |
+| 1 | 시작 방향 Y 성분 | -1~1 | `start_topology` |
+| 2 | 시작 방향 Z 성분 | -1~1 | `start_topology` |
+| 3 | 종단 접근 방향 X 성분 | -1~1 | `end_topology` |
+| 4 | 종단 접근 방향 Y 성분 | -1~1 | `end_topology` |
+| 5 | 종단 접근 방향 Z 성분 | -1~1 | `end_topology` |
 
-* **원천 테이블**: 
-  - `TB_ROUTE_PATH` (배관 경로 기본 메타 정보)
-  - `TB_ROUTE_SEGMENTS` / `TB_ROUTE_SEGMENT_DETAIL` (경로상 모든 단위 세그먼트 좌표 정보)
-* **주요 참조 필드**:
-  - `ROUTE_PATH_GUID` (text): 배관 식별자
-  - `SOURCE_POSX/Y/Z` (double precision): 배관 시작부 장비/접속점 기준 위치
-  - `FROM_POSX/Y/Z` 및 `TO_POSX/Y/Z` (double precision): 개별 세그먼트들의 시/종점 좌표
+## 2. 입력 데이터
 
----
+- `TB_ROUTE_PATH`: `SOURCE_POSX/Y/Z`, `TARGET_POSX/Y/Z`, route 메타데이터
+- `TB_ROUTE_SEGMENTS`, `TB_ROUTE_SEGMENT_DETAIL`: route 중심선 polyline 복원용 segment 좌표
 
-## 4. 핵심 알고리즘 (Core Algorithms)
-
-### ① 배관 방향성(Directionality) 교정 알고리즘
-배관 설계 데이터 수집 시, 모델러나 추출 쿼리에 따라 시작점과 끝점이 장비의 실제 흐름 방향과 역방향으로 엉켜 적재되는 경우가 많습니다. 이를 일관되게 학습하기 위해 Source 장비 포트 좌표(`SOURCE_POS`)와 배관 양 끝점의 거리를 계산하여 시작점을 재정렬합니다.
+`load_data()`는 route별 segment detail을 `ROUTE_PATH_GUID`, segment order, detail order 순서로 정렬하고, source PoC와 polyline 양 끝점의 거리를 비교하여 방향을 보정합니다.
 
 ```python
-src_pos = (meta['SOURCE_POSX'], meta['SOURCE_POSY'], meta['SOURCE_POSZ'])
-dist_to_start = dist_3d(src_pos, pts[0])
-dist_to_end = dist_3d(src_pos, pts[-1])
-
-# 배관 끝점이 장비 포트에 더 가까우면 역방향으로 추출된 것이므로 정점 순서를 뒤집음
 if dist_to_end < dist_to_start:
     pts.reverse()
 ```
 
-### ② 시/종점 단위 방향 벡터 연산 공식
-* **Start Direction (Index 0~2)**: 시작점 $p_0$에서 첫 꺾임점(또는 첫 세그먼트 종점) $p_1$으로 향하는 3차원 차이 벡터를 구하고, 이를 크기 1의 단위 벡터로 변환합니다.
-  $$\vec{v}_{start} = \frac{p_1 - p_0}{\|p_1 - p_0\|}$$
-* **End Direction (Index 3~5)**: 최종 종점 $p_n$에서 직전 꺾임점 $p_{n-1}$로 향하는 역진입 3차원 차이 벡터를 구하고, 크기 1의 단위 벡터로 변환합니다.
-  $$\vec{v}_{end} = \frac{p_{n-1} - p_n}{\|p_{n-1} - p_n\|}$$
+이 보정 이후 `pts[0]`은 source PoC 쪽, `pts[-1]`은 target PoC 쪽으로 해석됩니다.
 
----
+## 3. 핵심 알고리즘
 
-## 5. 생성 데이터 및 저장 사양 (Target Spec)
+### 3.1 Start Direction
 
-### ① 30D 특징 벡터 매핑 영역
-* **Index 0 ~ 2**: Start Direction $[v_{sx}, v_{sy}, v_{sz}]$
-* **Index 3 ~ 5**: End Direction $[v_{ex}, v_{ey}, v_{ez}]$
+```python
+v_start = (pts[1][0] - p0[0], pts[1][1] - p0[1], pts[1][2] - p0[2])
+vec[0] = v_start[0] / v_start_safe
+vec[1] = v_start[1] / v_start_safe
+vec[2] = v_start[2] / v_start_safe
+```
 
-### ② 가중치 적용 및 L2 정규화 (Final Normalization)
-1. **가중치 스케일링**: Start/End 방향은 30차원 피처 공간에서 각각 **20%**의 높은 가중치($W=0.20$)를 가집니다.
-   $$S_{topo} = \sqrt{\frac{0.20 \times 30.0}{3}} \approx 1.4142$$
-   - 계산된 단위 방향 벡터에 스케일 팩터인 $1.4142$를 각각 곱해 줍니다.
-2. **L2 정규화**: 전체 30차원 특징 벡터의 유클리디안 크기가 `1.0`이 되도록 나눈 후 최종 DB의 `FEATURE_VECTOR` 컬럼에 적재합니다.
+수식:
+
+```text
+v_start = normalize(p1 - p0)
+```
+
+### 3.2 End Direction
+
+```python
+v_end = (pts[-2][0] - pn[0], pts[-2][1] - pn[1], pts[-2][2] - pn[2])
+vec[3] = v_end[0] / v_end_safe
+vec[4] = v_end[1] / v_end_safe
+vec[5] = v_end[2] / v_end_safe
+```
+
+수식:
+
+```text
+v_end = normalize(p(n-1) - pn)
+```
+
+End Direction은 target PoC에서 route 내부를 바라보는 방향입니다. 신규 query vector 생성 시에도 같은 부호 규칙을 사용해야 합니다.
+
+## 4. 가중치와 정규화
+
+`WEIGHT_MAP`에서 `start_topology`와 `end_topology`는 각각 0.20 가중치를 갖습니다. 각 그룹은 3차원이므로 scale factor는 다음과 같습니다.
+
+```text
+S = sqrt((0.20 * 30) / 3) = sqrt(2) ~= 1.4142
+```
+
+영역별 scale factor 적용 후 전체 30D 벡터를 L2 정규화하여 `FEATURE_VECTOR`와 `FEATURE_VECTOR_JSON`에 저장합니다.
+
+## 공통 저장 구조
+
+30D 벡터는 `TB_ROUTE_FEATURE_VECTOR`에 저장됩니다.
+
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| `ROUTE_PATH_GUID` | text | 기존 설계 route 식별자 |
+| `PROCESS_NAME` | text | 공정명 |
+| `EQUIPMENT_NAME` | text | 장비명 또는 프로젝트 범위 식별자 |
+| `UTILITY_GROUP` | text | 유틸리티 그룹 |
+| `UTILITY` | text | 유틸리티 코드 |
+| `SIZE` | text | 배관 사이즈 |
+| `DIRECTION_PATTERN` | text | `R`, `H`, `D` 기반 방향 패턴 문자열 |
+| `TOTAL_LENGTH_MM` | double precision | route polyline 총 길이 |
+| `STEP_COUNT` | integer | route segment step 수 |
+| `START_POSX/Y/Z` | double precision | 시작점 좌표 |
+| `END_POSX/Y/Z` | double precision | 종단점 좌표 |
+| `FEATURE_VECTOR` | vector(30) | pgvector Top-K 유사 설계 검색용 벡터 |
+| `FEATURE_VECTOR_JSON` | jsonb | 동일 벡터의 검증/분석용 JSON 배열 |
+
+기존 DB에 `FEATURE_VECTOR_JSON`이 없으면 `prepare_tables()`에서 다음 DDL을 자동 수행합니다.
+
+```sql
+ALTER TABLE "TB_ROUTE_FEATURE_VECTOR"
+ADD COLUMN "FEATURE_VECTOR_JSON" jsonb;
+```
+
+
+## 5. 자동경로 탐색 활용
+
+- 시작 PoC에서 후보 확장 방향을 정할 때 Top-K 기존 설계의 0~2번 차원을 우선 참고합니다.
+- 종단 PoC 접근부에서는 3~5번 차원을 이용해 target으로 접근하는 방향 후보를 제한하거나 가중합니다.
+- Routing3D 탐색 중 같은 비용의 후보가 있으면 Start/End 방향이 Top-K 방향과 유사한 후보를 우선 확장합니다.
+
+## 6. 검증 포인트
+
+- `dist(SOURCE_POS, pts[0]) <= dist(SOURCE_POS, pts[-1])`인지 확인합니다.
+- `FEATURE_VECTOR_JSON` 길이가 30인지 확인합니다.
+- 방향이 반대인 route가 Top-K 결과에서 낮은 순위로 밀리는지 확인합니다.

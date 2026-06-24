@@ -1,68 +1,137 @@
-# [설계 개발 문서] 배관 주행 방향 패턴(Arrow Pattern) 특징 벡터 생성 상세 규격서
+# [설계 개발 문서] 07. Arrow Pattern / Direction Statistics 벡터
 
-* **문서명**: 배관 주행 방향 패턴(Arrow Pattern) 특징 벡터 생성 상세 규격서
-* **생성일자**: 2026년 6월 19일
-* **작성주체**: AI 자동 라우팅 엔진 개발팀
+## 업데이트 내용 및 일시
 
----
-
-## 1. 개요 및 분석 목적
-
-배관 경로의 주행 특성은 단순히 공간의 시작-종료점이나 Bounding Box뿐만 아니라, **배관이 직진 주행하다가 어떠한 순서와 빈도로 코너를 꺾으며 목적지로 향했는지에 대한 통계 정보**를 가집니다.
-예를 들어, X축 주행 비중이 높고 Z축 변화는 없는 배관인지, 혹은 상하 굴곡 주행(Z축 이동)이 잦은 복잡한 배관인지에 대한 축별 주행 빈도 요약을 통해 형태적 유사도를 구별하는 데 목적이 있습니다.
-
-본 문서는 30차원 특징 벡터(30D Feature Vector) 중 **25 ~ 29번 차원(Arrow Pattern)**의 인코딩 상세 매핑과 연산 알고리즘을 정의합니다.
+- **업데이트 일시**: 2026-06-24 16:07:56 KST
+- **업데이트 대상 코드**: `D:\DINNO\DEV\AI-AutoRouting\TopKGen\Tools\Extract_Design_Pattern.py`
+- **공통 업데이트 내용**:
+  - 현재 `save_route_similarity_vectors()` 구현 기준으로 30D 특징 벡터 차원 정의를 재정리했습니다.
+  - `FEATURE_VECTOR` pgvector 저장과 `FEATURE_VECTOR_JSON` jsonb 저장 구조를 문서에 반영했습니다.
+  - 기존 DB에 `FEATURE_VECTOR_JSON` 컬럼이 없을 때 `prepare_tables()`에서 자동 마이그레이션하는 내용을 추가했습니다.
+  - 장애물 관계 특징은 `save_obstacle_relations()`가 먼저 계산되고, 이후 30D 벡터의 env cost 차원에서 재사용된다는 실행 순서를 명확히 했습니다.
 
 ---
 
-## 2. 전체 흐름도 (Overall Workflow)
 
-```mermaid
-flowchart TD
-    Raw["배관 세그먼트 좌표 수집<br>(TB_ROUTE_SEGMENTS)"] 
-    --> AxisDetect["1. 각 세그먼트의 길이 가중치가 반영된 주행 축(X, Y, Z) 분류"]
-    --> Stats["2. X, Y, Z 및 Bend 꺾임 빈도/누적 비율 산출"]
-    --> Padding["3. 학습기 단계에 따른 5차원 실수 벡터(25 ~ 29번) 패딩 및 매핑"]
-    --> ScaleL2["4. 가중치 스케일링 (W=0.15) & L2 정규화"]
-    --> DB[("5. 특징 벡터 테이블 적재 (TB_ROUTE_FEATURE_VECTOR)")]
+## 1. 목적
+
+Arrow Pattern / Direction Statistics는 route 전체가 X/Y/Z 중 어느 축을 중심으로 주행했는지와 bend가 얼마나 많았는지를 요약합니다. 이는 배관의 전반적인 주행 스타일을 표현하는 통계 특징입니다.
+
+| 차원 | 의미 | 값 범위 |
+|---:|---|---|
+| 25 | X축 지배 segment 길이 비율 | 0~1 |
+| 26 | Y축 지배 segment 길이 비율 | 0~1 |
+| 27 | Z축 지배 segment 길이 비율 | 0~1 |
+| 28 | bend count 정규화 값 | 0~1 |
+| 29 | reserved | 현재 0.0 |
+
+## 2. 입력 데이터
+
+- `pts`: source 기준으로 방향 보정된 route polyline
+- `total_len`: route 전체 3D 길이
+- `route_bends(pts)`: 지배 축이 바뀌는 지점 목록
+
+## 3. 축별 주행 비율 계산
+
+각 segment에서 `abs(dx)`, `abs(dy)`, `abs(dz)` 중 가장 큰 축을 지배 축으로 선택하고, 해당 segment 길이를 축별 누적 길이에 더합니다.
+
+```python
+for i in range(1, len(pts)):
+    dx_seg = abs(pt2[0] - pt1[0])
+    dy_seg = abs(pt2[1] - pt1[1])
+    dz_seg = abs(pt2[2] - pt1[2])
+    max_diff = max(dx_seg, dy_seg, dz_seg)
+    seg_dist = dist_3d(pt1, pt2)
+
+    if dx_seg == max_diff:
+        len_x += seg_dist
+    elif dy_seg == max_diff:
+        len_y += seg_dist
+    else:
+        len_z += seg_dist
 ```
 
----
+최종 비율:
 
-## 3. 원본 데이터 (Source Data Definition)
+```python
+rx = len_x / total_len_safe
+ry = len_y / total_len_safe
+rz = len_z / total_len_safe
 
-* **원천 테이블**:
-  - `TB_ROUTE_SEGMENTS` (배관 경로 세그먼트 상세 3D 좌표 테이블)
-* **주요 참조 필드**:
-  - `ROUTE_PATH_GUID` (text): 배관 식별자
-  - `FROM_POSX/Y/Z` 및 `TO_POSX/Y/Z` (double precision): 세그먼트의 양끝 물리 좌표 (mm)
+vec[25] = rx
+vec[26] = ry
+vec[27] = rz
+```
 
----
+## 4. Bend count 계산
 
-## 4. 핵심 알고리즘 (Core Algorithms)
+`route_bends()`는 각 segment의 지배 축을 `X`, `Y`, `Z` 중 하나로 보고, 이전 segment와 축이 달라지는 지점을 bend로 기록합니다.
 
-### ① 축 주행 비율 및 꺾임 통계 연산
-각 배관 경로 $R$에 대하여 세그먼트들의 벡터를 판별하여 X, Y, Z축 방향 주행 길이 비율 및 꺾임 빈도를 산출합니다.
-* **X축 주행 비율**: $R_x = \frac{\sum L_{X\text{-segments}}}{L_{total}}$
-* **Y축 주행 비율**: $R_y = \frac{\sum L_{Y\text{-segments}}}{L_{total}}$
-* **Z축 주행 비율**: $R_z = \frac{\sum L_{Z\text{-segments}}}{L_{total}}$
-* **꺾임 가혹도 (Bend Intensity)**: $R_{bend} = \frac{\text{Bend Count}}{L_{total}} \times 1000.0$
+```python
+bend_count = len(route_bends(pts))
+rbend = max(0.0, min(1.0, bend_count / 10.0))
+vec[28] = rbend
+vec[29] = 0.0
+```
 
-이 값들은 배관의 물리적 고유 방향 특성을 실수 스펙으로 인코딩하게 됩니다.
+bend 10개 이상은 1.0으로 saturate됩니다.
 
-### ② 학습기 단계별 연산 적용 (0.0 패딩 및 확장성)
-* **현재 학습 엔진 (PoC Phase)**: 쿼리 시점과 1차 벡터 검색 시 복잡성 제거를 위해 25~29번 성분은 `0.0`으로 패딩 처리합니다.
-* **향후 확장 단계 (Production Phase)**: 상기 식에 의해 도출된 $[R_x, R_y, R_z, R_{bend}, 0.0]$ 통계량이 특징 벡터 25~29번 인덱스에 직접 대입되어 코사인 거리 공간을 정교하게 확장시킵니다.
+## 5. 방향 패턴 문자열
 
----
+DB에는 30D vector 외에 `DIRECTION_PATTERN` 문자열도 저장됩니다. `compute_direction_pattern()`은 segment 단위로 다음 코드를 만듭니다.
 
-## 5. 생성 데이터 및 저장 사양 (Target Spec)
+| 코드 | 의미 | 기준 |
+|---|---|---|
+| `R` | 수직 상승/하강 성격이 강함 | `abs(uz) >= 0.8` |
+| `H` | 수평 주행 성격이 강함 | horizontal ratio `>= 0.8` |
+| `D` | 대각/복합 방향 | 그 외 |
 
-### ① 30D 특징 벡터 매핑 영역
-* **Index 25 ~ 29**: Arrow Pattern $[e_{p0}, e_{p1}, e_{p2}, e_{p3}, e_{p4}]$ (현재 0.0으로 고정 패딩)
+연속 중복 코드는 하나로 압축되어 `H-R-H` 같은 패턴 문자열로 저장됩니다.
 
-### ② 가중치 적용 및 L2 정규화 (Final Normalization)
-1. **가중치 스케일링**: 방향 패턴 통계 영역은 전체 30차원 피처 공간에서 **15%**의 가중치($W=0.15$)를 가지며 5차원($D=5$) 영역을 점유합니다.
-   $$S_{pat} = \sqrt{\frac{0.15 \times 30.0}{5}} \approx 0.9487$$
-   - 각 성분 값에 $0.9487$ 스케일 상수를 곱해 줍니다.
-2. **L2 정규화**: 전체 30차원 특징 벡터의 유클리디안 크기가 `1.0`이 되도록 나눈 후 최종 DB의 `FEATURE_VECTOR` 컬럼에 적재합니다.
+## 6. 가중치와 정규화
+
+`arrow_pattern` 그룹은 25~29번 5차원이며 가중치 0.15를 갖습니다.
+
+```text
+S = sqrt((0.15 * 30) / 5) ~= 0.9487
+```
+
+## 공통 저장 구조
+
+30D 벡터는 `TB_ROUTE_FEATURE_VECTOR`에 저장됩니다.
+
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| `ROUTE_PATH_GUID` | text | 기존 설계 route 식별자 |
+| `PROCESS_NAME` | text | 공정명 |
+| `EQUIPMENT_NAME` | text | 장비명 또는 프로젝트 범위 식별자 |
+| `UTILITY_GROUP` | text | 유틸리티 그룹 |
+| `UTILITY` | text | 유틸리티 코드 |
+| `SIZE` | text | 배관 사이즈 |
+| `DIRECTION_PATTERN` | text | `R`, `H`, `D` 기반 방향 패턴 문자열 |
+| `TOTAL_LENGTH_MM` | double precision | route polyline 총 길이 |
+| `STEP_COUNT` | integer | route segment step 수 |
+| `START_POSX/Y/Z` | double precision | 시작점 좌표 |
+| `END_POSX/Y/Z` | double precision | 종단점 좌표 |
+| `FEATURE_VECTOR` | vector(30) | pgvector Top-K 유사 설계 검색용 벡터 |
+| `FEATURE_VECTOR_JSON` | jsonb | 동일 벡터의 검증/분석용 JSON 배열 |
+
+기존 DB에 `FEATURE_VECTOR_JSON`이 없으면 `prepare_tables()`에서 다음 DDL을 자동 수행합니다.
+
+```sql
+ALTER TABLE "TB_ROUTE_FEATURE_VECTOR"
+ADD COLUMN "FEATURE_VECTOR_JSON" jsonb;
+```
+
+
+## 7. 자동경로 탐색 활용
+
+- X/Y/Z 주행 비율로 기존 설계가 수평 위주인지, 수직 이동이 많은지 판단합니다.
+- bend가 많은 기존 설계는 장애물/공간 제약이 많은 패턴으로 볼 수 있습니다.
+- 신규 Routing3D 후보가 과도하게 많은 bend를 만들면 Top-K 설계 통계와 비교하여 비용을 높일 수 있습니다.
+
+## 8. 검증 포인트
+
+- `vec[25] + vec[26] + vec[27]`은 정규화 전 기준으로 대체로 1.0에 가까워야 합니다.
+- tie 상황에서는 코드상 X, Y, Z 순서로 우선권이 있습니다.
+- 29번 차원은 예약값이므로 현재는 항상 0.0입니다.
