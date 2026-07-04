@@ -1,0 +1,7 @@
+numpy>=1.24
+scipy>=1.11
+psycopg2-binary>=2.9
+plotly>=5.18
+dash>=2.14
+trimesh>=4.0
+pytest>=7.4
