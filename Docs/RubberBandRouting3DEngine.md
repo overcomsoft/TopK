@@ -2,6 +2,8 @@
 
 # RubberBandRouting3DEngine.md
 
+# 프로젝트 디렉토리 D:\DINNO\DEV\AI-AutoRouting\TopKGen\RubberBandRouter
+
 ## 1. 개요 및 전제조건 (Prerequisites)
 
 본 프로젝트는 축 길이 최대 **30,000**에 달하는 초대형 3차원 플랜트/건축 공간($\text{mm}$ 단위 정밀도)에서 **현재의 물리적 장애물 배치 환경과 과거 기설계 데이터의 장애물 환경을 기하학적으로 교차 비교**하고, 그 위상적 유사성에 따라 추출된 베테랑 설계자의 꺾임점(Elbow) 패턴을 고무줄 변형 알고리즘에 가중치로 결합하는 초고속 하이브리드 라우팅 엔진 개발을 목표로 한다.
