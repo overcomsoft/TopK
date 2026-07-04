@@ -1,90 +1,158 @@
-# 3차원 직교형 고무줄 배관 라우팅 엔진 개발 보고서
-(3D Orthogonal Rubber-Band Piping Routing Engine Development Report)
+﻿# 3차원 고무줄 배관 라우팅 엔진 개발 보고서
 
-본 문서는 축 길이 최대 30,000에 달하는 대공간 건축/플랜트 환경에서 기존 설계 특징점을 반영하고, 복수 배관을 최적의 90도 직교(Orthogonal) 형태로 배치하기 위해 개발된 **"데이터 특징점 및 고무줄 변형(Rubber-Band Sketch Model)"** 기반 3차원 라우팅 엔진의 기술 사양 및 개발 현황을 기록합니다.
+본 문서는 `RubberBandRoutingSuite`의 C# 고무줄 라우팅 엔진과 WPF 3D Viewer 개발 현황을 기록한다. 현재 구현은 기존 Python PoC와 별도로 신규 작성된 C# 엔진/뷰어 기반이며, PostgreSQL의 기존 배관 경로와 PoC 데이터를 읽어 자동 배관 중심선을 생성하고 HelixToolkit 3D 뷰어에 표시한다.
 
----
-
-## 1. 개발 배경 및 목적
-1. **대공간 격자(Voxel) 연산 한계 극복**: 단일 축 30,000 이상의 초대형 공간을 복셀 격자로 분할하여 A* 알고리즘 등으로 탐색 시, 기하급수적인 메모리 사용량과 초 단위 연산 병목이 발생합니다.
-2. **기하 연산 기반의 초고속 라우팅**: 격자를 생성하지 않고 연속적인 기하 공간(Continuous Geometry) 상에서 결정론적 규칙과 장애물 확장을 활용해 마이크로초(µs) 단위의 속도로 90도 직교 경로를 탐색합니다.
-3. **사용자 친화적 단계별 시각화**: 고무줄이 팽팽하게 수축하고 장애물에 걸려 90도로 꺾이는 물리적 변형 단계를 디버거 UI를 통해 시각적으로 제어하고 검증할 수 있도록 지원합니다.
+> 2026-07-05 업데이트: 기존의 "시작점-종단점 직교 축 분해" 방식은 고무줄 밴딩 원리와 맞지 않아 제거하였다. 현재 엔진의 1차 경로는 시작PoC와 종단PoC를 잇는 직선 고무줄이며, 기존설계 특징점은 이 고무줄을 당기는 control point로 사용한다.
 
 ---
 
-## 2. 엔진 아키텍처 및 연동 흐름
-전체 엔진은 고성능 C++ 코어 엔진, C-API 바인딩, C# Wrapper 라이브러리, WPF 시뮬레이션 UI의 4단 레이어로 구성됩니다.
+## 1. 개발 목적
 
-```mermaid
-graph TD
-    UI[WPF UI - AutoRouteFinder] -->|C# 호출| CS[C# Wrapper - RubberBandEngine]
-    CS -->|P/Invoke| CAPI[C-API - routing3d_capi]
-    CAPI -->|C++ Core 호출| Core[C++ Engine - DataDrivenRubberBandEngine]
-    Core -->|결과 반환| CAPI
-    CAPI -->|구조체 전달| CS
-    CS -->|타임라인 바인딩| UI
+1. PostgreSQL 설계 DB에서 장비 PoC, 덕트/레터럴 PoC, 장애물, 기존 배관 경로를 자동 조회한다.
+2. 기존 배관 설계의 특징점을 활용하여 신규 자동경로가 기존 설계와 유사한 흐름을 갖도록 한다.
+3. 자동설계된 경로는 다음 경로 탐색 시 장애물로 누적하여 배관끼리 겹치지 않도록 한다.
+4. WPF HelixToolkit 3D Viewer에서 장애물, 공간 CubeBox, 기존경로, 자동경로, PoC, 특징점, FPS/렌더 객체 수를 확인한다.
+5. 자동설계 결과 리스트, 분석결과, 단계별 경로, 세그먼트 상세를 데이터그리드로 제공한다.
+
+---
+
+## 2. 현재 구성
+
+| 영역 | 주요 파일 | 역할 |
+|---|---|---|
+| C# Engine | `RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs` | 고무줄 control point 기반 경로 생성, 충돌 회피, 검증 |
+| Engine Models | `RubberBandRoutingSuite/src/RubberBandRouting.Engine/Models.cs` | `Vec3`, `Aabb`, `RouteSegment`, `RubberBandResult` 등 데이터 구조 |
+| PostgreSQL Loader | `RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs` | 프로젝트, 장애물, PoC, 기존경로, 경로 태스크 조회 |
+| WPF Viewer | `RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml(.cs)` | DB 연결, 프로젝트 로딩, 3D 렌더링, 자동경로 실행/결과 표시 |
+| C++ Native Stub | `RubberBandRoutingSuite/cpp/RubberBandRouting.Native` | C API 연동 검토용 네이티브 엔진 스텁 |
+
+---
+
+## 3. 고무줄 밴딩 알고리즘 원리
+
+고무줄 밴딩 모델은 "처음부터 X/Y/Z 순서로 꺾는 알고리즘"이 아니다. 원리는 다음과 같다.
+
+1. 시작PoC와 종단PoC 사이에 하나의 직선 고무줄을 건다.
+2. 기존설계에서 추출한 특징점 중 현재 라우팅 조건에 맞는 점을 선택한다.
+3. 선택된 특징점이 고무줄을 당기며, 경로의 중간 control point가 된다.
+4. 장애물과 충돌하는 구간이 있으면 해당 위치에 우회 control point를 추가한다.
+5. 최종 표시 단계에서 배관 관경과 bend radius를 반영하여 둥근 bend 형상으로 보정한다.
+
+따라서 축 이동 순서(`X -> Y -> Z`, `Z -> X -> Y` 등)는 고무줄 알고리즘의 본질이 아니다. 축 순서 기반 생성은 단순 직교 라우터의 성격이며, 기존설계 특징점 기반 고무줄 밴딩과는 구분해야 한다.
+
+---
+
+## 4. 현재 구현된 라우팅 단계
+
+### 4.1 Step 1 - Initial straight rubber tension
+
+- 입력: 시작점 `S`, 종단점 `D`
+- 처리: `S -> D`를 하나의 직선 rubber segment로 생성
+- 구현: `ManagedRubberBandEngine.MakeRubberLineSegments(new[] { start, end })`
+- 목적: 장애물이나 특징점을 적용하기 전의 가장 자연스러운 장력 기준선 생성
+
+기존 구현의 문제였던 `MakeOrthogonalSegments(new[] { start, end })` 방식은 제거하였다. 이 변경으로 시작점이 종단점보다 높은 경우에도 엔진이 임의로 좌우 축 이동을 먼저 선택하지 않는다.
+
+### 4.2 Step 2 - Pull snap by existing-design control points
+
+- 입력: 기존 설계에서 추출된 특징점 목록
+- 처리: `S -> feature1 -> feature2 -> ... -> D` 형태의 rubber control polyline 생성
+- 구현: `BuildSnappedPointList()`와 `MakeRubberLineSegments()` 조합
+- 표시: 뷰어 하단 `특징점` 토글로 표시/숨김 가능
+
+특징점은 단순한 경유 좌표가 아니라, 기존 배관의 흐름을 재현하기 위해 고무줄을 당기는 control point로 취급한다.
+
+### 4.3 Step 3 - Push collision resolution
+
+- 입력: Step 2의 rubber segment와 장애물 AABB 목록
+- 처리: 각 rubber segment와 확장 장애물 AABB의 교차 여부를 검사
+- 충돌 시: 장애물 상/하 또는 측면으로 우회하는 control point를 삽입
+- 구현: `ResolveCollisions()`, `SegmentIntersectsExpandedAabb()`, `BuildBypass()`
+
+2026-07-05 수정으로 충돌 검사는 축 정렬 선분 전용 판정이 아니라 일반 3D segment-AABB 교차 판정으로 변경하였다. 따라서 rubber segment가 임의 방향이어도 장애물 충돌을 검출할 수 있다.
+
+### 4.4 Step 4 - Final display bend correction
+
+- 엔진 결과는 중심선 control polyline이다.
+- 뷰어 표시 단계에서 배관 관경을 읽고 bend radius를 계산하여 꺾임부를 둥글게 보정한다.
+- 목적은 기존설계 배관처럼 관경에 따른 bending radius가 반영된 시각 결과를 제공하는 것이다.
+
+---
+
+## 5. 기존설계 특징점 활용 방식
+
+WPF Viewer는 PostgreSQL에서 기존경로(`TB_ROUTE_PATH`, `TB_ROUTE_SEGMENTS`, `TB_ROUTE_SEGMENT_DETAIL` 계열)를 조회하고, 자동경로 태스크와 가장 가까운 기존 경로를 매칭한다.
+
+현재 특징점으로 활용하는 대표 요소는 다음과 같다.
+
+| 특징점 유형 | 의미 | 자동경로 반영 |
+|---|---|---|
+| Start stub | 장비 PoC에서 배관이 처음 빠져나가는 방향/드롭 | 시작 직후 control point 후보 |
+| Existing bend | 기존 배관의 방향 전환점 | 주요 꺾임 후보 |
+| Z change | 고도 변경 구간 | 수직 이동 후보 |
+| Trunk guide | 긴 공용 직선 배관 흐름 | 기존 배관과 유사한 주행 방향 유도 |
+| End approach | 덕트/레터럴 PoC 접근 방향 | 종단부 접속 방향 보정 |
+
+향후에는 단순 `Vec3` 목록 대신 `RouteFeature` 모델을 도입하여 각 특징점의 역할, 우선순위, 접선 방향, 필수/선택 여부를 명시하는 것이 필요하다.
+
+---
+
+## 6. 자동경로 누적 장애물 처리
+
+자동설계는 태스크를 순차 실행한다. 한 경로가 생성되면 해당 경로의 배관 envelope을 AABB 장애물로 변환하여 다음 태스크의 장애물 목록에 추가한다.
+
+이 방식으로 나중에 생성되는 경로는 앞서 생성된 자동경로를 피해야 한다. 즉, 자동설계 경로도 기존 장애물과 동일하게 collision 대상이 된다.
+
+---
+
+## 7. 뷰어 기능 현황
+
+- DB 연결 정보 입력 및 프로젝트 로딩
+- 유틸리티 그룹/유틸리티별 경로 태스크 필터링
+- 기존 배관 표시 및 유틸리티 그룹별 색상 표시
+- 선택 유틸리티만 기존배관/자동경로 대상 필터링
+- 공간 CubeBox 선형 표시
+- 장애물, 장비, 덕트, 레터럴, 기존배관, 자동경로, PoC, 특징점 표시 토글
+- 자동설계 결과 데이터그리드 표시
+- 결과 선택 시 3D View에서 선택 경로 강조 표시
+- 분석결과, 단계별 경로, 세그먼트 상세 데이터그리드 표시
+- FPS 및 렌더 객체 수 표시
+- 프로젝트 로딩 후 ZoomFit 처리
+
+---
+
+## 8. 검증 상태
+
+최근 빌드 검증:
+
+```powershell
+dotnet build .\RubberBandRoutingSuite\RubberBandRoutingSuite.sln -c Debug --nologo -v:minimal /p:UseAppHost=false /p:OutDir=C:\tmp\RubberBandRoutingSuite-build\
 ```
 
-1. **C++ Core Engine** (`Routing3D/cpp/src/rubber_band_engine.cpp`): 기하 처리 및 회피 전략 연산 수행.
-2. **C-API Wrapper** (`Routing3D/cpp/capi/routing3d_capi.cpp`): C#과의 상호 운용성을 보장하는 C-Linkage 내보내기 함수들 제공.
-3. **C# Library** (`AutoRoutingLibrary/Core/RubberBandEngine.cs`): P/Invoke 호출 및 C++ 포인터 자원 자동 해소(`IDisposable` 패턴).
-4. **WPF UI Application** (`AutoRouteFinder`): 3D Helix Viewport를 통한 실시간 시뮬레이션 렌더링 및 타임라인 슬라이더 연동.
+결과:
+
+- 빌드 성공
+- 오류 0개
+- HelixToolkit.Wpf `NU1701` 호환성 경고 2개 존재
 
 ---
 
-## 3. 고무줄 변형 핵심 4단계 알고리즘 (Deformation Pipeline)
+## 9. 남은 개선 항목
 
-고무줄 변형 모델은 다음의 4단계를 거쳐 경로를 점진적으로 90도 직교화하며 장애물을 회피합니다.
+1. `RouteFeature` 데이터 구조 추가
+   - 현재 특징점은 `Vec3` 좌표만 전달된다.
+   - 시작 드롭, bend, trunk, end approach 같은 의미가 엔진에 명시적으로 전달되어야 한다.
 
-### 1단계: 초기 인장 (Initial Tension)
-* **목적**: 출발지(S)와 목적지(D) 사이의 장애물을 무시하고 가장 짧은 다이렉트 직선 경로를 형성합니다.
-* **산출**: `{S, D}` 2개의 웨이포인트를 갖는 직선 형태의 고무줄 가이드 라인 생성.
+2. 특징점 선택/스코어링 고도화
+   - 기존경로의 모든 특징점을 그대로 쓰지 않고, 시작-종단 rubber line과의 거리, 유틸리티, 관경, 고도층, 기존경로 유사도를 기준으로 선별해야 한다.
 
-### 2단계: 특징점 고도 스냅 (Z-Layer Snap)
-* **목적**: 기존 배관 설계 데이터의 통계적 빈도가 높은 대표 고도(Z-Level)로 경로를 투영하고 수직 상승/하강 구간을 분리합니다.
-* **방식**: 
-  - 출발/종단의 수직 성향(UP, DOWN, FLAT)을 분석합니다.
-  - FLAT 성향일 경우 시작점 근처의 다빈도 Z 레벨로 스냅하고, 수직 성향인 경우 중간 지점과 가장 가까운 다빈도 Z 레벨을 선택합니다.
-* **산출**: `{S, (S.x, S.y, Z_way), (D.x, D.y, Z_way), D}` 4개의 수직 분할 웨이포인트 생성.
+3. 최종 배관 형상 검증
+   - 표시 단계의 둥근 bend가 장애물과 다시 충돌하지 않는지 검증해야 한다.
 
-### 3단계: 장애물 간섭 감지 (Obstacle Interference)
-* **목적**: 수평 이동 세그먼트 구간 내에서 충돌을 일으키는 거대 장애물과 가깝게 부딪히는 모서리 영역을 검출합니다.
-* **방식**:
-  - 트레이 폭(W), 높이(H), 안전 마진을 합산하여 모든 장애물 AABB를 사전 가상 확장(Padding) 처리합니다.
-  - 확장된 AABB와 수평 세그먼트 간의 Ray-AABB 교차 검사를 수행하여 충돌 포인트(CP, Red Spheres)를 추출합니다.
+4. C++ 엔진 동기화
+   - 현재 C# 엔진이 우선 수정되었다.
+   - C++ Native 엔진도 동일한 rubber control point 모델로 맞춰야 한다.
 
-### 4단계: 최종 변형 완료 (Deformation)
-장애물 충돌 감지 시, 다음의 3대 회피 전략을 우선순위에 따라 순차적으로 적용하여 직각 우회 웨이포인트를 생성합니다.
-1. **1순위 (특징점 터널링 - Spine Tunneling)**: 충돌 지점 인근에 다빈도 꺾임 영역(Zone) 틈새가 존재하고 간섭이 없다면, 해당 터널링 포인트로 고무줄을 스냅해 90도로 우회합니다.
-2. **2순위 (수직 오버/언더패스 - Vertical Bypass)**: 현재 수직 꺾임 횟수가 최대 허용치(Max Bends) 이하인 경우, 다빈도 Z 레벨 중 장애물의 상단 또는 하단 공간을 거치는 입체 우회 경로를 생성합니다.
-3. **3순위 (xy 외곽 최소 마진 우회 - Horizontal Bypass)**: 장애물의 확장된 AABB 모서리를 안전 마진을 적용해 XY 평면 상에서 90도로 꺾어 감싸 도는 우회 경로를 계산합니다.
-
----
-
-## 4. 다발 배관 개별 좌표 분배 (Multi-Pipe Distribution)
-* 최종 생성된 중심선(Centerline) 경로 상의 각 세그먼트 진행 방향에 대해, XY 평면 내 법선 벡터(Normal Vector) 방향으로 개별 오프셋 좌표를 도출합니다.
-* 공식: `pt.x += nx * offset_mag`, `pt.y += ny * offset_mag`
-* 이를 통해 트레이 내에 배치되는 복수 배관(Pipe Count)이 피치(Pipe Pitch) 간격을 일정하게 유지하며 평행하게 배치되도록 분배합니다.
-
----
-
-## 5. UI 시각화 색상 스키마 (Color Schemes)
-WPF 시뮬레이터에서는 4단계의 시각적 검증을 위해 Helix 3D 뷰포트에 5가지 전용 색상 필터를 적용합니다.
-
-* **Green (출발/목적지)**: 라우팅 대상 배관 작업의 시종단 앵커 구체.
-* **Blue (특징점 영역)**: 통계 데이터에서 추출된 다빈도 Z 레이어 평면 가이드 및 꺾임 가이드 박스.
-* **Yellow (변형 중인 고무줄 경로)**: 슬라이더 조작에 따라 당겨지고 있는 고무줄 가이드 튜브.
-* **Red (충돌 모서리)**: 고무줄이 장애물 모퉁이에 부딪혀 걸려 있는 간섭 지점 구체.
-* **White/Gray (확장 장애물)**: 트레이 사양과 안전 마진에 의해 패딩 연산이 완료된 투명 가상 장애물 박스.
-
----
-
-## 6. 향후 예정된 개선 사항 (진행 계획)
-사용자 피드백을 기반으로 아래의 사용성 및 기하 정밀도 문제를 해결할 예정입니다.
-
-1. **다중 시종단 개별 연결선(Tails Routing) 연동**:
-   - 현재는 단일 시작점/끝점으로 계산된 중심선에서 오프셋하여 다발 배관을 분배하므로, 각 배관의 실제 실제 출발점(빨강)과 종단점(파랑)의 개별 연결이 누락되거나 어긋납니다.
-   - C++ 코어 엔진을 개별 `starts` 및 `ends` 배열을 동시에 주입받는 방식으로 확장하고, 각 배관 오프셋 경로의 끝단에서 실제 PoC까지 90도 수직/수평 꼬리 연결 세그먼트를 자동으로 이어 붙여 직교성을 완성할 계획입니다.
-2. **3D 뷰포트 시각적 간섭 해소 (Filtering)**:
-   - 전체 159개 이상의 배관 PoC와 기존 설계 배관이 모두 중첩되어 가림 현상이 발생합니다.
-   - 좌측 필터에서 특정 유틸리티(예: `ALKA`) 선택 시, 이에 해당하는 PoC 구체 마커 및 기존 배관만 렌더링하고 나머지는 감추어 고무줄 경로 매칭 결과를 시각적으로 선명하게 확인 가능하도록 렌더링 구조를 변경합니다.
+5. 단계별 사유 데이터 구조화
+   - 현재 단계별 경로 사유는 뷰어에서 추론한다.
+   - 엔진이 각 segment/control point 생성 사유를 직접 반환하도록 확장하는 것이 바람직하다.

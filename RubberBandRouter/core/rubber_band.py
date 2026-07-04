@@ -198,6 +198,14 @@ class RubberBandState:
     description: str = ""
 
 
+
+@dataclass
+class RouteValidation:
+    """Basic quality validation result for the final route."""
+    is_valid: bool
+    issues: list[str] = field(default_factory=list)
+    residual_collisions: int = 0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 직교 세그먼트 생성 유틸리티
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +274,47 @@ def count_vertical_bends(segments: list[RouteSegment]) -> int:
     return count
 
 
+
+
+def validate_route(
+    segments: list[RouteSegment],
+    obstacles: list["OBBObstacle"],
+    max_vertical_bends: int,
+    tray_half_width: float = 300.0,
+    safety_margin: float = 50.0,
+) -> RouteValidation:
+    """Validate orthogonality, continuity, bend limits, and residual collisions."""
+    from .collision import find_collisions
+
+    issues: list[str] = []
+
+    for idx, seg in enumerate(segments):
+        delta = seg.end - seg.start
+        if seg.length <= 1e-9:
+            issues.append(f"zero_length_segment:{idx}")
+            continue
+        nonzero_axes = int(np.sum(np.abs(delta) > 1e-3))
+        if nonzero_axes > 1:
+            issues.append(f"non_orthogonal_segment:{idx}")
+
+    for idx in range(len(segments) - 1):
+        if not np.allclose(segments[idx].end, segments[idx + 1].start, atol=1e-3):
+            issues.append(f"disconnected_segments:{idx}-{idx + 1}")
+
+    vertical_bends = count_vertical_bends(segments)
+    if vertical_bends > max_vertical_bends:
+        issues.append(f"vertical_bends_exceeded:{vertical_bends}>{max_vertical_bends}")
+
+    seg_pairs = [(s.start, s.end) for s in segments]
+    residual = find_collisions(seg_pairs, obstacles, tray_half_width, safety_margin)
+    if residual:
+        issues.append(f"residual_collisions:{len(residual)}")
+
+    return RouteValidation(
+        is_valid=not issues,
+        issues=issues,
+        residual_collisions=len(residual),
+    )
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 1: 초기 인장 (S→D 직선)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,16 +363,20 @@ def step2_pull_snap(
     # 특징점 우선순위 정렬
     waypoints_sorted = sorted(feature_set.waypoints, key=lambda w: w.priority)
 
-    # 웨이포인트를 S→D 경로 방향 순으로 정렬 (진행 방향 투영값 기준)
+    # Filter by progress along S->D; off-axis rack points are still allowed.
     route_dir = end - start
     route_len = np.linalg.norm(route_dir)
     if route_len > 1e-9:
         route_unit = route_dir / route_len
+        tolerance = max(0.0, snap_tolerance)
+        waypoints_sorted = [
+            w for w in waypoints_sorted
+            if -tolerance <= float(np.dot(w.position - start, route_unit)) <= route_len + tolerance
+        ]
         waypoints_sorted.sort(
             key=lambda w: float(np.dot(w.position - start, route_unit))
         )
 
-    # 전체 경로 포인트: S → 웨이포인트들 → D
     all_points = [start] + [w.position for w in waypoints_sorted] + [end]
 
     # 직교 세그먼트 생성
@@ -386,6 +439,7 @@ def step3_push_resolve(
             avoidance = resolve_collision(
                 col_result, seg.start, seg.end,
                 remaining_v, tray_half_width, tray_height, safety_margin,
+                penetration_obstacles=current_obstacles,
             )
 
             if not avoidance.success:
@@ -431,16 +485,22 @@ class RoutingResult:
     final_segments: list[RouteSegment]
     vertical_bends: int
     total_length: float
+    max_vertical_bends: int = 5
+    validation: RouteValidation | None = None
 
     @property
     def final_state(self) -> RubberBandState:
         return self.states[-1]
 
     def summary(self) -> str:
+        validation_text = ""
+        if self.validation is not None and not self.validation.is_valid:
+            validation_text = f", validation_issues={len(self.validation.issues)}"
         return (
-            f"RoutingResult: {len(self.final_segments)}개 세그먼트, "
-            f"총길이={self.total_length:.0f}mm, "
-            f"수직꺾임={self.vertical_bends}/{5}회"
+            f"RoutingResult: {len(self.final_segments)} segments, "
+            f"total_length={self.total_length:.0f}mm, "
+            f"vertical_bends={self.vertical_bends}/{self.max_vertical_bends}"
+            f"{validation_text}"
         )
 
 
@@ -456,14 +516,14 @@ def run_routing(
     snap_tolerance: float | None = None,
 ) -> RoutingResult:
     """
-    전체 라우팅 파이프라인 실행.
+    Run the complete routing pipeline.
 
     Args:
-        start:          출발지 좌표 [x,y,z]
-        end:            목적지 좌표 [x,y,z]
-        feature_set:    특징점 추출 결과 (FeatureSet)
-        current_map:    현재 장애물 맵 (ObstacleMap)
-        나머지 파라미터: None이면 config.py 기본값 사용
+        start:          Start coordinate [x,y,z]
+        end:            End coordinate [x,y,z]
+        feature_set:    Extracted waypoint features (FeatureSet)
+        current_map:    Current obstacle map (ObstacleMap)
+        Other parameters: use config.py defaults when None
 
     Returns:
         RoutingResult
@@ -481,20 +541,21 @@ def run_routing(
 
     states: list[RubberBandState] = []
 
-    # Step 1: 초기 인장
+    # Step 1: initial tension
     s1 = step1_initial_tension(start, end)
     states.append(s1)
 
-    # Step 2: Pull - 특징점 스냅
+    # Step 2: Pull - feature snap
     s2 = step2_pull_snap(start, end, feature_set, snap_t)
     states.append(s2)
 
-    # Step 3: Push - 충돌 회피
+    # Step 3: Push - collision avoidance
     s3 = step3_push_resolve(s2, current_map.obstacles, max_v, t_hw, t_h, s_mg)
     states.append(s3)
 
     final_segments = s3.segments
     total_length = sum(seg.length for seg in final_segments)
+    validation = validate_route(final_segments, current_map.obstacles, max_v, t_hw, s_mg)
 
     result = RoutingResult(
         start=start,
@@ -503,6 +564,9 @@ def run_routing(
         final_segments=final_segments,
         vertical_bends=s3.vertical_bends_used,
         total_length=total_length,
+        max_vertical_bends=max_v,
+        validation=validation,
     )
-    logger.info("[RubberBand] 라우팅 완료 - %s", result.summary())
+    logger.info("[RubberBand] routing complete - %s", result.summary())
     return result
+

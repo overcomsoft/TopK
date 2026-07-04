@@ -1,0 +1,242 @@
+﻿<Window x:Class="RubberBandRouting.Viewer.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:helix="http://helix-toolkit.org/wpf"
+        Title="RubberBand Routing 3D Viewer - PostgreSQL PoC Auto Routing" Width="1500" Height="900"
+        WindowStartupLocation="CenterScreen" Background="#172033">
+    <Window.Resources>
+        <Style TargetType="{x:Type DataGridColumnHeader}">
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+    </Window.Resources>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="42"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="32"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#202B42" BorderBrush="#3A4862" BorderThickness="0,0,0,1" Padding="4">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="26"/>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="62"/>
+                    <ColumnDefinition Width="84"/>
+                    <ColumnDefinition Width="84"/>
+                    <ColumnDefinition Width="130"/>
+                    <ColumnDefinition Width="60"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="96"/>
+                    <ColumnDefinition Width="96"/>
+                    <ColumnDefinition Width="96"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="DB:" Foreground="#DDE7F5" VerticalAlignment="Center"/>
+                <TextBox x:Name="TxtHost" Grid.Column="1" Text="localhost" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtPort" Grid.Column="2" Text="5432" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtUser" Grid.Column="3" Text="postgres" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtPassword" Grid.Column="4" Text="dinno" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtDatabase" Grid.Column="5" Text="DDW_AI_DB" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBlock Grid.Column="6" Text="프로젝트:" Foreground="#DDE7F5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                <ComboBox x:Name="CmbProjects" Grid.Column="7" Margin="2" DisplayMemberPath="DisplayName"/>
+                <Button x:Name="BtnLoadProjects" Grid.Column="8" Content="↻ 로드" Margin="4,2" Click="BtnLoadProjects_Click"/>
+                <Button x:Name="BtnLoadScene" Grid.Column="9" Content="기본설계" Margin="4,2" Click="BtnLoadScene_Click"/>
+                <Button x:Name="BtnRouteGroup" Grid.Column="10" Content="다단 락" Margin="4,2" Background="#5D7F3D" Foreground="White" Click="BtnRouteGroup_Click"/>
+                <Button x:Name="BtnRouteAll" Grid.Column="11" Content="전체보기" Margin="4,2" Click="BtnRouteAll_Click"/>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="306" MinWidth="240"/>
+                <ColumnDefinition Width="5"/>
+                <ColumnDefinition Width="*" MinWidth="420"/>
+                <ColumnDefinition Width="5"/>
+                <ColumnDefinition Width="360" MinWidth="260"/>
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Background="#263449" BorderBrush="#43536C" BorderThickness="0,0,1,0" Padding="6">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="92"/>
+                        <RowDefinition Height="172"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" BorderBrush="#40516B" BorderThickness="1" Padding="6">
+                        <StackPanel>
+                            <TextBlock Text="① 유틸리티 그룹" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+                            <ComboBox x:Name="CmbUtilityGroups" Height="26" SelectionChanged="CmbUtilityGroups_SelectionChanged"/>
+                            <Button x:Name="BtnRouteSelectedGroup" Content="▶ 이 그룹 전체 라우팅" Height="30" Margin="0,6,0,0" Background="#416B9E" Foreground="White" Click="BtnRouteGroup_Click"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" BorderBrush="#40516B" BorderThickness="1" Padding="6" Margin="0,0,0,8">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="34"/>
+                                <RowDefinition Height="34"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="② 유틸리티" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+                            <ListBox x:Name="ListUtilities" Grid.Row="1" SelectionChanged="ListUtilities_SelectionChanged" Background="#2E3C53" Foreground="White" BorderBrush="#4B5F7B"/>
+                            <Button x:Name="BtnRouteUtility" Grid.Row="2" Content="▶ 이 유틸리티 전체 라우팅" Margin="0,6,0,0" Click="BtnRouteUtility_Click"/>
+                            <Button x:Name="BtnClearRoutes" Grid.Row="3" Content="♜ 자동설계 경로 삭제" Margin="0,6,0,0" Click="BtnClearRoutes_Click"/>
+                            <Button x:Name="BtnShowExistingRoutes" Grid.Row="4" Content="◎ PostgresDB 기존경로 표시" Margin="0,6,0,0" Background="#5B6478" Foreground="White" Click="BtnShowExistingRoutes_Click"/>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="2" BorderBrush="#40516B" BorderThickness="1" Padding="6">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="③ 개별 PoC (선택 = 3D 강조)" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+                            <DataGrid x:Name="GridTasks" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionChanged="GridTasks_SelectionChanged"
+                                      Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="None"
+                                      HeadersVisibility="Column" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="38"/>
+                                    <DataGridTextColumn Header="유틸" Binding="{Binding Utility}" Width="58"/>
+                                    <DataGridTextColumn Header="시작PoC" Binding="{Binding SourceName}" Width="94"/>
+                                    <DataGridTextColumn Header="종단PoC" Binding="{Binding TargetName}" Width="94"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
+
+            <Grid Grid.Column="2">
+                <helix:HelixViewport3D x:Name="Viewport" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False">
+                    <helix:HelixViewport3D.DefaultCamera>
+                        <PerspectiveCamera Position="18000,18000,12000" LookDirection="-18000,-18000,-12000" UpDirection="0,0,1" FieldOfView="45"/>
+                    </helix:HelixViewport3D.DefaultCamera>
+                    <helix:DefaultLights/>
+                    <helix:GridLinesVisual3D Width="50000" Length="50000" MinorDistance="1000" MajorDistance="5000" Normal="0,0,1" Thickness="1" Fill="#334155"/>
+                </helix:HelixViewport3D>
+                <Border HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,8,10,0" Background="#172033" CornerRadius="4" Padding="10,6" Opacity="0.92">
+                    <StackPanel>
+                        <TextBlock x:Name="TxtFps" Text="FPS 0.0" Foreground="#7CFF8A" FontFamily="Consolas" FontWeight="Bold" FontSize="12"/>
+                        <TextBlock x:Name="TxtVisibleObjects" Text="렌더 0 obj" Foreground="#7CFF8A" FontFamily="Consolas" FontWeight="Bold" FontSize="12"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <GridSplitter Grid.Column="3" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
+
+            <Border Grid.Column="4" Background="#263449" BorderBrush="#43536C" BorderThickness="1,0,0,0" Padding="8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*" MinHeight="140"/>
+                        <RowDefinition Height="5"/>
+                        <RowDefinition Height="310" MinHeight="120"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="자동설계 결과 경로" Foreground="White" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <DataGrid x:Name="GridResults" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionChanged="GridResults_SelectionChanged"
+                              Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="Horizontal"
+                              HeadersVisibility="Column" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                        <DataGrid.RowStyle>
+                            <Style TargetType="{x:Type DataGridRow}">
+                                <Setter Property="Background" Value="{Binding RouteRowBrush}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                                <Style.Triggers>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter Property="Background" Value="#FACC15"/>
+                                        <Setter Property="Foreground" Value="Black"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.RowStyle>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="34"/>
+                            <DataGridTextColumn Header="상태" Binding="{Binding Status}" Width="58"/>
+                            <DataGridTextColumn Header="실패사유" Binding="{Binding FailureReason}" Width="90"/>
+                            <DataGridTextColumn Header="그룹" Binding="{Binding Group}" Width="62"/>
+                            <DataGridTextColumn Header="유틸" Binding="{Binding Utility}" Width="56"/>
+                            <DataGridTextColumn Header="시작PoC" Binding="{Binding StartPoC}" Width="82"/>
+                            <DataGridTextColumn Header="종단PoC" Binding="{Binding EndPoC}" Width="82"/>
+                            <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="70"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="#43536C"/>
+                    <TabControl Grid.Row="3" Margin="0,10,0,0" Background="#263449" Foreground="White">
+                        <TabItem Header="분석결과">
+                            <DataGrid x:Name="GridAnalysis" AutoGenerateColumns="False" IsReadOnly="True" Background="#253349" Foreground="White" BorderBrush="#40516B" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="항목" Binding="{Binding Name}" Width="100"/>
+                                    <DataGridTextColumn Header="값" Binding="{Binding Value}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </TabItem>
+                        <TabItem Header="단계별 경로">
+                            <DataGrid x:Name="GridStepDetails" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionChanged="GridStepDetails_SelectionChanged" Background="#253349" Foreground="White" BorderBrush="#40516B" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="36"/>
+                                    <DataGridTextColumn Header="구간" Binding="{Binding SegmentType}" Width="70"/>
+                                    <DataGridTextColumn Header="시작" Binding="{Binding Start}" Width="96"/>
+                                    <DataGridTextColumn Header="끝" Binding="{Binding End}" Width="96"/>
+                                    <DataGridTextColumn Header="방향" Binding="{Binding Direction}" Width="54"/>
+                                    <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="72"/>
+                                    <DataGridTextColumn Header="꺾임/사유" Binding="{Binding Reason}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </TabItem>
+                        <TabItem Header="세그먼트 상세">
+                            <DataGrid x:Name="GridSegmentDetails" AutoGenerateColumns="False" IsReadOnly="True" Background="#253349" Foreground="White" BorderBrush="#40516B" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="36"/>
+                                    <DataGridTextColumn Header="시작" Binding="{Binding Start}" Width="96"/>
+                                    <DataGridTextColumn Header="끝" Binding="{Binding End}" Width="96"/>
+                                    <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="70"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </TabItem>
+                    </TabControl>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="2" Background="#172033" BorderBrush="#43536C" BorderThickness="0,1,0,0" Padding="8,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="레이어 표시:" Foreground="#DDE7F5" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <CheckBox x:Name="TglArea" Content="공간" IsChecked="True" Foreground="White" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglObstacles" Content="장애물" IsChecked="True" Foreground="White" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglEquipment" Content="장비" IsChecked="True" Foreground="#FFB85A" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglDucts" Content="덕트/레터럴" IsChecked="True" Foreground="#7EE2AE" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglPocs" Content="PoC 마커" IsChecked="True" Foreground="#FF6767" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglRoutes" Content="자동경로" IsChecked="True" Foreground="White" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglFeaturePoints" Content="특징점" IsChecked="True" Foreground="#FF4DFF" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglExistingRoutes" Content="기존경로" IsChecked="True" Foreground="#FFB347" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                </StackPanel>
+                <TextBlock x:Name="TxtStatus" Grid.Column="1" Text="Ready" Foreground="#A7C7FF" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                <Button Grid.Column="2" Content="Reset Camera" Width="110" Height="24" Click="BtnResetCamera_Click"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+
+
+
+
+
+
+
+
+
+
+

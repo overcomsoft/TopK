@@ -106,18 +106,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING
-
-import numpy as np
-
-if TYPE_CHECKING:
-    from .rubber_band import RouteSegment
-
-import json
-import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -280,12 +269,11 @@ def distribute_pipes(
 
     pipes: list[PipePath] = []
 
-    prev_normal: np.ndarray | None = None
-
     for pipe_idx, (pid, util, offset) in enumerate(
         zip(pipe_ids[:n], utilities[:n], offsets)
     ):
         pipe_points: list[list[float]] = []
+        prev_normal: np.ndarray | None = None
 
         for i, seg in enumerate(segments):
             seg_dir = seg.end - seg.start

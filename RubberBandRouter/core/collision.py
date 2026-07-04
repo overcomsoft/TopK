@@ -328,6 +328,7 @@ def strategy_2_vertical_bypass(
     tray_height: float = 100.0,
     safety_margin: float = 50.0,
     prefer_over: bool = True,
+    tray_half_width: float = 300.0,
 ) -> AvoidanceResult | None:
     """
     2순위: 수직 오버/언더패스.
@@ -396,6 +397,7 @@ def strategy_3_lateral_bypass(
     """
     obs_corners = _obb_corners(obs)
     margin = tray_half_width + safety_margin
+    bypass_clearance = margin + 1.0
 
     # 세그먼트 방향 파악
     seg_dir = seg_end - seg_start
@@ -404,8 +406,8 @@ def strategy_3_lateral_bypass(
     side_axis = 1 if dominant_axis == 0 else 0  # XY 평면 우회
 
     # OBB 두 측면 중 세그먼트에 더 가까운 측 선택
-    obs_side_min = float(obs_corners[:, side_axis].min()) - margin
-    obs_side_max = float(obs_corners[:, side_axis].max()) + margin
+    obs_side_min = float(obs_corners[:, side_axis].min()) - bypass_clearance
+    obs_side_max = float(obs_corners[:, side_axis].max()) + bypass_clearance
 
     # 현재 세그먼트의 side_axis 값
     seg_side = seg_start[side_axis]
@@ -417,8 +419,8 @@ def strategy_3_lateral_bypass(
         bypass_side = obs_side_max
 
     # OBB 앞뒤 (dominant_axis 기준)
-    obs_dom_min = float(obs_corners[:, dominant_axis].min()) - margin
-    obs_dom_max = float(obs_corners[:, dominant_axis].max()) + margin
+    obs_dom_min = float(obs_corners[:, dominant_axis].min()) - bypass_clearance
+    obs_dom_max = float(obs_corners[:, dominant_axis].max()) + bypass_clearance
 
     # 4개 직교 웨이포인트: 진입 → 측면 이동 → 전진 → 복귀
     wp1 = seg_start.copy(); wp1[side_axis] = bypass_side
@@ -444,6 +446,40 @@ def strategy_3_lateral_bypass(
 # 통합 회피 전략 실행
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _find_sleeve_tunnel_candidate(
+    obstacles: list["OBBObstacle"] | None,
+    seg_start: np.ndarray,
+    seg_end: np.ndarray,
+    tray_half_width: float,
+    safety_margin: float,
+) -> "OBBObstacle | None":
+    """Find a penetration sleeve candidate that can guide this segment."""
+    if not obstacles:
+        return None
+
+    candidates = [obs for obs in obstacles if obs.is_penetration]
+    best_obs = None
+    best_dist = float("inf")
+    seg_vec = seg_end - seg_start
+    seg_len2 = float(np.dot(seg_vec, seg_vec))
+    for obs in candidates:
+        if seg_len2 <= 1e-9:
+            continue
+        t = float(np.dot(obs.center - seg_start, seg_vec) / seg_len2)
+        if t < 0.0 or t > 1.0:
+            continue
+        closest = seg_start + t * seg_vec
+        clearance = float(np.linalg.norm(obs.center - closest))
+        sleeve_radius = float(np.linalg.norm(obs.half_extents)) + tray_half_width + safety_margin
+        if clearance > sleeve_radius:
+            continue
+        dist = float(np.linalg.norm(obs.center - ((seg_start + seg_end) / 2.0)))
+        if dist < best_dist:
+            best_dist = dist
+            best_obs = obs
+    return best_obs
+
+
 def resolve_collision(
     collision: CollisionResult,
     seg_start: np.ndarray,
@@ -452,6 +488,7 @@ def resolve_collision(
     tray_half_width: float = 300.0,
     tray_height: float = 100.0,
     safety_margin: float = 50.0,
+    penetration_obstacles: list["OBBObstacle"] | None = None,
 ) -> AvoidanceResult:
     """
     충돌 결과에 대해 3대 회피 전략을 순차적으로 시도한다.
@@ -470,15 +507,19 @@ def resolve_collision(
             success=False,
         )
 
-    # 1순위: 슬리브 터널링
-    result = strategy_1_sleeve_tunnel(obs, seg_start, seg_end)
-    if result is not None:
-        return result
+    # Prefer a penetration sleeve candidate before vertical/lateral bypass.
+    sleeve_obs = obs if obs.is_penetration else _find_sleeve_tunnel_candidate(
+        penetration_obstacles, seg_start, seg_end, tray_half_width, safety_margin
+    )
+    if sleeve_obs is not None:
+        result = strategy_1_sleeve_tunnel(sleeve_obs, seg_start, seg_end)
+        if result is not None:
+            return result
 
     # 2순위: 수직 오버패스
     result = strategy_2_vertical_bypass(
         obs, seg_start, seg_end, remaining_vertical_bends,
-        tray_height, safety_margin, prefer_over=True,
+        tray_height, safety_margin, prefer_over=True, tray_half_width=tray_half_width,
     )
     if result is not None:
         return result
@@ -486,7 +527,7 @@ def resolve_collision(
     # 2순위 변형: 수직 언더패스
     result = strategy_2_vertical_bypass(
         obs, seg_start, seg_end, remaining_vertical_bends,
-        tray_height, safety_margin, prefer_over=False,
+        tray_height, safety_margin, prefer_over=False, tray_half_width=tray_half_width,
     )
     if result is not None:
         return result
