@@ -1,17 +1,175 @@
 """
-data_loader.py
---------------
-PostgreSQL(DDW_AI_DB) → RubberBandRouter 데이터 로더.
+================================================================================
+data_loader.py  ─  PostgreSQL(DDW_AI_DB) → RubberBandRouter 데이터 로더
+================================================================================
 
-C# ObstacleDbLoader.cs / SceneData.cs 의 DB 쿼리 패턴을 Python으로 재구현.
+【실행 명령어】
+  ※ 독립 실행 (CLI 테스트 — DB 연결 필요):
+      cd RubberBandRouter
+      python core/data_loader.py
+      # → 프로젝트 목록 표시, 선택 후 씬 요약 출력
 
-제공 기능:
-  1. list_projects()       → TB_SPACE_GROUP_INFO 프로젝트 목록
-  2. load_obstacles()      → TB_BIM_OBSTACLE (장애물 AABB, PassThrough 처리)
-  3. load_equipment_pocs() → TB_EQUIPMENTS + TB_POCINSTANCES (장비 + 장비 PoC)
-  4. load_duct_pocs()      → TB_LATERAL_PIPE / TB_DUCT + TB_POCINSTANCES (덕트/레터럴 종단 PoC)
-  5. load_routing_tasks()  → TB_ROUTE_PATH (기존 설계 Source→Target 좌표, 작업 목록)
-  6. load_scene()          → 위 모두를 한 번에 RoutingScene 으로 반환
+  ※ 독립 단위 테스트 (DB 없이):
+      cd RubberBandRouter
+      python -m pytest tests/test_data_loader.py -v
+
+  ※ DB 연결 설정:
+      # tools.settings.json 또는 환경변수로 설정 (config.py 참조)
+      $env:TOPKGEN_DB_HOST     = "192.168.0.46"
+      $env:TOPKGEN_DB_PASSWORD = "dinno"
+
+================================================================================
+【단계별 흐름도 — DB 로딩 파이프라인】
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │  PostgreSQL DDW_AI_DB                                        │
+  │  ├─ TB_SPACE_GROUP_INFO     프로젝트 그룹 AABB               │
+  │  ├─ TB_BIM_OBSTACLE         장애물 AABB + COLLISION_PASS      │
+  │  ├─ TB_EQUIPMENTS           장비 AABB + MAIN_SUB_TYPE        │
+  │  ├─ TB_POCINSTANCES         PoC 좌표 + 소유자 정보            │
+  │  └─ TB_ROUTE_PATH           기존 설계 SOURCE_POS → TARGET_POS │
+  └──────────────────────┬────────────────────────────────────────┘
+                         │ psycopg2 연결
+                         ▼
+  select_project()                         대화형/직접 프로젝트 선택
+       │
+       ▼ list_projects() — TB_SPACE_GROUP_INFO 전체 조회
+       │    → ProjectInfo[] (group_id, group_name, AABB, ...)
+       │
+       ▼ load_scene(conninfo, proj)       === 통합 진입점 ===
+       │
+       ├─ load_obstacles()  — TB_BIM_OBSTACLE
+       │    공간 스코프: AABB ∩ [proj.AABB ± 500mm]
+       │    필터:
+       │      ① name에 'damper' 포함 → 제외
+       │      ② 퇴화 박스 (max<=min) → 제외
+       │      ③ 그룹 박스로 클리핑 (건물 전체 슬래브 크기 억제)
+       │    PassThrough 판별:
+       │      COLLISION_PASS=1 또는
+       │      OST_TYPE='OST_Floors'/'OST_Ceilings' 또는
+       │      OST_StructuralFraming + BEAM_STRUCTURE
+       │
+       ├─ load_equipment()  — TB_EQUIPMENTS
+       │    MAIN_SUB_TYPE='MainTool' → is_main=True
+       │    퇴화 박스 제외
+       │
+       ├─ load_pocs()  — TB_POCINSTANCES
+       │    컬럼 동적 탐색 (C# Pick() 패턴):
+       │      좌표: POSX/POS_X/POSITION_X/... 중 존재하는 컬럼 사용
+       │      이름: POC_NAME/NAME/INSTANCE_NAME/...
+       │      소유: OWNER_INSTANCE_NAME/OWNER_NAME/...
+       │    분류: OWNER_INSTANCE_TYPE → Equipment / Duct / Lateral / Unknown
+       │    → (equip_pocs[], duct_pocs[]) 튜플
+       │
+       ├─ load_duct_lateral_pocs_from_route()  (보충용)
+       │    TB_POCINSTANCES 에 덕트 PoC 없는 경우
+       │    TB_ROUTE_PATH.TARGET_POSX/Y/Z 에서 중복 제거 후 추출
+       │
+       └─ load_routing_tasks()  — TB_ROUTE_PATH
+            SOURCE_POSX/Y/Z → start
+            TARGET_POSX/Y/Z → end
+            SOURCE_SIZE → diameter_mm (호칭경 파싱)
+            → RoutingTask[] (출발→목적지 쌍 목록)
+
+  결과: RoutingScene
+         ├─ project           ProjectInfo
+         ├─ obstacles[]       ObstacleAABB[]  (PassThrough 포함, is_pass_through 속성으로 구분)
+         ├─ equipment[]       EquipmentInfo[]
+         ├─ equipment_pocs[]  PocPoint[]      (장비 PoC = 출발점 후보)
+         ├─ duct_lateral_pocs[]  PocPoint[]   (덕트/레터럴 PoC = 목적지 후보)
+         └─ tasks[]           RoutingTask[]   (출발→목적지 기존 설계 쌍)
+
+================================================================================
+【C# ObstacleDbLoader.cs 대응 매핑표】
+
+  C# 메서드/블록                  Python 함수                DB 테이블
+  ─────────────────────────────────────────────────────────────────────
+  ListProjects()                  list_projects()            TB_SPACE_GROUP_INFO
+  LoadScene() 블록 1              load_obstacles()           TB_BIM_OBSTACLE
+  LoadScene() 블록 2              load_equipment()           TB_EQUIPMENTS
+  LoadDuctLateral()               load_duct_lateral_*()      TB_LATERAL_PIPE, TB_DUCT
+  LoadProjectPocs()               load_pocs()                TB_POCINSTANCES
+  LoadRoutesAndTasks()            load_routing_tasks()       TB_ROUTE_PATH
+  SceneData 전체                  load_scene()               (위 모두)
+
+================================================================================
+【핵심 알고리즘: AABB 공간 교차 스코프 필터】
+
+  # 프로젝트 그룹 AABB(+500mm 여유)로 DB 조회 범위 제한
+  # C# IsectXY 패턴: XY 교차(Z 무시), 이후 Python에서 Z 클리핑
+
+  scope_params = {
+      minx: proj.min_x - 500,  maxx: proj.max_x + 500,
+      miny: proj.min_y - 500,  maxy: proj.max_y + 500,
+      minz: proj.min_z - 500,  maxz: proj.max_z + 500,
+  }
+
+  SQL WHERE 조건:
+    "AABB_MINX" <= %(maxx)s AND "AABB_MAXX" >= %(minx)s
+    AND "AABB_MINY" <= %(maxy)s AND "AABB_MAXY" >= %(miny)s
+
+【PassThrough 판별 로직 (ObstacleAABB.is_pass_through 속성)】
+
+  if COLLISION_PASS 필드 존재:      COLLISION_PASS 값 사용 (1=통과, 0=충돌)
+  elif OST_TYPE == 'OST_Floors':    True (바닥 슬래브)
+  elif OST_TYPE == 'OST_Ceilings':  True (천장 슬래브)
+  elif OST_StructuralFraming AND
+       DDWORKS_TYPE == 'BEAM_STRUCTURE': True (격자보)
+  else:                             False (일반 충돌 장애물)
+
+================================================================================
+【주요 클래스 / 함수 / 변수】
+
+  ProjectInfo            TB_SPACE_GROUP_INFO 1행
+    .project_id   int    1-based 순번 (콤보박스/CLI 선택용)
+    .group_id     str    TAG_GROUP_ID
+    .group_name   str    TAG_GROUP_NM
+    .min_x~max_z  float  그룹 AABB (mm)
+
+  ObstacleAABB           TB_BIM_OBSTACLE 1행 (AABB 기반)
+    .name           str   INSTANCE_NAME
+    .ost_type       str   OST_TYPE (OST_Floors 등)
+    .ddworks_type   str   DDWORKS_TYPE (BEAM_STRUCTURE 등)
+    .collision_pass bool|None  COLLISION_PASS 컬럼값
+    .is_pass_through  bool  PassThrough 판별 결과 (property)
+    .center, .half_extents, .volume   기하학적 속성
+
+  EquipmentInfo          TB_EQUIPMENTS 1행
+    .name, .is_main, .min_x~max_z
+
+  PocPoint               TB_POCINSTANCES 1행
+    .name, .owner_name, .owner_type  ("Equipment"|"Duct"|"Lateral"|"Unknown")
+    .utility, .x, .y, .z
+    .position   ndarray(3,)  [x, y, z] 배열
+
+  RoutingTask            TB_ROUTE_PATH 1행 (출발→목적지 작업)
+    .route_path_guid  str   ROUTE_PATH_GUID
+    .utility, .utility_group, .diameter_mm
+    .start_x~z, .end_x~z   float  SOURCE_POS / TARGET_POS
+    .source_name, .target_name   장비명 / 덕트명
+    .start, .end   ndarray(3,)  배열 속성
+
+  RoutingScene           통합 씬 데이터 컨테이너
+    .project, .obstacles[], .equipment[]
+    .equipment_pocs[], .duct_lateral_pocs[], .tasks[]
+    .summary()  씬 통계 문자열
+
+  list_projects()        프로젝트 목록 조회
+  select_project()       대화형/직접 프로젝트 선택
+  load_obstacles()       장애물 AABB 로드 + PassThrough 판별
+  load_equipment()       장비 박스 로드
+  load_pocs()            PoC 좌표 로드 (동적 컬럼 탐색)
+  load_routing_tasks()   기존 설계 라우팅 작업 로드
+  load_scene()           통합 씬 로드 (주 진입점)
+  scene_to_obstacle_map() RoutingScene → ObstacleMap 변환
+
+  KEY VARIABLES:
+    SCOPE_MARGIN_MM     = 500.0  공간 스코프 여유값 (mm)
+    _PASSTHROUGH_OST    = {"OST_FLOORS", "OST_CEILINGS"}
+    _PASSTHROUGH_DDWORKS_BEAM = "BEAM_STRUCTURE"
+    sp                  = scope_params dict (minx,maxx,miny,maxy,minz,maxz)
+
+================================================================================
 """
 from __future__ import annotations
 

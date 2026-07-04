@@ -1,16 +1,135 @@
 """
-rubber_band.py
---------------
-고무줄 변형 라우팅 엔진 - Pull(특징점 스냅) & Push(충돌 회피) 통합.
+================================================================================
+rubber_band.py  ─  고무줄 변형 라우팅 엔진  (Pull & Push 통합)
+================================================================================
 
-수행 단계:
-  Step 1 - 초기 인장: S→D 직선 (시각화 디버거 Step 1)
-  Step 2 - Pull: 특징점 스냅으로 1차 배관 뼈대 형성 (시각화 Step 2)
-  Step 3 - Push: 현재 장애물 SAT 충돌 검사 및 3대 회피 (시각화 Step 3~4)
-  최종 - 직교 세그먼트 경로 확정 반환
+【실행 명령어】
+  ※ 독립 테스트:
+      cd RubberBandRouter
+      python -m pytest tests/test_rubber_band.py -v
 
-모든 세그먼트는 90도 직교 형태를 유지한다.
-수직(Z) 꺾임은 MAX_VERTICAL_BENDS 횟수 내로 제한한다.
+  ※ 단일 라우팅 테스트 (Python REPL):
+      import sys; sys.path.insert(0, "RubberBandRouter")
+      import config as cfg
+      from core.rubber_band import run_routing
+      from core.feature_extractor import FeatureSet
+      from core.obstacle_map import ObstacleMap
+      import numpy as np
+
+      obs_map = ObstacleMap("TEST")          # 빈 장애물 맵
+      result  = run_routing(
+          start=np.array([0., 0., 0.]),
+          end  =np.array([10000., 5000., 0.]),
+          feature_set=FeatureSet(case="C"),   # 자율 라우팅
+          current_map=obs_map,
+      )
+      print(result.summary())
+
+================================================================================
+【단계별 흐름도 — Pull & Push 알고리즘】
+
+  입력: start(S), end(D), FeatureSet, ObstacleMap
+  │
+  ├─ Step 1: 초기 인장 (Initial Tension) ━━━━━━━━━━━━━━━━━━━━━━━━ 🟡
+  │    step1_initial_tension(S, D)
+  │    │
+  │    └─ make_orthogonal_segments([S, D])
+  │         ΔX → X축 세그먼트
+  │         ΔY → Y축 세그먼트     (X→Y→Z 우선순위 직교 분해)
+  │         ΔZ → Z축 세그먼트
+  │    → RubberBandState(step=1, segments=[...])
+  │
+  ├─ Step 2: Pull — 특징점 스냅 (AI Snap) ━━━━━━━━━━━━━━━━━━━━━━━ 🔵
+  │    step2_pull_snap(S, D, FeatureSet)
+  │    │
+  │    ├─ Case C: 웨이포인트 없음 → Step 1 경로 그대로 사용
+  │    │
+  │    └─ Case A/B: 웨이포인트 있음
+  │         웨이포인트를 S→D 직선 방향 투영값 기준 정렬
+  │         [S] + sorted_waypoints + [D] 로 폴리라인 구성
+  │         make_orthogonal_segments(폴리라인) → 직교 세그먼트
+  │    → RubberBandState(step=2, snap_waypoints=[...])
+  │
+  └─ Step 3: Push — 충돌 회피 (Obstacle Push) ━━━━━━━━━━━━━━━━━━━ 🔴
+       step3_push_resolve(State, ObstacleMap)
+       │
+       ├─ 최대 20회 반복 루프:
+       │    collision_pairs = 세그먼트 (start,end) 쌍 목록
+       │    collisions = find_collisions(collision_pairs, obstacles)
+       │    │
+       │    ├─ 충돌 없음 → 루프 종료
+       │    │
+       │    └─ 충돌 있음:
+       │         avoidance = resolve_collision(collision, S, D, bends_left)
+       │         웨이포인트 삽입 → make_orthogonal_segments 재실행
+       │         수직 꺾임 카운터 업데이트
+       │         remaining_vertical_bends -= avoidance.vertical_bends_used
+       │
+       └─ 최종 RouteSegment[] 반환
+
+  → RoutingResult(states=[S1, S2, S3], final_segments, total_length, vertical_bends)
+
+================================================================================
+【핵심 알고리즘: 직교 분해 (make_orthogonal_segments)】
+
+  임의의 폴리라인 점 목록 [P0, P1, P2, ...] 을 받아
+  각 인접 쌍 사이를 X→Y→Z 우선순위 단일 축 세그먼트로 분해한다.
+
+  for (A, B) in pairwise(points):
+      delta = B - A         # [ΔX, ΔY, ΔZ]
+      current = A
+      for axis in [0, 1, 2]:    # X=0, Y=1, Z=2 순서
+          if |delta[axis]| > ε:
+              next_pt = current.copy()
+              next_pt[axis] += delta[axis]
+              yield RouteSegment(current, next_pt)
+              current = next_pt
+
+  결과: 모든 세그먼트는 단일 축 방향 (직교 보장)
+
+【수직 꺾임 카운트 (count_vertical_bends)】
+
+  Z축 방향 세그먼트 수 카운팅:
+  for seg in segments:
+      delta = seg.end - seg.start
+      if |delta[2]| > max(|delta[0]|, |delta[1]|):   # Z 성분이 지배적
+          vertical_count += 1
+
+================================================================================
+【주요 클래스 / 함수 / 변수】
+
+  RouteSegment                  라우팅 경로의 단일 직선 구간
+    .start  ndarray(3,)  시작 좌표 (mm)
+    .end    ndarray(3,)  끝 좌표 (mm)
+    .length float        구간 길이 = norm(end - start)
+
+  RubberBandState               라우팅 중간 상태 스냅샷 (시각화용)
+    .step             int       1=인장, 2=스냅, 3=충돌회피
+    .segments[]       RouteSegment[]  현재 세그먼트 목록
+    .snap_waypoints[] ndarray[]  Step2 에서 스냅된 웨이포인트
+    .collision_points[] ndarray[]  Step3 에서 감지된 충돌 좌표
+
+  RoutingResult                 최종 라우팅 결과
+    .states[]         list[RubberBandState]  3단계 스냅샷
+    .final_segments[] RouteSegment[]   최종 확정 세그먼트
+    .total_length     float  전체 경로 길이 (mm)
+    .vertical_bends   int    수직 꺾임 횟수
+    .summary()        str    결과 요약 문자열
+
+  make_orthogonal_segments()    폴리라인 → 직교 RouteSegment 목록
+  count_vertical_bends()        세그먼트 목록에서 Z축 꺾임 수 계산
+  step1_initial_tension()       Step 1: S→D 직선 직교 분해
+  step2_pull_snap()             Step 2: 특징점 스냅 Pull
+  step3_push_resolve()          Step 3: 충돌 검사 + 회피 Push
+  run_routing()                 전체 3단계 파이프라인 실행 (주 진입점)
+
+  KEY VARIABLES in run_routing():
+    max_vertical_bends   config.MAX_VERTICAL_BENDS (=5) — 제한 횟수
+    tray_half_width      config.TRAY_WIDTH/2 (=300mm)
+    safety_margin        config.SAFETY_MARGIN (=50mm)
+    MAX_PUSH_ITER        = 20 — 충돌 회피 최대 반복 횟수
+
+================================================================================
 """
 from __future__ import annotations
 
@@ -26,6 +145,8 @@ if TYPE_CHECKING:
     from .collision import CollisionResult
 
 logger = logging.getLogger(__name__)
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

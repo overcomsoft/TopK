@@ -1,17 +1,90 @@
 """
-feature_extractor.py
---------------------
-Case A/B/C별 꺾임 특징점 추출 및 정규화 모듈.
+================================================================================
+feature_extractor.py  ─  레거시 꺾임 특징점 추출 및 현재 공간 정규화 모듈
+================================================================================
 
-Case A (≥90%): 레거시 엘보 좌표 전체 → Ratio 정규화 후 유도 웨이포인트 전체 주입
-Case B (60~90%): 메인 파이프 랙 Z-Level + 거대 장비 우회 시작/끝점만 추출
-Case C (<60%):  추출 없음 → 순수 기하학 자율 라우팅
+【실행 명령어】
+  ※ 독립 테스트:
+      cd RubberBandRouter
+      python -m pytest tests/test_rubber_band.py::TestStep2PullSnap -v
 
-정규화 공식:
-    Ratio_X = (x_old - x_start_old) / (x_end_old - x_start_old)
-    ...동일하게 Y, Z 적용
-현재 공간에 재투영:
-    x_new = x_start_new + Ratio_X * (x_end_new - x_start_new)
+================================================================================
+【단계별 흐름도】
+
+  입력: MatchResult.case(A/B/C), legacy_segments[], current_start, current_end
+  │
+  ├─ Case C (combined_score < 0.60) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  │    extract_features_case_c()
+  │    → FeatureSet(case="C", waypoints=[])   # 빈 웨이포인트
+  │    → rubber_band.py 에서 순수 기하학 자율 라우팅
+  │
+  ├─ Case B (0.60 ≤ score < 0.90) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  │    extract_features_case_b(legacy_segments, legacy_start, legacy_end, current_start, current_end)
+  │    │
+  │    ├─ 거시적 특징점만 선별:
+  │    │    ① is_vertical = True (Z축 꺾임): 파이프 랙 Z-Level 통과점
+  │    │    ② volume ≥ 1e10 mm³ 대형 장비 AABB 인접 꺾임점
+  │    │
+  │    └─ normalize_to_ratio() → ratio_to_current()
+  │         선별된 엘보 좌표를 비율 정규화 후 현재 공간에 재투영
+  │
+  └─ Case A (score ≥ 0.90) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+       extract_features_case_a(legacy_segments, legacy_start, legacy_end, current_start, current_end)
+       │
+       ├─ 모든 레거시 엘보 좌표 추출 (POC/ELBOW 타입 세그먼트)
+       └─ normalize_to_ratio() → ratio_to_current() 전체 적용
+
+================================================================================
+【핵심 알고리즘: 비율 정규화 투영 (Proportional Normalization)】
+
+  레거시 공간의 좌표를 현재 공간에 비율로 재투영하여 좌표계 차이를 흡수한다.
+
+  1) 레거시 공간에서 비율 계산 (각 축):
+       Ratio_X = (x_old - x_start_old) / (x_end_old - x_start_old + ε)
+       Ratio_Y = (y_old - y_start_old) / (y_end_old - y_start_old + ε)
+       Ratio_Z = (z_old - z_start_old) / (z_end_old - z_start_old + ε)
+       → ratio = [Ratio_X, Ratio_Y, Ratio_Z] ∈ 실수 (범위 제한 없음)
+
+  2) 현재 공간에 재투영:
+       x_new = x_start_new + Ratio_X × (x_end_new - x_start_new)
+       y_new = y_start_new + Ratio_Y × (y_end_new - y_start_new)
+       z_new = z_start_new + Ratio_Z × (z_end_new - z_start_new)
+       → new_point = current_start + ratio * (current_end - current_start)
+
+  이 공식으로 레거시 배관이 10m×5m 공간을 지나도,
+  현재 8m×7m 공간이면 자동으로 비례 투영된다.
+
+  예시:
+    레거시: S=(0,0,0), D=(10000,5000,0), 엘보=(3000,2000,0)
+    비율: [0.3, 0.4, 0.0]
+    현재: S=(0,0,0), D=(8000,7000,0)
+    재투영 엘보: (2400, 2800, 0)
+
+================================================================================
+【주요 클래스 / 함수 / 변수】
+
+  Waypoint                            꺾임 웨이포인트 데이터 클래스
+    .position   ndarray(3,)  월드 좌표 (mm)
+    .priority   int          삽입 우선순위 (낮을수록 먼저 처리)
+    .source     str          출처 설명 ("case_a_elbow", "case_b_rack_z" 등)
+
+  FeatureSet                          추출된 특징점 집합
+    .case       str          "A" | "B" | "C"
+    .waypoints  list[Waypoint]  웨이포인트 목록 (Case C이면 빈 리스트)
+
+  normalize_to_ratio()      레거시 좌표 → 비율 벡터 [Ratio_X, Ratio_Y, Ratio_Z]
+  ratio_to_current()        비율 벡터 → 현재 공간 좌표
+  extract_features_case_a() Case A: 전체 엘보 추출 + 비율 투영
+  extract_features_case_b() Case B: 수직 꺾임 + 대형 장비 인접점만 추출
+  extract_features_case_c() Case C: 빈 FeatureSet 반환
+  extract_features()        통합 진입점 (case에 따라 내부 분기)
+
+  KEY VARIABLES:
+    LARGE_EQUIPMENT_VOLUME_THRESHOLD = 1e10  mm³ (대형 장비 판별 기준 = 10m³)
+    ε (epsilon)                      = 1e-9  분모 0 방지용 미소값
+    ratio                            ndarray(3,) 비율 벡터 (각 축 0.0~1.0 권장)
+
+================================================================================
 """
 from __future__ import annotations
 

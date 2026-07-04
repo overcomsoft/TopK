@@ -1,20 +1,54 @@
 """
-run_routing.py
---------------
-RubberBandRouter PoC 통합 실행 스크립트.
+================================================================================
+run_routing.py  ─  RubberBandRouter PoC 통합 실행 스크립트
+================================================================================
 
-실행 흐름:
-  1. PostgreSQL DB에서 프로젝트 선택
-  2. 장애물 + 장비PoC + 덕트/레터럴PoC + 기존 라우팅 작업 로드
-  3. 라우팅 작업 목록 표시 → 사용자가 1건 선택 (또는 --task 인수)
-  4. RubberBand 라우팅 엔진 실행 (Pull & Push)
-  5. 배관 분배 후 결과 JSON 저장
-  6. Plotly Dash 4단계 시각화 디버거 실행
+【실행 명령어】
+  ※ 대화형 선택 모드 (일반 실행):
+      cd RubberBandRouter
+      python run_routing.py
 
-사용법:
-    python run_routing.py                          # 대화형 선택
-    python run_routing.py --project 2 --task 0    # 비대화형 (자동화)
-    python run_routing.py --no-dash                # 시각화 없이 JSON만 저장
+  ※ 자동 실행 모드 (CLI 인수 지정):
+      python run_routing.py --project 2 --task 0 --pipes 4
+
+  ※ 시각화 웹서버 없이 결과 JSON만 추출할 때:
+      python run_routing.py --project 2 --task 0 --no-dash
+
+================================================================================
+【전체 통합 실행 흐름도】
+
+  1. config.py 에서 DB Connection Info 획득 (get_conninfo)
+  2. select_project()
+     └─ list_projects() 로 프로젝트 목록을 불러와 CLI에 출력하고 사용자 입력 접수
+  3. load_scene()
+     └─ PostgreSQL DB 로부터 해당 프로젝트의 장애물, 장비, PoC 및 태스크 정보 일괄 로드
+  4. select_task()
+     └─ 로드된 라우팅 태스크 목록 중 수행할 작업 번호 선택
+  5. scene_to_obstacle_map()
+     └─ 수집된 AABB 장애물들을 core OBBObstacle 포맷으로 변환하고 밀도 텐서 빌드
+  6. run_routing()
+     └─ Step 1(Tension), Step 2(Snap), Step 3(Collision Avoidance) 라우팅 엔진 구동
+  7. distribute_pipes()
+     └─ 도출된 트레이 중심선 경로를 평행 평면상에 지정된 배관 개수만큼 오프셋 배치
+  8. dist_result.save_json()
+     └─ 최종 배치 결과를 json 파일로 data/results 폴더 아래 저장
+  9. build_all_scenes() & create_dash_app()
+     └─ launch_dash가 True 인 경우 단계별 Plotly Scene을 로드하여 Dash 웹서버(8050) 시작
+
+================================================================================
+【주요 함수 / 인수 및 변수】
+
+  select_task()             작업 리스트 중 실행할 태스크 인덱스를 사용자로부터 입력받음
+  run()                     전체 모듈(DB 로드 -> 엔진 실행 -> 결과 저장 -> 시각화)을
+                            하나의 순차적인 흐름으로 결합하여 실행
+  main()                    CLI argument parser 구성 및 logging 초기화
+  
+  KEY ARGUMENTS:
+    --project               Project Info Sequence Number (1-based index)
+    --task                  Route Path Task Index (0-based index)
+    --pipes                 생성할 평행 배관의 수
+    --no-dash               True 지정 시 3D Plotly Dash 기동을 스킵
+================================================================================
 """
 from __future__ import annotations
 

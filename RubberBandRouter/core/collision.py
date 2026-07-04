@@ -1,16 +1,124 @@
 """
-collision.py
-------------
-SAT(분리축 이론) 기반 OBB 충돌 검사 및 3대 회피 전략 모듈.
+================================================================================
+collision.py  ─  OBB 충돌 검사 및 3대 회피 전략 모듈
+================================================================================
 
-OBB-세그먼트 충돌 검사:
-  캡슐(세그먼트+반경) vs OBB 간 SAT 기반 분리축 검사를 수행한다.
-  세그먼트는 배관 트레이(직사각형 단면)의 중심축으로 표현된다.
+【실행 명령어】
+  ※ 독립 테스트:
+      cd RubberBandRouter
+      python -m pytest tests/test_collision.py -v
 
-3대 회피 전략 우선순위:
-  1순위: 슬리브 터널링 (is_penetration=True)
-  2순위: 수직 오버/언더패스 (MAX_VERTICAL_BENDS 제한 내)
-  3순위: OBB 최소 마진 외곽 우회 (90도 직교)
+================================================================================
+【단계별 흐름도】
+
+  ┌──────────────────────────────────────────────────────────────┐
+  │  입력: 세그먼트(start, end) + 장애물 목록(OBBObstacle[])    │
+  └────────────────────┬─────────────────────────────────────────┘
+                       │ find_collisions()
+                       ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │  segment_vs_obb_sat() — 각 세그먼트 × 각 장애물 충돌 검사   │
+  │                                                              │
+  │  알고리즘 (2단계):                                           │
+  │  1단계 — AABB 빠른 사전 필터 (margin 포함)                  │
+  │    seg_min = [start,end].min - margin                        │
+  │    seg_max = [start,end].max + margin                        │
+  │    → 겹침 없으면 즉시 "충돌 없음" 반환 (O(1))              │
+  │                                                              │
+  │  2단계 — OBB 로컬 공간 샘플 검사                            │
+  │    세그먼트를 500mm 간격으로 N개 점 샘플링                   │
+  │    for each pt in samples:                                   │
+  │        local = obs.axes @ (pt - obs.center)  # 로컬 좌표    │
+  │        if all(|local| <= half_extents + margin):             │
+  │            → "충돌" 반환 + 침투깊이(penetration_depth)      │
+  └──────────────┬───────────────────────────────────────────────┘
+                 │ CollisionResult.is_colliding = True
+                 ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │  resolve_collision() — 3대 회피 전략 순서 적용               │
+  │                                                              │
+  │  1순위: strategy_1_sleeve_tunnel()                           │
+  │    조건: obs.is_penetration = True (슬리브 관통 허용)        │
+  │    처리: 세그먼트를 슬리브 중심축 방향으로 강제 정렬         │
+  │    웨이포인트: [진입점, 통과점, 이탈점]                      │
+  │                                                              │
+  │  2순위: strategy_2_vertical_bypass()                         │
+  │    조건: remaining_vertical_bends >= 2                       │
+  │         AND 수직이동거리 < 수평이동거리                       │
+  │    처리: 장애물 위(over) 또는 아래(under) 계단형 우회        │
+  │    웨이포인트: [상승점, 오버패스 수평선, 하강점]             │
+  │    비용: 수직 꺾임 2회 소비                                  │
+  │                                                              │
+  │  3순위: strategy_3_lateral_bypass()                          │
+  │    조건: 항상 실행 가능 (폴백)                               │
+  │    처리: OBB 측면 + margin 에 바짝 붙은 4포인트 90도 우회   │
+  │    웨이포인트: [좌/우 진입, 측면 통과, 좌/우 이탈]          │
+  └──────────────────────────────────────────────────────────────┘
+                 │
+                 ▼
+  AvoidanceResult(strategy, waypoints[], success)
+  → rubber_band.py 의 step3_push_resolve() 에서 새 세그먼트 생성
+
+================================================================================
+【핵심 알고리즘: OBB 로컬 공간 충돌 검사】
+
+  # 세그먼트 위의 샘플 점이 OBB (+ margin) 내부에 있는지 판별
+  margin   = tray_half_width + safety_margin   # 배관 반폭 + 안전거리
+  expanded = obs.half_extents + margin          # 확장된 반-크기
+
+  for t in linspace(0, 1, N):                  # N = seg_len / 500 + 1
+      pt    = start + t * (end - start)
+      local = obs.axes @ (pt - obs.center)     # (3,) 로컬 좌표
+      if all(|local[i]| <= expanded[i]):       # 3축 모두 범위 내
+          → 충돌 감지
+
+【3순위 회피: 최소 우회 거리 계산】
+
+  # 장애물 측면까지 법선 방향 투영
+  seg_dir  = normalize(end - start)
+  normal   = normalize(cross(seg_dir, [0,0,1]))  # 수평 법선
+  proj_to_normal = dot(obs.center - start, normal)
+  bypass_side = sign(proj_to_normal)             # 좌(-1) 또는 우(+1)
+
+  # 회피 오프셋 = OBB 측면 + margin (법선 방향)
+  offset = (max_half_normal + margin) * bypass_side * normal
+  p1 = start + proj_along_seg * seg_dir + offset  # 진입 회피점
+  p2 = end   - proj_along_seg * seg_dir + offset  # 이탈 회피점
+
+================================================================================
+【주요 클래스 / 함수 / 변수】
+
+  CollisionResult                         충돌 검사 결과 데이터 클래스
+    .is_colliding     bool  충돌 여부
+    .obstacle         OBBObstacle | None  충돌한 장애물
+    .collision_point  ndarray(3,)  충돌 근사 좌표 (세그먼트 중점)
+    .penetration_depth float  침투 깊이 (mm)
+
+  AvoidanceStrategy   Enum  회피 전략 종류
+    SLEEVE_TUNNEL     1순위 슬리브 터널링
+    VERTICAL_BYPASS   2순위 수직 오버/언더패스
+    LATERAL_BYPASS    3순위 측면 직교 우회
+
+  AvoidanceResult                         회피 전략 적용 결과
+    .strategy         AvoidanceStrategy
+    .waypoints[]      list[ndarray(3,)]  삽입할 웨이포인트 좌표 목록
+    .vertical_bends_used  int  소비된 수직 꺾임 횟수 (1순위=0, 2순위=2, 3순위=0)
+    .success          bool
+
+  segment_vs_obb_sat()    세그먼트 vs OBB 충돌 검사 (AABB 필터 + 샘플링)
+  find_collisions()       전체 세그먼트 × 장애물 목록 충돌 탐색
+  resolve_collision()     충돌 → 3대 전략 순서 적용
+  strategy_1_sleeve_tunnel()   1순위 슬리브 관통
+  strategy_2_vertical_bypass() 2순위 수직 우회
+  strategy_3_lateral_bypass()  3순위 측면 우회
+
+  KEY VARIABLES:
+    margin            = tray_half_width + safety_margin (충돌 여유 mm)
+    expanded_he       = obs.half_extents + margin       (확장 반-크기)
+    n_samples         = max(3, seg_len // 500 + 1)      (샘플 개수)
+    bypass_offset     = OBB 측면 반-크기 + margin       (우회 거리)
+
+================================================================================
 """
 from __future__ import annotations
 
@@ -25,6 +133,8 @@ if TYPE_CHECKING:
     from .obstacle_map import OBBObstacle
 
 logger = logging.getLogger(__name__)
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

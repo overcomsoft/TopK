@@ -1,13 +1,113 @@
 """
-obstacle_map.py
----------------
-장애물 맵 로더 및 밀도 텐서 생성 모듈.
+================================================================================
+obstacle_map.py  ─  장애물 맵 로더 및 밀도 텐서 생성 모듈
+================================================================================
 
-주요 기능:
-  1. DB(TB_EQUIPMENT, TB_DUCT, TB_PIPE_RACK)에서 OBB 24개 정점 좌표 로드
-  2. 30,000mm 공간을 1,000mm(1m) 복셀 격자로 분할 → numpy 3D 이진 텐서 생성
-  3. 텐서를 .pkl 파일로 캐시 저장 / 로드 (재사용 최적화)
-  4. is_penetration=True, Grating/Floor 등 Pass-through 객체 제외 처리
+【실행 명령어】
+  ※ 이 모듈은 직접 실행하지 않으며 run_routing.py 또는 timeline_viewer.py 에서 호출한다.
+  ※ 독립 테스트:
+      cd RubberBandRouter
+      python -m pytest tests/test_data_loader.py::TestSceneToObstacleMap -v
+
+  ※ 캐시 강제 재생성:
+      from core.obstacle_map import get_or_build_obstacle_map
+      import config as cfg
+      obs_map = get_or_build_obstacle_map(
+          conninfo=cfg.get_conninfo(),
+          project_id="PROJ-001",
+          cache_dir=cfg.LEGACY_MAP_DIR,
+          force_rebuild=True,   # ← 캐시 무시하고 DB에서 재로드
+      )
+
+================================================================================
+【단계별 흐름도】
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  호출: get_or_build_obstacle_map(conninfo, pid, cache_dir)  │
+  └───────────────┬─────────────────────────────────────────────┘
+                  │
+          ┌───────▼────────┐
+          │ 캐시 파일       │  obstacle_map_{pid}.pkl
+          │ 존재하는가?     │
+          └───┬─────────┬──┘
+           예 │         │ 아니오 / force_rebuild=True
+              ▼         ▼
+     load_obstacle_    load_obstacles_from_db()
+     map_cache()        │
+          │             │ DB: TB_EQUIPMENT 등 조회
+          │             │ OBB 24정점 → from_24_vertices()
+          │             │   ├─ SVD로 로컬 축 추정
+          │             │   ├─ 반-크기(half_extents) 계산
+          │             │   └─ 부피(volume) 계산
+          │             │
+          │             ▼
+          │         passthrough 객체 필터링
+          │         (GRATING, FLOOR, is_penetration=True 제외)
+          │             │
+          │             ▼
+          │         build_density_tensor()
+          │             │
+          │         ┌───▼────────────────────────────────────┐
+          │         │ 알고리즘: AABB 근사 복셀화              │
+          │         │                                         │
+          │         │  for each OBBObstacle:                  │
+          │         │    mn = floor(verts.min / grid_size)    │
+          │         │    mx = ceil (verts.max / grid_size)    │
+          │         │    tensor[mn:mx, mn:mx, mn:mx] = 1      │
+          │         │                                         │
+          │         │  결과: (30, 30, 30) numpy int8 텐서     │
+          │         │  0 = 빈 공간, 1 = 장애물 점유 셀        │
+          │         └───────────────────────────────────────┬─┘
+          │                                                 │
+          ▼                                                 ▼
+     ObstacleMap                                    save_obstacle_map()
+     (캐시에서)                                      → .pkl 저장
+          │                                                 │
+          └──────────────────┬──────────────────────────────┘
+                             ▼
+                       ObstacleMap 반환
+                       (topology_matcher.py 에서 cosine similarity 계산)
+
+================================================================================
+【핵심 알고리즘: OBB → SVD 로컬 축 추정】
+
+  DB에서 8개 꼭짓점 좌표가 주어졌을 때 OBB 의 로컬 좌표계를 복원한다:
+
+  1) 중심 계산:   center = mean(verts, axis=0)         # (3,)
+  2) SVD 분해:   _, _, vh = svd(verts - center)
+                  axes = vh                             # (3,3), 각 행이 로컬 축 단위벡터
+  3) 반-크기:    proj = (verts - center) @ axes.T      # (8,3): 각 꼭짓점의 로컬 좌표
+                  half_extents = (proj.max - proj.min) / 2   # (3,)
+  4) 부피:       volume = prod(half_extents * 2)
+
+  이렇게 구한 axes, half_extents 는 collision.py 의 SAT 충돌 검사에서
+  OBB 로컬 공간 변환에 바로 사용된다.
+
+================================================================================
+【주요 클래스 / 함수】
+
+  OBBObstacle
+    .name           장애물 이름 (DB INSTANCE_NAME)
+    .vertices       (8,3) ndarray — 8개 꼭짓점 월드 좌표 (mm)
+    .center         (3,)  ndarray — OBB 중심 (mm)
+    .half_extents   (3,)  ndarray — 로컬 x/y/z 반-크기 (mm)
+    .axes           (3,3) ndarray — 로컬 축 단위벡터 (행 = 축)
+    .volume         float — OBB 부피 (mm³)
+    .is_penetration bool  — True: 슬리브 통과 허용
+    .from_24_vertices()   클래스메서드, SVD 기반 OBB 복원
+
+  ObstacleMap
+    .obstacles[]    OBBObstacle 목록
+    .density_tensor (G,G,G) int8 — G = SPACE_MAX//GRID_SIZE = 30
+    .grid_dim       텐서 차원 = space_max // grid_size
+    .build_density_tensor() AABB 근사 복셀화 → 텐서 생성
+
+  get_or_build_obstacle_map()   캐시 우선 로드 통합 진입점
+  load_obstacles_from_db()      DB 직접 조회 로더
+  save_obstacle_map()           pickle 직렬화 저장
+  load_obstacle_map_cache()     pickle 역직렬화 로드
+
+================================================================================
 """
 from __future__ import annotations
 

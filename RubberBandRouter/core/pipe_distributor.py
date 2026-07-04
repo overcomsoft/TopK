@@ -1,16 +1,119 @@
 """
-pipe_distributor.py
--------------------
-트레이 중심선 경로 → 개별 배관 평행 오프셋 분배 모듈.
+================================================================================
+pipe_distributor.py  ─  트레이 중심선 → 개별 배관 평행 오프셋 분배 모듈
+================================================================================
 
-트레이 중심선(RouteSegment 목록)에 대해 법선 방향으로
-Index * Pitch 오프셋을 적용하여 각 배관의 3D 좌표 세트를 도출한다.
+【실행 명령어】
+  ※ 직접 테스트 (Python REPL):
+      import sys; sys.path.insert(0, "RubberBandRouter")
+      import numpy as np
+      from core.rubber_band import RouteSegment
+      from core.pipe_distributor import distribute_pipes
 
-법선 방향 결정:
-  - 수평 세그먼트: Z축 기준 법선 (XY 평면 내 측면)
-  - 수직 세그먼트: 이전 수평 세그먼트의 법선 방향 유지
+      segs = [
+          RouteSegment(np.array([0.,0.,0.]),   np.array([5000.,0.,0.])),
+          RouteSegment(np.array([5000.,0.,0.]),np.array([5000.,3000.,0.])),
+      ]
+      result = distribute_pipes(segs, pipe_count=4)
+      for pipe in result.pipes:
+          print(pipe.pipe_id, pipe.points)
+
+      result.save_json("output.json")   # JSON 저장
+
+================================================================================
+【단계별 흐름도】
+
+  입력: RouteSegment[] (트레이 중심선), pipe_count, pipe_pitch
+  │
+  ├─ 1단계: 세그먼트별 법선 벡터 계산
+  │    for each segment:
+  │        seg_dir = normalize(end - start)
+  │        │
+  │        ├─ 수평 세그먼트 (|dz| < threshold):
+  │        │    normal = normalize(cross(seg_dir, Z_UP))
+  │        │    Z_UP = [0, 0, 1]
+  │        │    → XY 평면 내 측면 방향 (배관 가로 배열)
+  │        │
+  │        └─ 수직 세그먼트 (|dz| >= threshold):
+  │             normal = prev_horizontal_normal
+  │             → 이전 수평 법선 방향 유지 (배관 연속성 보장)
+  │
+  ├─ 2단계: 오프셋 계산 (대칭 배열)
+  │    n = pipe_count    # 배관 수
+  │    for i in 0..n-1:
+  │        offset_dist = (i - (n-1)/2.0) × pipe_pitch
+  │        # 예: n=4, pitch=100 → [-150, -50, +50, +150] mm
+  │        # 예: n=3, pitch=100 → [-100, 0, +100] mm (중앙이 0)
+  │
+  └─ 3단계: 각 배관 폴리라인 좌표 계산
+       for each segment, for each pipe(i):
+           offset_vec = offset_dist × normal_vector
+           start_i = seg.start + offset_vec
+           end_i   = seg.end   + offset_vec
+       → 연속된 점 목록으로 폴리라인 구성 (PipePath.points[])
+
+  출력: DistributionResult
+        ├─ pipes[]      PipePath[] — 개별 배관 폴리라인
+        └─ save_json()  결과를 JSON 파일로 저장
+
+================================================================================
+【핵심 알고리즘: 법선 벡터 계산 및 대칭 오프셋 배치】
+
+  # 수평 세그먼트의 법선 계산 (Z×세그먼트방향 의 외적)
+  Z_UP     = [0, 0, 1]
+  seg_dir  = normalize(seg.end - seg.start)
+  normal   = normalize(cross(Z_UP, seg_dir))
+  # → seg_dir 에 수직이고 XY 평면 내에 있는 단위벡터
+
+  # 대칭 오프셋 배치
+  offsets = [(i - (n-1)/2.0) * pitch for i in range(n)]
+  # n=4, pitch=100 예시:
+  #   i=0: (0 - 1.5) * 100 = -150mm
+  #   i=1: (1 - 1.5) * 100 = -50mm
+  #   i=2: (2 - 1.5) * 100 = +50mm
+  #   i=3: (3 - 1.5) * 100 = +150mm
+
+  # 배관 j번의 세그먼트 k번 시작점
+  point = seg.start + offsets[j] * normal_k
+
+================================================================================
+【주요 클래스 / 함수 / 변수】
+
+  PipePath                          개별 배관 1개의 3D 경로
+    .pipe_id      str   배관 ID ("PIPE-01", "PIPE-02", ...)
+    .pipe_index   int   배관 순번 (0-based, 색상 인덱스 용도)
+    .utility      str | None   유틸리티 라벨 (선택)
+    .points       list[list[float]]   [[x,y,z], ...] 폴리라인 좌표 (mm)
+
+  DistributionResult                분배 결과 컨테이너
+    .pipes        list[PipePath]   개별 배관 목록
+    .tray_segments  RouteSegment[]  트레이 중심선 세그먼트 (참조용)
+    .save_json()  Path  결과를 JSON 파일로 저장하고 경로 반환
+
+  distribute_pipes()   트레이 세그먼트 + 배관 수 → DistributionResult 반환
+                       (주 진입점)
+
+  KEY VARIABLES:
+    n_pipes     = pipe_count (기본값: cfg.PIPE_COUNT = 6)
+    pitch       = pipe_pitch (기본값: cfg.PIPE_PITCH = 100mm)
+    Z_UP        = np.array([0,0,1])   법선 계산 기준 수직 벡터
+    offsets[]   대칭 배치 거리 목록 (mm)
+    VERT_THRESH = 0.7   |dz/len| 비율이 이 값 이상이면 수직 세그먼트로 판별
+
+================================================================================
 """
 from __future__ import annotations
+
+import json
+import logging
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from .rubber_band import RouteSegment
 
 import json
 import logging
