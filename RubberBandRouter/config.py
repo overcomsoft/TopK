@@ -348,7 +348,7 @@ PASSTHROUGH_TYPES: set[str] = {"GRATING", "FLOOR", "GRID_BEAM", "HANDRAIL"}
 #   COLOR_PIPES[]        멀티컬러   — Step 4: 개별 배관 분배선
 # ─────────────────────────────────────────────────────────────────────────────
 VIZ_PORT:  int  = 8050    # Plotly Dash 서버 포트
-VIZ_DEBUG: bool = True    # Dash 디버그 모드
+VIZ_DEBUG: bool = False    # Dash 디버그 모드
 
 # 단계별 색상 (Plotly CSS 색상명 또는 hex)
 COLOR_STEP1_TENSION   = "#FFD700"   # 🟡 황색   — 초기 인장 직선
