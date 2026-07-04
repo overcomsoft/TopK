@@ -103,6 +103,57 @@ namespace AutoRoutingLibrary.Core
         [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int r3d_set_pipe_gap(IntPtr e, double gapMm);
         [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int r3d_dump_scene_text(IntPtr e, out IntPtr outScene);
 
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct R3dPoint3D
+        {
+            public double x, y, z;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct R3dAABB
+        {
+            public double min_x, min_y, min_z;
+            public double max_x, max_y, max_z;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct R3dRubberConfig
+        {
+            public int max_vertical_bends;
+            public double safety_margin;
+            public double tray_width;
+            public double tray_height;
+            public double pipe_pitch;
+            public int pipe_count;
+        }
+
+        [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr r3d_rubber_create();
+        [DllImport(Dll, CallingConvention = Cdecl)] internal static extern void r3d_rubber_destroy(IntPtr engine);
+
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_rubber_initialize(IntPtr engine, in R3dRubberConfig cfg,
+            double[]? freq_z_levels, int freq_z_count,
+            R3dAABB[]? freq_bend_zones, int freq_bend_count);
+
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_rubber_ingest_obstacles(IntPtr engine, R3dAABB[]? obstacles, int count);
+
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_rubber_execute(IntPtr engine, R3dPoint3D start, R3dPoint3D end);
+
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_rubber_get_step_count(IntPtr engine);
+
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_rubber_get_step_details(IntPtr engine, int step_index,
+            byte[] out_desc, int max_desc_len,
+            [Out] R3dPoint3D[]? out_wps, int max_wps, out int out_wps_count,
+            [Out] R3dPoint3D[]? out_cols, int max_cols, out int out_cols_count);
+
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_rubber_get_pipe_path(IntPtr engine, int pipe_index,
+            [Out] R3dPoint3D[]? out_points, int max_points);
+
         internal static byte[] Utf8(string s) => Encoding.UTF8.GetBytes(s + "\0");
         internal static byte[]? Utf8OrNull(string? s) => s is null ? null : Utf8(s);
 

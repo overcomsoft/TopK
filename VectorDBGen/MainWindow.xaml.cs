@@ -96,7 +96,7 @@ namespace VectorDBGen
             "TB_ROUTE_PATH",
             "TB_ROUTE_SEGMENTS",
             "TB_ROUTE_SEGMENT_DETAIL",
-            "TB_BIM_OBSTACLES",
+            "TB_BIM_OBSTACLE",
         };
 
         // 빌더별 필수 소스 테이블 — 누락 시 Python 엔진 실행 전 거부

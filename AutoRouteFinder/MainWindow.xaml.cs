@@ -97,6 +97,13 @@ namespace AutoRouteFinder
         private readonly List<Visual3D> _spineVisuals = new();
         private readonly List<Visual3D> _topKVisuals = new();
 
+        // 고무줄 변형 라우팅 관련 시각화 및 캐시 필드
+        private readonly List<Visual3D> _rubberBandVisuals = new();
+        private List<RubberBandStep>? _cachedRubberSteps;
+        private List<List<Vec3>>? _cachedFinalPipePaths;
+        private Vec3 _currentRubberStart;
+        private Vec3 _currentRubberEnd;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -460,6 +467,13 @@ namespace AutoRouteFinder
             ClearSpineVisuals();
             ClearTopKVisuals();
             ClearAutoRoutingVisuals();
+            ClearRubberBandVisuals();
+        }
+
+        private void ClearRubberBandVisuals()
+        {
+            foreach (var v in _rubberBandVisuals) Viewport3D.Children.Remove(v);
+            _rubberBandVisuals.Clear();
         }
 
         private void ClearAutoRoutingVisuals()
@@ -803,6 +817,8 @@ namespace AutoRouteFinder
 
                 ShowSpineForSelectedTask(task);
                 ShowTopKForSelectedTask(task);
+
+                TxtStatus.Text = $"선택 배관: {task.Utility} ({task.PocName} -> {task.EndName}) | 출발: ({task.Sx:F0}, {task.Sy:F0}, {task.Sz:F0}) | 종단: ({task.Gx:F0}, {task.Gy:F0}, {task.Gz:F0})";
             }
         }
 
@@ -1391,6 +1407,443 @@ namespace AutoRouteFinder
 
             GridLoading.Visibility = Visibility.Collapsed;
             BtnRunRouting.IsEnabled = true;
+        }
+
+        private async void BtnRunRubberRouting_Click(object sender, RoutedEventArgs e)
+        {
+            if (_currentSceneData == null)
+            {
+                MessageBox.Show(this, "먼저 프로젝트 데이터를 로드해주세요.", "알림", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // 1. 파라미터 파싱
+            if (!int.TryParse(TxtRubberMaxBends.Text, out int maxBends)) maxBends = 5;
+            if (!double.TryParse(TxtRubberSafetyMargin.Text, out double safetyMargin)) safetyMargin = 50;
+            if (!double.TryParse(TxtRubberTrayWidth.Text, out double trayWidth)) trayWidth = 600;
+            if (!double.TryParse(TxtRubberTrayHeight.Text, out double trayHeight)) trayHeight = 300;
+            if (!double.TryParse(TxtRubberPipePitch.Text, out double pipePitch)) pipePitch = 100;
+            if (!int.TryParse(TxtRubberPipeCount.Text, out int pipeCount)) pipeCount = 3;
+
+            // 2. 라우팅 시종단 좌표 지정 (선택된 것 혹은 기본 첫 번째 작업)
+            TaskInfo? selectedTask = null;
+            if (DgTasks.SelectedItem is TaskInfo task)
+            {
+                selectedTask = task;
+            }
+            else if (DgRouteResults.SelectedItem is RouteResultUI selectedUiResult)
+            {
+                selectedTask = selectedUiResult.TaskInfo;
+            }
+            else if (_currentSceneData.Tasks.Count > 0)
+            {
+                selectedTask = _currentSceneData.Tasks[0];
+            }
+
+            if (selectedTask == null)
+            {
+                MessageBox.Show(this, "라우팅할 작업 정보가 없습니다.", "알림", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            _currentRubberStart = new Vec3(selectedTask.Sx, selectedTask.Sy, selectedTask.Sz);
+            _currentRubberEnd = new Vec3(selectedTask.Gx, selectedTask.Gy, selectedTask.Gz);
+
+            // 3. 특징점 데이터 추출 (선호 Z 레이어)
+            double[] freqZLevels = new double[] { 1000.0, 3000.0, 5000.0 }; // 기본 fallback
+            if (!string.IsNullOrEmpty(selectedTask.Group) && _featureProfiles.TryGetValue(selectedTask.Group, out var profile))
+            {
+                if (profile.PreferredRackZs != null && profile.PreferredRackZs.Count > 0)
+                {
+                    freqZLevels = profile.PreferredRackZs.ToArray();
+                }
+            }
+
+            // 기존 배관의 꺾임 포인트를 다빈도 꺾임 Zone 특징점으로 구성
+            var freqBendZones = new List<Aabb>();
+            foreach (var pipe in _currentSceneData.ExistingPipes)
+            {
+                if (pipe.Points == null || pipe.Points.Count < 3) continue;
+                for (int i = 1; i < pipe.Points.Count - 1; i++)
+                {
+                    var p = pipe.Points[i];
+                    freqBendZones.Add(new Aabb(
+                        new Vec3(p.X - 500, p.Y - 500, p.Z - 150),
+                        new Vec3(p.X + 500, p.Y + 500, p.Z + 150)
+                    ));
+                }
+            }
+
+            // 4. 장애물 데이터 추출
+            var obstacles = new List<Aabb>();
+            foreach (var obs in _currentSceneData.Obstacles)
+            {
+                if (obs.IsPassThrough) continue;
+                obstacles.Add(new Aabb(
+                    new Vec3(obs.MinX, obs.MinY, obs.MinZ),
+                    new Vec3(obs.MaxX, obs.MaxY, obs.MaxZ)
+                ));
+            }
+            foreach (var eq in _currentSceneData.Equipment)
+            {
+                obstacles.Add(new Aabb(
+                    new Vec3(eq.MinX, eq.MinY, eq.MinZ),
+                    new Vec3(eq.MaxX, eq.MaxY, eq.MaxZ)
+                ));
+            }
+
+            GridLoading.Visibility = Visibility.Visible;
+            BtnRunRubberRouting.IsEnabled = false;
+
+            try
+            {
+                var steps = new List<RubberBandStep>();
+                var finalPipes = new List<List<Vec3>>();
+
+                await Task.Run(() =>
+                {
+                    using var engine = new RubberBandEngine();
+                    engine.Initialize(maxBends, safetyMargin, trayWidth, trayHeight, pipePitch, pipeCount, freqZLevels, freqBendZones);
+                    engine.IngestObstacles(obstacles);
+                    engine.Execute(_currentRubberStart, _currentRubberEnd);
+
+                    int stepCount = engine.GetStepCount();
+                    for (int i = 0; i < stepCount; i++)
+                    {
+                        steps.Add(engine.GetStepDetails(i));
+                    }
+
+                    for (int i = 0; i < pipeCount; i++)
+                    {
+                        finalPipes.Add(engine.GetPipePath(i));
+                    }
+                });
+
+                _cachedRubberSteps = steps;
+                _cachedFinalPipePaths = finalPipes;
+
+                // 슬라이더 리셋
+                SldRubberStep.Minimum = 1;
+                SldRubberStep.Maximum = steps.Count > 0 ? steps.Count : 4;
+                SldRubberStep.Value = steps.Count;
+                TxtRubberStepVal.Text = $"Step {SldRubberStep.Value}";
+
+                // 렌더링 실행
+                RenderRubberStep((int)SldRubberStep.Value - 1, freqZLevels, freqBendZones, trayWidth, trayHeight, safetyMargin);
+
+                TxtRubberStepDesc.Text = steps.Count > 0 ? FormatStepDetails(steps[steps.Count - 1]) : "시뮬레이션 완료.";
+                TxtStatus.Text = "고무줄 변형 시뮬레이션 라우팅 완료.";
+            }
+            catch (Exception ex)
+            {
+                TxtStatus.Text = $"고무줄 라우팅 에러: {ex.Message}";
+                MessageBox.Show(this, $"고무줄 라우팅 연산에 실패했습니다:\n{ex.Message}", "에러", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                GridLoading.Visibility = Visibility.Collapsed;
+                BtnRunRubberRouting.IsEnabled = true;
+            }
+        }
+
+        private void SldRubberStep_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_cachedRubberSteps == null || _cachedRubberSteps.Count == 0) return;
+
+            int stepIndex = (int)Math.Clamp(SldRubberStep.Value - 1, 0, _cachedRubberSteps.Count - 1);
+            TxtRubberStepVal.Text = $"Step {stepIndex + 1}";
+            TxtRubberStepDesc.Text = FormatStepDetails(_cachedRubberSteps[stepIndex]);
+
+            if (!double.TryParse(TxtRubberTrayWidth.Text, out double trayWidth)) trayWidth = 600;
+            if (!double.TryParse(TxtRubberTrayHeight.Text, out double trayHeight)) trayHeight = 300;
+            if (!double.TryParse(TxtRubberSafetyMargin.Text, out double safetyMargin)) safetyMargin = 50;
+
+            double[] freqZLevels = new double[] { 1000.0, 3000.0, 5000.0 };
+            TaskInfo? selectedTask = null;
+            if (DgTasks.SelectedItem is TaskInfo task)
+            {
+                selectedTask = task;
+            }
+            else if (DgRouteResults.SelectedItem is RouteResultUI selectedUiResult)
+            {
+                selectedTask = selectedUiResult.TaskInfo;
+            }
+            else if (_currentSceneData?.Tasks.Count > 0)
+            {
+                selectedTask = _currentSceneData.Tasks[0];
+            }
+
+            if (selectedTask != null && !string.IsNullOrEmpty(selectedTask.Group) && _featureProfiles.TryGetValue(selectedTask.Group, out var profile))
+            {
+                if (profile.PreferredRackZs != null && profile.PreferredRackZs.Count > 0)
+                {
+                    freqZLevels = profile.PreferredRackZs.ToArray();
+                }
+            }
+
+            var freqBendZones = new List<Aabb>();
+            if (_currentSceneData != null)
+            {
+                foreach (var pipe in _currentSceneData.ExistingPipes)
+                {
+                    if (pipe.Points == null || pipe.Points.Count < 3) continue;
+                    for (int i = 1; i < pipe.Points.Count - 1; i++)
+                    {
+                        var p = pipe.Points[i];
+                        freqBendZones.Add(new Aabb(
+                            new Vec3(p.X - 500, p.Y - 500, p.Z - 150),
+                            new Vec3(p.X + 500, p.Y + 500, p.Z + 150)
+                        ));
+                    }
+                }
+            }
+
+            RenderRubberStep(stepIndex, freqZLevels, freqBendZones, trayWidth, trayHeight, safetyMargin);
+        }
+
+        private void RenderRubberStep(int stepIndex, double[] freqZLevels, List<Aabb> freqBendZones, double trayWidth, double trayHeight, double safetyMargin)
+        {
+            if (_currentSceneData == null || _cachedRubberSteps == null || stepIndex < 0 || stepIndex >= _cachedRubberSteps.Count) return;
+
+            ClearRubberBandVisuals();
+
+            // 기존 자동 설계 및 스파인 등 다른 가이드 숨기기 (고무줄 시각화에 집중하도록 처리)
+            ClearAutoRoutingVisuals();
+            ClearSpineVisuals();
+            ClearTopKVisuals();
+
+            var step = _cachedRubberSteps[stepIndex];
+
+            // 1. Green (출발지/목적지 구체)
+            double sphereRadius = 150.0;
+            var startSphere = new SphereVisual3D
+            {
+                Center = new Point3D(_currentRubberStart.X, _currentRubberStart.Y, _currentRubberStart.Z),
+                Radius = sphereRadius,
+                Fill = Brushes.Green
+            };
+            var endSphere = new SphereVisual3D
+            {
+                Center = new Point3D(_currentRubberEnd.X, _currentRubberEnd.Y, _currentRubberEnd.Z),
+                Radius = sphereRadius,
+                Fill = Brushes.Green
+            };
+            Viewport3D.Children.Add(startSphere);
+            Viewport3D.Children.Add(endSphere);
+            _rubberBandVisuals.Add(startSphere);
+            _rubberBandVisuals.Add(endSphere);
+
+            // 2. Blue (다빈도 Z 평면, 다빈도 꺾임 Zone) - 체크 시에만 가시화하여 가림 현상 방지
+            if (ChkShowRubberGuides.IsChecked == true)
+            {
+                var zPlaneBrush = new SolidColorBrush(Color.FromArgb(20, 0, 120, 215));
+                var g = _currentSceneData.Grid;
+                double width = g.Nx * g.CellMm;
+                double height = g.Ny * g.CellMm;
+                double centerX = g.Ox + width / 2.0;
+                double centerY = g.Oy + height / 2.0;
+
+                foreach (var z in freqZLevels)
+                {
+                    var plane = new BoxVisual3D
+                    {
+                        Center = new Point3D(centerX, centerY, z),
+                        Length = width,
+                        Width = height,
+                        Height = 20,
+                        Fill = zPlaneBrush
+                    };
+                    Viewport3D.Children.Add(plane);
+                    _rubberBandVisuals.Add(plane);
+                }
+
+                var zoneBrush = new SolidColorBrush(Color.FromArgb(40, 0, 191, 255));
+                foreach (var zone in freqBendZones)
+                {
+                    double dx = zone.Max.X - zone.Min.X;
+                    double dy = zone.Max.Y - zone.Min.Y;
+                    double dz = zone.Max.Z - zone.Min.Z;
+                    var box = new BoxVisual3D
+                    {
+                        Center = new Point3D(zone.Min.X + dx / 2.0, zone.Min.Y + dy / 2.0, zone.Min.Z + dz / 2.0),
+                        Length = dx,
+                        Width = dy,
+                        Height = dz,
+                        Fill = zoneBrush
+                    };
+                    Viewport3D.Children.Add(box);
+                    _rubberBandVisuals.Add(box);
+                }
+            }
+
+            // 3. White/Gray (확장된 장애물 AABB) - 3단계 및 4단계에서 가시화
+            if (stepIndex >= 2)
+            {
+                var expObsBrush = new SolidColorBrush(Color.FromArgb(25, 200, 200, 200));
+                foreach (var obs in _currentSceneData.Obstacles)
+                {
+                    if (obs.IsPassThrough) continue;
+                    
+                    double pad_h = (trayWidth / 2.0) + safetyMargin;
+                    double pad_v = (trayHeight / 2.0) + safetyMargin;
+
+                    double dx = (obs.MaxX + pad_h) - (obs.MinX - pad_h);
+                    double dy = (obs.MaxY + pad_h) - (obs.MinY - pad_h);
+                    double dz = (obs.MaxZ + pad_v) - (obs.MinZ - pad_v);
+
+                    var box = new BoxVisual3D
+                    {
+                        Center = new Point3D((obs.MinX - pad_h) + dx / 2.0, (obs.MinY - pad_h) + dy / 2.0, (obs.MinZ - pad_v) + dz / 2.0),
+                        Length = dx,
+                        Width = dy,
+                        Height = dz,
+                        Fill = expObsBrush
+                    };
+                    Viewport3D.Children.Add(box);
+                    _rubberBandVisuals.Add(box);
+                }
+                foreach (var eq in _currentSceneData.Equipment)
+                {
+                    double pad_h = (trayWidth / 2.0) + safetyMargin;
+                    double pad_v = (trayHeight / 2.0) + safetyMargin;
+
+                    double dx = (eq.MaxX + pad_h) - (eq.MinX - pad_h);
+                    double dy = (eq.MaxY + pad_h) - (eq.MinY - pad_h);
+                    double dz = (eq.MaxZ + pad_v) - (eq.MinZ - pad_v);
+
+                    var box = new BoxVisual3D
+                    {
+                        Center = new Point3D((eq.MinX - pad_h) + dx / 2.0, (eq.MinY - pad_h) + dy / 2.0, (eq.MinZ - pad_v) + dz / 2.0),
+                        Length = dx,
+                        Width = dy,
+                        Height = dz,
+                        Fill = expObsBrush
+                    };
+                    Viewport3D.Children.Add(box);
+                    _rubberBandVisuals.Add(box);
+                }
+            }
+
+            // 4. Yellow (변형 중인 고무줄 경로)
+            if (step.RubberBandWaypoints.Count >= 2)
+            {
+                var pts = new Point3DCollection();
+                foreach (var p in step.RubberBandWaypoints)
+                {
+                    pts.Add(new Point3D(p.X, p.Y, p.Z));
+                }
+                var tube = new TubeVisual3D
+                {
+                    Path = pts,
+                    Diameter = 120.0,
+                    Fill = Brushes.Yellow,
+                    IsPathClosed = false
+                };
+                Viewport3D.Children.Add(tube);
+                _rubberBandVisuals.Add(tube);
+            }
+
+            // 5. Red (고무줄을 누르는 장애물 모서리 충돌 지점)
+            foreach (var cp in step.CollisionPoints)
+            {
+                var sphere = new SphereVisual3D
+                {
+                    Center = new Point3D(cp.X, cp.Y, cp.Z),
+                    Radius = 220.0,
+                    Fill = Brushes.Red
+                };
+                Viewport3D.Children.Add(sphere);
+                _rubberBandVisuals.Add(sphere);
+            }
+
+            // 6. 개별 배관 상대 좌표 분배 시각화 (4단계 최종 완료에서만 노출)
+            if (stepIndex == 3 && _cachedFinalPipePaths != null)
+            {
+                var colors = new[] { Brushes.Cyan, Brushes.Magenta, Brushes.Orange, Brushes.SpringGreen, Brushes.DeepSkyBlue };
+                for (int i = 0; i < _cachedFinalPipePaths.Count; i++)
+                {
+                    var path = _cachedFinalPipePaths[i];
+                    if (path.Count < 2) continue;
+
+                    var pts = new Point3DCollection();
+                    foreach (var p in path)
+                    {
+                        pts.Add(new Point3D(p.X, p.Y, p.Z));
+                    }
+
+                    var pipeTube = new TubeVisual3D
+                    {
+                        Path = pts,
+                        Diameter = 60.0,
+                        Fill = colors[i % colors.Length],
+                        IsPathClosed = false
+                    };
+                    Viewport3D.Children.Add(pipeTube);
+                    _rubberBandVisuals.Add(pipeTube);
+                }
+            }
+        }
+
+        private void ChkShowRubberGuides_Checked(object sender, RoutedEventArgs e)
+        {
+            if (_cachedRubberSteps == null || _cachedRubberSteps.Count == 0) return;
+            SldRubberStep_ValueChanged(null, null);
+        }
+
+        private string FormatStepDetails(RubberBandStep step)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[단계 {step.StepIndex} 요약]");
+            sb.AppendLine(step.StepDescription);
+            sb.AppendLine();
+
+            sb.AppendLine($"[고무줄 웨이포인트 (총 {step.RubberBandWaypoints.Count}개)]");
+            if (step.RubberBandWaypoints.Count == 0)
+            {
+                sb.AppendLine("(없음)");
+            }
+            else
+            {
+                for (int i = 0; i < step.RubberBandWaypoints.Count; i++)
+                {
+                    var wp = step.RubberBandWaypoints[i];
+                    sb.AppendLine($"  WP {i}: ({wp.X:F1}, {wp.Y:F1}, {wp.Z:F1})");
+                }
+            }
+            sb.AppendLine();
+
+            sb.AppendLine($"[감지된 충돌 포인트 (총 {step.CollisionPoints.Count}개)]");
+            if (step.CollisionPoints.Count == 0)
+            {
+                sb.AppendLine("(없음)");
+            }
+            else
+            {
+                for (int i = 0; i < step.CollisionPoints.Count; i++)
+                {
+                    var cp = step.CollisionPoints[i];
+                    sb.AppendLine($"  CP {i}: ({cp.X:F1}, {cp.Y:F1}, {cp.Z:F1})");
+                }
+            }
+            sb.AppendLine();
+
+            // 4단계인 경우 분배된 개별 배관 경로의 노드를 출력
+            if (step.StepIndex == 4 && _cachedFinalPipePaths != null && _cachedFinalPipePaths.Count > 0)
+            {
+                sb.AppendLine($"[개별 배관 분배 경로 (총 {_cachedFinalPipePaths.Count}가닥)]");
+                for (int pIdx = 0; pIdx < _cachedFinalPipePaths.Count; pIdx++)
+                {
+                    var pPath = _cachedFinalPipePaths[pIdx];
+                    sb.AppendLine($"  ▶ 배관 {pIdx + 1} (노드 {pPath.Count}개):");
+                    for (int i = 0; i < pPath.Count; i++)
+                    {
+                        var pt = pPath[i];
+                        sb.AppendLine($"    - 노드 {i}: ({pt.X:F1}, {pt.Y:F1}, {pt.Z:F1})");
+                    }
+                }
+            }
+
+            return sb.ToString();
         }
     }
 }

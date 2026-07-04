@@ -384,6 +384,75 @@
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
+
+                    <!-- 탭 3: 고무줄 변형 시뮬레이션 -->
+                    <TabItem Header="고무줄 시뮬레이션">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="10">
+                            <StackPanel>
+                                <TextBlock Text="고무줄 변형 라우팅 설정" Foreground="#FF007ACC" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+                                
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="최대 수직 꺾임 (회):" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,5"/>
+                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtRubberMaxBends" Text="5" Background="#FF2D2D30" Foreground="White" BorderBrush="#FF3F3F46" Margin="0,5" Padding="3"/>
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="안전 마진 (mm):" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,5"/>
+                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtRubberSafetyMargin" Text="50" Background="#FF2D2D30" Foreground="White" BorderBrush="#FF3F3F46" Margin="0,5" Padding="3"/>
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="트레이 폭 (mm):" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,5"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtRubberTrayWidth" Text="600" Background="#FF2D2D30" Foreground="White" BorderBrush="#FF3F3F46" Margin="0,5" Padding="3"/>
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="트레이 높이 (mm):" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,5"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtRubberTrayHeight" Text="300" Background="#FF2D2D30" Foreground="White" BorderBrush="#FF3F3F46" Margin="0,5" Padding="3"/>
+
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="배관 간격 Pitch (mm):" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,5"/>
+                                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtRubberPipePitch" Text="100" Background="#FF2D2D30" Foreground="White" BorderBrush="#FF3F3F46" Margin="0,5" Padding="3"/>
+
+                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="배관 가닥 수 (개):" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,5"/>
+                                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtRubberPipeCount" Text="3" Background="#FF2D2D30" Foreground="White" BorderBrush="#FF3F3F46" Margin="0,5" Padding="3"/>
+                                </Grid>
+
+                                <Button x:Name="BtnRunRubberRouting" Content="고무줄 라우팅 시뮬레이션 실행" Click="BtnRunRubberRouting_Click" Height="32" Background="#FF007ACC" Foreground="White" FontWeight="Bold" Margin="0,5,0,10" BorderThickness="0"/>
+                                
+                                <CheckBox x:Name="ChkShowRubberGuides" Content="고무줄 가이드(Z평면/Zone) 표시" IsChecked="False" Margin="0,0,0,15" Foreground="White" Checked="ChkShowRubberGuides_Checked" Unchecked="ChkShowRubberGuides_Checked"/>
+
+                                <Border BorderBrush="#FF3F3F46" BorderThickness="0,1,0,0" Padding="0,15,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="고무줄 변형 단계별 추적" Foreground="#FFFFB900" FontWeight="Bold" FontSize="13" Margin="0,0,0,5"/>
+                                        <Grid Margin="0,5,0,10">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Step 1" Foreground="#FFAAAAAA" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                            <Slider Grid.Column="1" x:Name="SldRubberStep" Minimum="1" Maximum="4" Value="4" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="SldRubberStep_ValueChanged"/>
+                                            <TextBlock Grid.Column="2" x:Name="TxtRubberStepVal" Text="Step 4" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                        </Grid>
+                                        
+                                        <Border Background="#FF1E1E1E" BorderBrush="#FF3F3F46" BorderThickness="1" CornerRadius="4" Padding="10">
+                                            <StackPanel>
+                                                <TextBlock Text="현재 단계 상세 결과 정보" Foreground="#FF007ACC" FontWeight="Bold" FontSize="11" Margin="0,0,0,5"/>
+                                                <TextBox x:Name="TxtRubberStepDesc" Background="Transparent" Foreground="#FFD4D4D4" BorderThickness="0" IsReadOnly="True" TextWrapping="NoWrap" FontSize="11" Height="220" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" Text="시뮬레이션을 실행한 후 슬라이더를 움직여보세요."/>
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
                 </TabControl>
             </Grid>
         </Grid>
