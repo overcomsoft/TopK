@@ -69,10 +69,11 @@ from core.data_loader import (
     load_scene,
     scene_to_obstacle_map,
     select_project,
+    load_legacy_features,
     RoutingTask,
     RoutingScene,
 )
-from core.feature_extractor import FeatureSet
+from core.feature_extractor import FeatureSet, extract_features_from_legacy_obstacles
 from core.rubber_band import run_routing
 from core.pipe_distributor import distribute_pipes
 
@@ -150,11 +151,38 @@ def run(
 
     # ── Step 5: RubberBand 라우팅 ────────────────────────────────────────────
     print("\n[4/5] 라우팅 엔진 실행 중...")
-    # Case C (레거시 데이터 없음) → 순수 기하학 라우팅
-    feature_set = FeatureSet(case="C")
-
+    
     start = task.start
     end   = task.end
+
+    # 시작/종단 경계 범위 내 걸치는 sub_zone_id 목록 자동 산정
+    margin = 1000.0
+    min_x, max_x = min(start[0], end[0]) - margin, max(start[0], end[0]) + margin
+    min_y, max_y = min(start[1], end[1]) - margin, max(start[1], end[1]) + margin
+    min_z, max_z = min(start[2], end[2]) - margin, max(start[2], end[2]) + margin
+    
+    ix_range = range(int(np.clip(min_x // 3000, 0, 9)), int(np.clip(max_x // 3000, 0, 9)) + 1)
+    iy_range = range(int(np.clip(min_y // 3000, 0, 9)), int(np.clip(max_y // 3000, 0, 9)) + 1)
+    iz_range = range(int(np.clip(min_z // 3000, 0, 9)), int(np.clip(max_z // 3000, 0, 9)) + 1)
+    
+    sub_zone_ids = []
+    for iz in iz_range:
+        for iy in iy_range:
+            for ix in ix_range:
+                sub_zone_ids.append(ix + iy * 10 + iz * 100)
+                
+    # 5단계 환류: PostgreSQL 신규 특징점 테이블에서 sub_zone_id 에 맞는 특징점 SELECT
+    logger.info("[Runner] 현재 경로가 지나는 서브존 리스트: %s", sub_zone_ids)
+    legacy_features = load_legacy_features(conninfo, sub_zone_ids)
+    
+    if legacy_features:
+        logger.info("[Runner] legacy_feature_obstacles 에서 유효 특징점 %d건 발견!", len(legacy_features))
+        wps = extract_features_from_legacy_obstacles(legacy_features, start, end)
+        # 특징점이 있으면 Case B(부분 스냅) 모드로 기동
+        feature_set = FeatureSet(case="B", waypoints=wps, metadata={"sub_zones": sub_zone_ids})
+    else:
+        logger.info("[Runner] 매칭되는 공간 특징점(legacy_feature)이 없습니다. Case C 자율 라우팅 기동.")
+        feature_set = FeatureSet(case="C")
 
     routing_result = run_routing(
         start=start,

@@ -400,3 +400,54 @@ def extract_features(
         )
     else:
         return extract_case_c()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. 신규 레거시 특징점(legacy_feature_obstacles)에서 웨이포인트 추출
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_features_from_legacy_obstacles(
+    legacy_features: list,       # list[PocPoint] (data_loader.load_legacy_features 결과물)
+    start_new: np.ndarray,
+    end_new: np.ndarray,
+) -> list[Waypoint]:
+    """
+    PostgreSQL legacy_feature_obstacles 에서 로드된 국소 특징점들을 
+    스냅용 Waypoint 리스트로 가공한다.
+    
+    - 관통 슬리브(is_penetration=True)인 경우 고우선순위(priority=5)로 스냅 유도.
+    - 일반 고밀도 점유 구역의 경우 중간 순위(priority=15)로 스냅 유도.
+    """
+    waypoints: list[Waypoint] = []
+    for feat in legacy_features:
+        pos = feat.position
+        
+        # 새로운 시작/종단점 범위에 속하는지 체크 (약간의 마진 부여)
+        # Ratio 정규화 필터 적용
+        # 시작점(S)과 종료점(D) 사이의 공간에 기하학적으로 유의미한 범위 내에 있는지 필터링
+        dx = end_new - start_new
+        denom = np.where(np.abs(dx) < 1e-9, 1e-9, dx)
+        ratio = (pos - start_new) / denom
+        
+        # 너무 멀리 있는 특징점(동선 이탈)은 제외
+        if np.any(ratio < -0.2) or np.any(ratio > 1.2):
+            continue
+            
+        is_pen = (feat.owner_type == "Duct") # load_legacy_features 에서 관통은 owner_type="Duct"로 매핑됨
+        priority = 5 if is_pen else 15
+        src = "legacy_sleeve_tunnel" if is_pen else "legacy_high_density_obs"
+        
+        waypoints.append(Waypoint(
+            position=pos,
+            priority=priority,
+            source=src
+        ))
+        
+    # 우선순위 기준 정렬
+    waypoints.sort(key=lambda w: w.priority)
+    logger.info(
+        "[FeatureExtractor] legacy_feature_obstacles 로부터 %d개의 서브존 특징점 스냅 웨이포인트 추출 완료",
+        len(waypoints)
+    )
+    return waypoints
+

@@ -949,6 +949,50 @@ def scene_to_obstacle_map(scene: RoutingScene):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7. 신규 공간 특징점 (legacy_feature_obstacles) 로더
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_legacy_features(conninfo: str, sub_zone_ids: list[int]) -> list[PocPoint]:
+    """
+    PostgreSQL legacy_feature_obstacles 테이블로부터
+    현재 경로가 걸쳐있는 sub_zone_id 에 매핑되는 OBB 특징점 목록을 로드한다.
+    
+    voxel_density_weight 가 높거나 is_penetration 인 구역을 식별하여
+    PocPoint 형태로 반환 (웨이포인트 유도로 환류 처리).
+    """
+    if not sub_zone_ids:
+        return []
+    
+    sql = """
+        SELECT center_x, center_y, center_z, extent_x, extent_y, extent_z,
+               is_penetration, voxel_density_weight, category, obstacle_id
+        FROM legacy_feature_obstacles
+        WHERE sub_zone_id = ANY(%s)
+          AND (voxel_density_weight >= 0.80 OR is_penetration = TRUE)
+        ORDER BY voxel_density_weight DESC;
+    """
+    pocs = []
+    try:
+        with psycopg2.connect(conninfo) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (sub_zone_ids,))
+                for row in cur.fetchall():
+                    row = dict(row)
+                    x, y, z = float(row["center_x"]), float(row["center_y"]), float(row["center_z"])
+                    pocs.append(PocPoint(
+                        name=str(row["obstacle_id"]),
+                        owner_name=str(row["obstacle_id"]),
+                        owner_type="Equipment" if not row["is_penetration"] else "Duct", # 관통은 슬리브 통로용
+                        utility=None,
+                        x=x, y=y, z=z
+                    ))
+    except Exception as exc:
+        logger.warning("[DataLoader] legacy_feature_obstacles 로드 실패 (테이블 미생성 시 스킵 가능): %s", exc)
+        
+    return pocs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI 진입점 (독립 실행 테스트)
 # ─────────────────────────────────────────────────────────────────────────────
 
