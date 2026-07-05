@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <PackageReference Include="HelixToolkit.Wpf" Version="2.25.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -14,6 +15,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- RubberBandRouting.Native.dll is built as x64 (cpp/RubberBandRouting.Native/build_msvc.bat via
+         vcvars64.bat); the process bitness must match for P/Invoke to load it. -->
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Optional: only present after running cpp/RubberBandRouting.Native/build_msvc.bat.
+         The native engine toggle in the viewer falls back to the managed engine when absent. -->
+    <None Include="..\..\cpp\RubberBandRouting.Native\RubberBandRouting.Native.dll"
+          Condition="Exists('..\..\cpp\RubberBandRouting.Native\RubberBandRouting.Native.dll')"
+          Link="RubberBandRouting.Native.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>

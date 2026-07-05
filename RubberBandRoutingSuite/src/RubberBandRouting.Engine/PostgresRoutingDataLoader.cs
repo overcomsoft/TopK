@@ -14,7 +14,7 @@ public sealed class PostgresConnectionOptions
     public int Port { get; set; } = 5432;
     public string Database { get; set; } = "DDW_AI_DB";
     public string Username { get; set; } = "postgres";
-    public string Password { get; set; } = "dinno";
+    public string Password { get; set; } = string.Empty;
     public int TimeoutSeconds { get; set; } = 10;
 
     public static PostgresConnectionOptions FromEnvironment()
@@ -103,6 +103,7 @@ public sealed class RoutingScene
     public List<PocPoint> DuctLateralPocs { get; } = new();
     public List<RouteTask> Tasks { get; } = new();
     public List<ExistingRoutePath> ExistingRoutePaths { get; } = new();
+    public List<string> LoadWarnings { get; } = new();
 
     public IReadOnlyList<Aabb> CollisionObstacles => Obstacles.Where(o => !o.IsPassThrough).Select(o => o.Bounds).ToList();
 }
@@ -220,7 +221,7 @@ public sealed class PostgresRoutingDataLoader
     private static async Task TryLoadPocsAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
     {
         try { await LoadPocsAsync(conn, scene, minx, miny, maxx, maxy, ct); }
-        catch { }
+        catch (Exception ex) { scene.LoadWarnings.Add($"PoC 로드 실패: {ex.Message}"); }
     }
 
     private static async Task LoadPocsAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
@@ -261,14 +262,14 @@ public sealed class PostgresRoutingDataLoader
     private static async Task TryLoadRouteTasksAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
     {
         try { await LoadRouteTasksAsync(conn, scene, minx, miny, maxx, maxy, ct); }
-        catch { }
+        catch (Exception ex) { scene.LoadWarnings.Add($"라우팅 태스크 로드 실패: {ex.Message}"); }
     }
 
 
     private static async Task TryLoadExistingRoutePathsAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
     {
         try { await LoadExistingRoutePathsAsync(conn, scene, minx, miny, maxx, maxy, ct); }
-        catch { }
+        catch (Exception ex) { scene.LoadWarnings.Add($"기존경로 로드 실패: {ex.Message}"); }
     }
 
     private static async Task LoadExistingRoutePathsAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)

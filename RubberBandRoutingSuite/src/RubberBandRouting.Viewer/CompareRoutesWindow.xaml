@@ -1,0 +1,158 @@
+<Window x:Class="RubberBandRouting.Viewer.CompareRoutesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:helix="http://helix-toolkit.org/wpf"
+        Title="기존경로 vs 자동경로 비교" Width="1500" Height="900" MinWidth="900" MinHeight="600"
+        WindowStartupLocation="CenterOwner" Background="#172033">
+    <Window.Resources>
+        <Style TargetType="{x:Type DataGridColumnHeader}">
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+    </Window.Resources>
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="300" MinWidth="220"/>
+            <ColumnDefinition Width="5"/>
+            <ColumnDefinition Width="*" MinWidth="500"/>
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Background="#263449" BorderBrush="#43536C" BorderThickness="0,0,1,0" Padding="6">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="경로 목록 (선택하여 비교)" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+                <DataGrid x:Name="GridEntries" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                          SelectionChanged="GridEntries_SelectionChanged"
+                          Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="Horizontal"
+                          HeadersVisibility="Column" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="30"/>
+                        <DataGridTextColumn Header="유틸" Binding="{Binding Utility}" Width="50"/>
+                        <DataGridTextColumn Header="시작" Binding="{Binding StartPoC}" Width="70"/>
+                        <DataGridTextColumn Header="종단" Binding="{Binding EndPoC}" Width="70"/>
+                        <DataGridTextColumn Header="매칭" Binding="{Binding MatchNote}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </Border>
+
+        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
+
+        <Grid Grid.Column="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" MinHeight="200"/>
+                <RowDefinition Height="5"/>
+                <RowDefinition Height="210" MinHeight="120"/>
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="5"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid Grid.Column="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Grid.Row="0" LastChildFill="False">
+                        <TextBlock Text="기존경로 (Existing)" Foreground="#7CD4FF" FontWeight="Bold" Margin="4" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+                        <Button x:Name="BtnFitExisting" Content="⤢ 전체보기" DockPanel.Dock="Right" Padding="6,1" Margin="4,2" Click="BtnFitExisting_Click"/>
+                    </DockPanel>
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="5"/>
+                            <ColumnDefinition Width="330" MinWidth="220"/>
+                        </Grid.ColumnDefinitions>
+                        <helix:HelixViewport3D x:Name="ViewportExisting" Grid.Column="0" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False">
+                            <helix:HelixViewport3D.DefaultCamera>
+                                <PerspectiveCamera Position="8000,8000,6000" LookDirection="-8000,-8000,-6000" UpDirection="0,0,1" FieldOfView="45"/>
+                            </helix:HelixViewport3D.DefaultCamera>
+                            <helix:DefaultLights/>
+                            <helix:GridLinesVisual3D Width="30000" Length="30000" MinorDistance="1000" MajorDistance="5000" Normal="0,0,1" Thickness="1" Fill="#334155"/>
+                        </helix:HelixViewport3D>
+                        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
+                        <DataGrid x:Name="GridExistingSegments" Grid.Column="2" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                  SelectionChanged="GridExistingSegments_SelectionChanged"
+                                  Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="Horizontal"
+                                  HeadersVisibility="Column" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="26"/>
+                                <DataGridTextColumn Header="구간" Binding="{Binding SegmentType}" Width="36"/>
+                                <DataGridTextColumn Header="방향" Binding="{Binding Direction}" Width="36"/>
+                                <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="50"/>
+                                <DataGridTextColumn Header="꺾임/사유" Binding="{Binding Reason}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Grid>
+
+                <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
+
+                <Grid Grid.Column="2">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Grid.Row="0" LastChildFill="False">
+                        <TextBlock Text="자동경로 (Auto)" Foreground="#FFB85A" FontWeight="Bold" Margin="4" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+                        <Button x:Name="BtnFitAuto" Content="⤢ 전체보기" DockPanel.Dock="Right" Padding="6,1" Margin="4,2" Click="BtnFitAuto_Click"/>
+                    </DockPanel>
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="5"/>
+                            <ColumnDefinition Width="330" MinWidth="220"/>
+                        </Grid.ColumnDefinitions>
+                        <helix:HelixViewport3D x:Name="ViewportAuto" Grid.Column="0" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False">
+                            <helix:HelixViewport3D.DefaultCamera>
+                                <PerspectiveCamera Position="8000,8000,6000" LookDirection="-8000,-8000,-6000" UpDirection="0,0,1" FieldOfView="45"/>
+                            </helix:HelixViewport3D.DefaultCamera>
+                            <helix:DefaultLights/>
+                            <helix:GridLinesVisual3D Width="30000" Length="30000" MinorDistance="1000" MajorDistance="5000" Normal="0,0,1" Thickness="1" Fill="#334155"/>
+                        </helix:HelixViewport3D>
+                        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
+                        <DataGrid x:Name="GridAutoSegments" Grid.Column="2" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
+                                  SelectionChanged="GridAutoSegments_SelectionChanged"
+                                  Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="Horizontal"
+                                  HeadersVisibility="Column" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="26"/>
+                                <DataGridTextColumn Header="구간" Binding="{Binding SegmentType}" Width="36"/>
+                                <DataGridTextColumn Header="방향" Binding="{Binding Direction}" Width="36"/>
+                                <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="50"/>
+                                <DataGridTextColumn Header="꺾임/사유" Binding="{Binding Reason}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Grid>
+            </Grid>
+
+            <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="#43536C"/>
+
+            <Border Grid.Row="2" BorderBrush="#40516B" BorderThickness="1" Padding="6">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Text="비교 분석" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+                    <DataGrid x:Name="GridAnalysis" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                              Background="#253349" Foreground="White" BorderBrush="#40516B" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="항목" Binding="{Binding Name}" Width="150"/>
+                            <DataGridTextColumn Header="기존경로" Binding="{Binding ExistingValue}" Width="160"/>
+                            <DataGridTextColumn Header="자동경로" Binding="{Binding AutoValue}" Width="160"/>
+                            <DataGridTextColumn Header="차이" Binding="{Binding DiffValue}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

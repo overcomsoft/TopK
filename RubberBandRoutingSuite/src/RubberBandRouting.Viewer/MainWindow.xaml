@@ -18,34 +18,18 @@
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0" Background="#202B42" BorderBrush="#3A4862" BorderThickness="0,0,0,1" Padding="4">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="26"/>
-                    <ColumnDefinition Width="100"/>
-                    <ColumnDefinition Width="62"/>
-                    <ColumnDefinition Width="84"/>
-                    <ColumnDefinition Width="84"/>
-                    <ColumnDefinition Width="130"/>
-                    <ColumnDefinition Width="60"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="90"/>
-                    <ColumnDefinition Width="96"/>
-                    <ColumnDefinition Width="96"/>
-                    <ColumnDefinition Width="96"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="DB:" Foreground="#DDE7F5" VerticalAlignment="Center"/>
-                <TextBox x:Name="TxtHost" Grid.Column="1" Text="localhost" Margin="2" VerticalContentAlignment="Center"/>
-                <TextBox x:Name="TxtPort" Grid.Column="2" Text="5432" Margin="2" VerticalContentAlignment="Center"/>
-                <TextBox x:Name="TxtUser" Grid.Column="3" Text="postgres" Margin="2" VerticalContentAlignment="Center"/>
-                <TextBox x:Name="TxtPassword" Grid.Column="4" Text="dinno" Margin="2" VerticalContentAlignment="Center"/>
-                <TextBox x:Name="TxtDatabase" Grid.Column="5" Text="DDW_AI_DB" Margin="2" VerticalContentAlignment="Center"/>
-                <TextBlock Grid.Column="6" Text="프로젝트:" Foreground="#DDE7F5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                <ComboBox x:Name="CmbProjects" Grid.Column="7" Margin="2" DisplayMemberPath="DisplayName"/>
-                <Button x:Name="BtnLoadProjects" Grid.Column="8" Content="↻ 로드" Margin="4,2" Click="BtnLoadProjects_Click"/>
-                <Button x:Name="BtnLoadScene" Grid.Column="9" Content="기본설계" Margin="4,2" Click="BtnLoadScene_Click"/>
-                <Button x:Name="BtnRouteGroup" Grid.Column="10" Content="다단 락" Margin="4,2" Background="#5D7F3D" Foreground="White" Click="BtnRouteGroup_Click"/>
-                <Button x:Name="BtnRouteAll" Grid.Column="11" Content="전체보기" Margin="4,2" Click="BtnRouteAll_Click"/>
-            </Grid>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <TextBlock Text="DB:" Foreground="#DDE7F5" VerticalAlignment="Center" Margin="4,0,2,0"/>
+                <TextBox x:Name="TxtHost" Text="localhost" Width="90" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtPort" Text="5432" Width="50" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtUser" Text="postgres" Width="76" Margin="2" VerticalContentAlignment="Center"/>
+                <PasswordBox x:Name="TxtPassword" Width="76" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBox x:Name="TxtDatabase" Text="DDW_AI_DB" Width="110" Margin="2" VerticalContentAlignment="Center"/>
+                <TextBlock Text="프로젝트:" Foreground="#DDE7F5" VerticalAlignment="Center" Margin="10,0,2,0"/>
+                <ComboBox x:Name="CmbProjects" Width="260" Margin="2" DisplayMemberPath="DisplayName"/>
+                <Button x:Name="BtnLoadProjects" Content="↻ 로드" Width="70" Margin="8,2,4,2" Click="BtnLoadProjects_Click"/>
+                <Button x:Name="BtnLoadScene" Content="기본설계" Width="76" Margin="4,2" Click="BtnLoadScene_Click"/>
+            </StackPanel>
         </Border>
 
         <Grid Grid.Row="1">
@@ -73,11 +57,13 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Grid.Row="1" BorderBrush="#40516B" BorderThickness="1" Padding="6" Margin="0,0,0,8">
+                    <Border BorderBrush="#40516B" BorderThickness="1" Padding="6" Margin="0,90,0,10" Grid.RowSpan="2">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="34"/>
+                                <RowDefinition Height="34"/>
                                 <RowDefinition Height="34"/>
                                 <RowDefinition Height="34"/>
                             </Grid.RowDefinitions>
@@ -86,6 +72,7 @@
                             <Button x:Name="BtnRouteUtility" Grid.Row="2" Content="▶ 이 유틸리티 전체 라우팅" Margin="0,6,0,0" Click="BtnRouteUtility_Click"/>
                             <Button x:Name="BtnClearRoutes" Grid.Row="3" Content="♜ 자동설계 경로 삭제" Margin="0,6,0,0" Click="BtnClearRoutes_Click"/>
                             <Button x:Name="BtnShowExistingRoutes" Grid.Row="4" Content="◎ PostgresDB 기존경로 표시" Margin="0,6,0,0" Background="#5B6478" Foreground="White" Click="BtnShowExistingRoutes_Click"/>
+                            <Button x:Name="BtnCompareRoutes" Grid.Row="5" Content="⇄ 기존경로와 비교" Margin="0,6,0,0" Background="#3B7A9E" Foreground="White" Click="BtnCompareRoutes_Click"/>
                         </Grid>
                     </Border>
 
@@ -114,7 +101,8 @@
             <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#43536C"/>
 
             <Grid Grid.Column="2">
-                <helix:HelixViewport3D x:Name="Viewport" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False">
+                <helix:HelixViewport3D x:Name="Viewport" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False"
+                                       PreviewMouseLeftButtonDown="Viewport_PreviewMouseLeftButtonDown" PreviewMouseLeftButtonUp="Viewport_PreviewMouseLeftButtonUp">
                     <helix:HelixViewport3D.DefaultCamera>
                         <PerspectiveCamera Position="18000,18000,12000" LookDirection="-18000,-18000,-12000" UpDirection="0,0,1" FieldOfView="45"/>
                     </helix:HelixViewport3D.DefaultCamera>
@@ -139,7 +127,10 @@
                         <RowDefinition Height="5"/>
                         <RowDefinition Height="310" MinHeight="120"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Text="자동설계 결과 경로" Foreground="White" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <DockPanel Margin="0,0,0,8" LastChildFill="False">
+                        <TextBlock Text="자동설계 결과 경로" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+                        <Button x:Name="BtnDeleteSelectedRoute" Content="자동경로삭제" DockPanel.Dock="Right" Padding="6,1" Click="BtnDeleteSelectedRoute_Click"/>
+                    </DockPanel>
                     <DataGrid x:Name="GridResults" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionChanged="GridResults_SelectionChanged"
                               Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="Horizontal"
                               HeadersVisibility="Column" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
@@ -164,6 +155,7 @@
                             <DataGridTextColumn Header="시작PoC" Binding="{Binding StartPoC}" Width="82"/>
                             <DataGridTextColumn Header="종단PoC" Binding="{Binding EndPoC}" Width="82"/>
                             <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="70"/>
+                            <DataGridTextColumn Header="라우팅시간(ms)" Binding="{Binding ElapsedText}" Width="96"/>
                         </DataGrid.Columns>
                     </DataGrid>
 
@@ -222,9 +214,13 @@
                     <CheckBox x:Name="TglRoutes" Content="자동경로" IsChecked="True" Foreground="White" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglFeaturePoints" Content="특징점" IsChecked="True" Foreground="#FF4DFF" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglExistingRoutes" Content="기존경로" IsChecked="True" Foreground="#FFB347" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <Separator Margin="6,0" Width="1"/>
+                    <CheckBox x:Name="ChkUseNativeEngine" Content="네이티브 C++ 엔진" Foreground="#7CD4FF" Margin="10,0,0,0"
+                              Checked="ChkUseNativeEngine_Changed" Unchecked="ChkUseNativeEngine_Changed"
+                              ToolTip="build_msvc.bat로 빌드한 RubberBandRouting.Native.dll이 있어야 사용 가능합니다. 없으면 관리형(C#) 엔진으로 자동 대체됩니다."/>
                 </StackPanel>
-                <TextBlock x:Name="TxtStatus" Grid.Column="1" Text="Ready" Foreground="#A7C7FF" VerticalAlignment="Center" Margin="16,0,0,0"/>
-                <Button Grid.Column="2" Content="Reset Camera" Width="110" Height="24" Click="BtnResetCamera_Click"/>
+                <TextBlock x:Name="TxtStatus" Grid.Column="1" Text="준비됨" Foreground="#A7C7FF" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                <Button Grid.Column="2" Content="카메라 초기화" Width="110" Height="24" Click="BtnResetCamera_Click"/>
             </Grid>
         </Border>
     </Grid>

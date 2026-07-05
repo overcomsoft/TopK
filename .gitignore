@@ -8,6 +8,12 @@
 *.sln.docstates
 *.pdb
 
+# MSVC build output for the native RubberBandRouting engine (rebuild via build_msvc.bat)
+RubberBandRoutingSuite/cpp/RubberBandRouting.Native/*.dll
+RubberBandRoutingSuite/cpp/RubberBandRouting.Native/*.lib
+RubberBandRoutingSuite/cpp/RubberBandRouting.Native/*.exp
+RubberBandRoutingSuite/cpp/RubberBandRouting.Native/*.obj
+
 # Python caches and local environment settings
 __pycache__/
 *.py[cod]

@@ -4,7 +4,7 @@ using System.Linq;
 
 namespace RubberBandRouting.Engine;
 
-public sealed class ManagedRubberBandEngine
+public sealed class ManagedRubberBandEngine : IRubberBandEngine
 {
     private const double Epsilon = 1e-6;
 
@@ -12,12 +12,12 @@ public sealed class ManagedRubberBandEngine
         Vec3 start,
         Vec3 end,
         IEnumerable<Aabb> obstacles,
-        IEnumerable<Vec3>? featureWaypoints = null,
+        IEnumerable<RouteFeature>? featureWaypoints = null,
         RubberBandOptions? options = null)
     {
         options ??= new RubberBandOptions();
         var obstacleList = obstacles?.ToList() ?? new List<Aabb>();
-        var features = featureWaypoints?.ToList() ?? new List<Vec3>();
+        var features = featureWaypoints?.ToList() ?? new List<RouteFeature>();
 
         var result = new RubberBandResult();
 
@@ -31,24 +31,43 @@ public sealed class ManagedRubberBandEngine
         result.Steps.Add(step2);
 
         var step3Segments = RouteOrthogonalAStarViaWaypoints(snappedPoints, obstacleList, options, out var fallbackCount);
-        var step3 = MakeStep(3, fallbackCount == 0 ? "Orthogonal A* waypoint routing" : $"Orthogonal A* waypoint routing ({fallbackCount} fallback legs)", step3Segments);
+        // Step 4 — pull the orthogonal A* staircase taut: greedily replace any run of corners
+        // with a single straight (possibly diagonal) segment when that line-of-sight shortcut
+        // stays clear of every obstacle. This is what actually makes the route look like a
+        // rubber band pulled between control points instead of a Manhattan-only staircase.
+        // Required features (e.g. a forced start-drop stub) must remain their own vertex even
+        // when nothing obstructs a longer shortcut past them.
+        var requiredPoints = features.Where(f => f.Required).Select(f => f.Position).ToList();
+        var straightened = ApplyLineOfSightShortcuts(step3Segments, obstacleList, options, requiredPoints);
+        // Step 5 — collapse any short "dogleg" (two corners joined by a very short connecting run,
+        // e.g. a tiny lateral jog A* took around a sparse-grid line) into a single clean corner.
+        // LOS shortcutting above only replaces fully-straight runs; it does not remove a short
+        // in-between segment sandwiched between two otherwise-long legs, so this extra corner pair
+        // used to survive and make the display-side bend rounding (which shrinks the usable radius
+        // to a fraction of the shortest adjoining run) look pinched/zigzagged there.
+        var merged = MergeShortDoglegs(straightened, obstacleList, options, requiredPoints);
+        var step3 = MakeStep(3, fallbackCount == 0 ? "Orthogonal A* + line-of-sight straightening + dogleg merge" : $"Orthogonal A* + line-of-sight straightening + dogleg merge ({fallbackCount} fallback legs)", merged);
         result.Steps.Add(step3);
 
         result.FinalSegments.AddRange(step3.Segments);
         foreach (var pipe in DistributePipes(step3.Segments, options)) result.PipePaths.Add(pipe);
 
         var issues = Validate(step3.Segments, obstacleList, options);
+        if (fallbackCount > 0) issues.Add("astar_fallback_used");
         foreach (var issue in issues) result.ValidationIssues.Add(issue);
+
+        var reasons = ClassifySegmentReasons(step3.Segments, features, obstacleList, options);
 
         return new RubberBandResultBuilder(result)
         {
             TotalLength = step3.Segments.Sum(s => s.Length),
             VerticalBends = CountVerticalBends(step3.Segments),
-            IsValid = issues.Count == 0
+            IsValid = issues.Count == 0,
+            SegmentReasonCodes = reasons
         }.Build();
     }
 
-    private static List<Vec3> BuildSnappedPointList(Vec3 start, Vec3 end, List<Vec3> features, double tolerance)
+    private static List<Vec3> BuildSnappedPointList(Vec3 start, Vec3 end, List<RouteFeature> features, double tolerance)
     {
         var route = end - start;
         var len = route.Length;
@@ -58,14 +77,91 @@ public sealed class ManagedRubberBandEngine
         var maxDetour = Math.Max(len * 2.5, 10000.0);
         foreach (var feature in features)
         {
-            if ((feature - start).Length <= tolerance || (feature - end).Length <= tolerance) continue;
-            if (DistancePointToSegment(feature, start, end) > maxDetour) continue;
-            if (points.Count == 0 || (points[^1] - feature).Length > Math.Max(tolerance, 100.0)) points.Add(feature);
+            var pos = feature.Position;
+            if (!feature.Required)
+            {
+                if ((pos - start).Length <= tolerance || (pos - end).Length <= tolerance) continue;
+                if (DistancePointToSegment(pos, start, end) > maxDetour) continue;
+            }
+            if (points.Count == 0 || (points[^1] - pos).Length > Math.Max(tolerance, 100.0)) points.Add(pos);
         }
 
         if ((points[^1] - end).Length > tolerance) points.Add(end);
         else points[^1] = end;
         return points;
+    }
+
+    /// <summary>
+    /// Names why each final segment's leading corner exists, using the same signals the viewer
+    /// used to infer post-hoc (feature proximity, obstacle-grid boundary proximity, axis/Z
+    /// changes) but computed once by the engine that actually produced the route.
+    /// </summary>
+    private static List<string> ClassifySegmentReasons(List<RouteSegment> segments, List<RouteFeature> features, List<Aabb> obstacles, RubberBandOptions options)
+    {
+        var reasons = new List<string>(segments.Count);
+        var clearanceH = options.TrayWidth / 2.0 + options.SafetyMargin + 1.0;
+        var clearanceZ = options.TrayHeight / 2.0 + options.SafetyMargin + 1.0;
+        var featureTolerance = Math.Max(options.SnapTolerance, 300.0);
+
+        for (var i = 0; i < segments.Count; i++)
+        {
+            if (i == 0) { reasons.Add(SegmentReasons.RouteStart); continue; }
+
+            var joint = segments[i].Start;
+            if (features.Any(f => (f.Position - joint).Length <= featureTolerance))
+            {
+                reasons.Add(SegmentReasons.FeatureSnap);
+                continue;
+            }
+
+            if (IsNearObstacleGridBoundary(joint, obstacles, clearanceH, clearanceZ))
+            {
+                reasons.Add(SegmentReasons.CollisionBypass);
+                continue;
+            }
+
+            var previous = segments[i - 1];
+            if (DominantAxis(previous.Delta) != DominantAxis(segments[i].Delta))
+            {
+                reasons.Add(SegmentReasons.DirectionChange);
+                continue;
+            }
+
+            if (Math.Abs(previous.End.Z - segments[i].Start.Z) > 10 || Math.Abs(segments[i].Delta.Z) > 10)
+            {
+                reasons.Add(SegmentReasons.ElevationChange);
+                continue;
+            }
+
+            reasons.Add(SegmentReasons.RubberAlignment);
+        }
+        return reasons;
+    }
+
+    /// <summary>
+    /// True if <paramref name="point"/> sits on one of the A* bypass grid lines that
+    /// <see cref="BuildAStarLines"/> derives from an obstacle (i.e. it's a detour corner, not a
+    /// coincidental corner elsewhere in space). Mirrors BuildAStarLines' own margin math
+    /// (expand by clearance, then offset the grid line by clearance again).
+    /// </summary>
+    private static bool IsNearObstacleGridBoundary(Vec3 point, List<Aabb> obstacles, double clearanceH, double clearanceZ)
+    {
+        const double eps = 5.0;
+        var totalH = clearanceH * 2.0;
+        var totalZ = clearanceZ * 2.0;
+        foreach (var obs in obstacles)
+        {
+            if (obs.IsPenetration) continue;
+            var e = obs.Expand(totalH, totalZ);
+            var onX = Math.Abs(point.X - e.Min.X) <= eps || Math.Abs(point.X - e.Max.X) <= eps;
+            var onY = Math.Abs(point.Y - e.Min.Y) <= eps || Math.Abs(point.Y - e.Max.Y) <= eps;
+            var onZ = Math.Abs(point.Z - e.Min.Z) <= eps || Math.Abs(point.Z - e.Max.Z) <= eps;
+            var withinX = point.X >= e.Min.X - eps && point.X <= e.Max.X + eps;
+            var withinY = point.Y >= e.Min.Y - eps && point.Y <= e.Max.Y + eps;
+            var withinZ = point.Z >= e.Min.Z - eps && point.Z <= e.Max.Z + eps;
+            if ((onX && withinY && withinZ) || (onY && withinX && withinZ) || (onZ && withinX && withinY)) return true;
+        }
+        return false;
     }
 
     private static double DistancePointToSegment(Vec3 point, Vec3 a, Vec3 b)
@@ -98,8 +194,15 @@ public sealed class ManagedRubberBandEngine
     private static List<RouteSegment> RouteOrthogonalAStarLeg(Vec3 start, Vec3 end, List<Aabb> obstacles, RubberBandOptions options)
     {
         if ((end - start).Length <= 1e-3) return new List<RouteSegment>();
-        var relevant = RelevantObstacles(start, end, obstacles, options).ToList();
-        var (xs, ys, zs) = BuildAStarLines(start, end, relevant, options);
+        // Split obstacle usage: every corridor-intersecting obstacle is used for collision
+        // testing (so nothing is silently passed through), while only the nearest few build
+        // the A* coordinate grid (keeps grid size bounded).
+        var collision = CorridorObstacles(start, end, obstacles, options);
+        var grid = collision
+            .OrderBy(o => DistancePointToSegment(o.Center, start, end))
+            .Take(GridObstacleLimit)
+            .ToList();
+        var (xs, ys, zs) = BuildAStarLines(start, end, grid, options);
         var startNode = new GridNode(IndexOf(xs, start.X), IndexOf(ys, start.Y), IndexOf(zs, start.Z));
         var endNode = new GridNode(IndexOf(xs, end.X), IndexOf(ys, end.Y), IndexOf(zs, end.Z));
 
@@ -109,7 +212,12 @@ public sealed class ManagedRubberBandEngine
         open.Enqueue(startNode, Heuristic(startNode, endNode, xs, ys, zs));
 
         var expansions = 0;
-        const int maxExpansions = 50000;
+        // Raised from 50,000: in a dense equipment cluster with many nearby obstacles/accumulated
+        // auto-routes, the grid can need far more expansions to find a genuinely narrow gap.
+        // Mitigates (does not guarantee-fix) widespread astar_fallback_used when many tasks are
+        // routed back-to-back in a tight area — if it's still hit, the obstacles may genuinely
+        // leave no orthogonal gap at the current TrayWidth/SafetyMargin clearance.
+        const int maxExpansions = 200000;
         while (open.Count > 0 && expansions++ < maxExpansions)
         {
             var current = open.Dequeue();
@@ -118,7 +226,7 @@ public sealed class ManagedRubberBandEngine
             foreach (var next in Neighbors(current, xs.Count, ys.Count, zs.Count))
             {
                 var seg = new RouteSegment(NodeToVec(current, xs, ys, zs), NodeToVec(next, xs, ys, zs));
-                if (seg.Length <= 1e-3 || IsBlocked(seg, relevant, options)) continue;
+                if (seg.Length <= 1e-3 || IsBlocked(seg, collision, options)) continue;
 
                 var newCost = cost[current] + seg.Length;
                 if (cost.TryGetValue(next, out var oldCost) && newCost >= oldCost) continue;
@@ -131,7 +239,10 @@ public sealed class ManagedRubberBandEngine
         return new List<RouteSegment>();
     }
 
-    private static IEnumerable<Aabb> RelevantObstacles(Vec3 start, Vec3 end, List<Aabb> obstacles, RubberBandOptions options)
+    private const int GridObstacleLimit = 48;
+    private const int CorridorObstacleLimit = 256;
+
+    private static List<Aabb> CorridorObstacles(Vec3 start, Vec3 end, List<Aabb> obstacles, RubberBandOptions options)
     {
         var margin = Math.Max(options.TrayWidth * 2.0 + options.SafetyMargin, 2000.0);
         var min = new Vec3(Math.Min(start.X, end.X) - margin, Math.Min(start.Y, end.Y) - margin, Math.Min(start.Z, end.Z) - margin);
@@ -141,7 +252,8 @@ public sealed class ManagedRubberBandEngine
             .Where(o => !o.IsPenetration)
             .Where(o => Intersects(o, corridor))
             .OrderBy(o => DistancePointToSegment(o.Center, start, end))
-            .Take(30);
+            .Take(CorridorObstacleLimit)
+            .ToList();
     }
 
     private static (List<double> Xs, List<double> Ys, List<double> Zs) BuildAStarLines(Vec3 start, Vec3 end, List<Aabb> obstacles, RubberBandOptions options)
@@ -313,34 +425,6 @@ public sealed class ManagedRubberBandEngine
         .OrderByDescending(x => x.Magnitude)
         .Select(x => x.Axis);
     }
-    private static RubberBandStep ResolveCollisions(List<RouteSegment> initial, List<Aabb> obstacles, RubberBandOptions options)
-    {
-        var segments = initial.ToList();
-        var collisions = new List<Vec3>();
-        var verticalBends = CountVerticalBends(segments);
-
-        for (var iter = 0; iter < options.MaxPushIterations; iter++)
-        {
-            var hit = FindFirstCollision(segments, obstacles, options);
-            if (hit is null) break;
-
-            var (segIndex, obstacle, point) = hit.Value;
-            collisions.Add(point);
-            var seg = segments[segIndex];
-            var remaining = options.MaxVerticalBends - verticalBends;
-            var bypassPoints = BuildBypass(seg, obstacle, remaining, options, out var usedBends);
-            verticalBends += usedBends;
-
-            var replacement = MakeRubberLineSegments(new[] { seg.Start }.Concat(bypassPoints).Concat(new[] { seg.End }));
-            segments.RemoveAt(segIndex);
-            segments.InsertRange(segIndex, replacement);
-        }
-
-        var step = MakeStep(3, $"Push collision resolution ({collisions.Count} hits)", segments);
-        step.CollisionPoints.AddRange(collisions);
-        return step;
-    }
-
     private static (int Index, Aabb Obstacle, Vec3 Point)? FindFirstCollision(List<RouteSegment> segments, List<Aabb> obstacles, RubberBandOptions options)
     {
         for (var i = 0; i < segments.Count; i++)
@@ -392,56 +476,203 @@ public sealed class ManagedRubberBandEngine
         return true;
     }
 
-    private static List<Vec3> BuildBypass(RouteSegment seg, Aabb obs, int remainingVerticalBends, RubberBandOptions options, out int usedVerticalBends)
+    /// <summary>
+    /// Greedy "string pulling" pass over the routed polyline: from each vertex, extend to the
+    /// farthest later vertex still reachable by a straight line that stays clear of every
+    /// obstacle, then continue from there. Turns an orthogonal A* staircase into a taut rubber
+    /// line wherever nothing is in the way, while leaving genuinely obstructed stretches as their
+    /// original (safe) orthogonal detour.
+    ///
+    /// Diagonal travel is intentionally restricted: horizontal-plane movement must always stay
+    /// axis-aligned (a real pipe run only turns 90 degrees in plan view), and a true multi-axis
+    /// diagonal is only ever allowed on the very first leg — the drop leaving the start PoC/
+    /// equipment — never afterwards. Every other leg may only straighten a staircase into a
+    /// single straight run along one axis.
+    /// </summary>
+    private static List<RouteSegment> ApplyLineOfSightShortcuts(List<RouteSegment> segments, List<Aabb> obstacles, RubberBandOptions options, List<Vec3> requiredPoints)
     {
-        usedVerticalBends = 0;
-        var clearance = options.TrayWidth / 2.0 + options.TrayHeight + options.SafetyMargin + 1.0;
-        var zOver = obs.Max.Z + clearance;
-        var zUnder = obs.Min.Z - clearance;
-        var midZ = (seg.Start.Z + seg.End.Z) / 2.0;
-        var zTarget = Math.Abs(zOver - midZ) <= Math.Abs(zUnder - midZ) ? zOver : zUnder;
-        if (remainingVerticalBends >= 2)
-        {
-            usedVerticalBends = 2;
-            return new List<Vec3>
-            {
-                new(seg.Start.X, seg.Start.Y, zTarget),
-                new(seg.End.X, seg.End.Y, zTarget)
-            };
-        }
+        var points = ToPolyline(segments);
+        if (points.Count < 3) return segments;
 
-        var axis = DominantAxis(seg.Delta);
-        var sideAxis = axis == 0 ? 1 : 0;
-        var lateralClearance = options.TrayWidth / 2.0 + options.SafetyMargin + 1.0;
-        var lowSide = obs.Min[sideAxis] - lateralClearance;
-        var highSide = obs.Max[sideAxis] + lateralClearance;
-        var side = Math.Abs(seg.Start[sideAxis] - lowSide) <= Math.Abs(seg.Start[sideAxis] - highSide) ? lowSide : highSide;
-        var exit = seg.End;
-        var p1 = seg.Start.WithAxis(sideAxis, side);
-        var p2 = p1.WithAxis(axis, axis switch { 0 => obs.Max.X + lateralClearance, 1 => obs.Max.Y + lateralClearance, _ => obs.Max.Z + lateralClearance });
-        var p3 = exit.WithAxis(sideAxis, side);
-        return new List<Vec3> { p1, p2, p3 };
+        bool IsRequired(Vec3 p) => requiredPoints.Any(r => (r - p).Length < 1.0);
+
+        var simplified = new List<Vec3> { points[0] };
+        var i = 0;
+        while (i < points.Count - 1)
+        {
+            // Never shortcut past a required waypoint (e.g. a forced start-drop stub) — find the
+            // next one, if any, and cap the greedy extension there so it always stays its own vertex.
+            var hardLimit = points.Count - 1;
+            for (var k = i + 1; k < points.Count - 1; k++)
+            {
+                if (IsRequired(points[k])) { hardLimit = k; break; }
+            }
+
+            var isStartLeg = i == 0;
+            var farthest = i + 1;
+            for (var j = i + 2; j <= hardLimit; j++)
+            {
+                var candidate = points[j] - simplified[^1];
+                if (!IsShortcutDirectionAllowed(candidate, isStartLeg)) break;
+                if (IsSegmentClear(simplified[^1], points[j], obstacles, options)) farthest = j;
+                else break;
+            }
+            simplified.Add(points[farthest]);
+            i = farthest;
+        }
+        return MakeRubberLineSegments(simplified);
+    }
+
+    /// <summary>
+    /// A pipe run only ever turns 90 degrees in plan view, so a shortcut spanning both X and Y
+    /// with Z not dominant (a "horizontal-plane diagonal") is never allowed, on any leg. A true
+    /// multi-axis diagonal (e.g. a sloped drop mixing Z with X/Y) is only allowed on the very
+    /// first leg — leaving the start PoC/equipment — matching how far a real installer can angle
+    /// a pipe right as it leaves its connection point; every later leg must stay single-axis.
+    /// </summary>
+    private static bool IsShortcutDirectionAllowed(Vec3 delta, bool isStartLeg)
+    {
+        const double axisEpsilon = 5.0;
+        var ax = Math.Abs(delta.X) > axisEpsilon;
+        var ay = Math.Abs(delta.Y) > axisEpsilon;
+        var az = Math.Abs(delta.Z) > axisEpsilon;
+
+        var horizontalDiagonal = ax && ay && Math.Abs(delta.Z) <= Math.Max(Math.Abs(delta.X), Math.Abs(delta.Y));
+        if (horizontalDiagonal) return false;
+
+        if (isStartLeg) return true;
+
+        var activeAxes = (ax ? 1 : 0) + (ay ? 1 : 0) + (az ? 1 : 0);
+        return activeAxes <= 1;
+    }
+
+    private static bool IsSegmentClear(Vec3 a, Vec3 b, List<Aabb> obstacles, RubberBandOptions options)
+    {
+        var seg = new RouteSegment(a, b);
+        foreach (var obs in obstacles)
+        {
+            if (!obs.IsPenetration && SegmentIntersectsExpandedAabb(seg, obs, options, out _)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Collapses a short "dogleg" — two consecutive corners joined by a very short connecting
+    /// segment — into a single corner, by intersecting the extended incoming and outgoing
+    /// directions. Only applied when the merged corner's two new legs stay clear of every
+    /// obstacle and neither original corner is a required waypoint.
+    /// </summary>
+    private static List<RouteSegment> MergeShortDoglegs(List<RouteSegment> segments, List<Aabb> obstacles, RubberBandOptions options, List<Vec3> requiredPoints)
+    {
+        var points = ToPolyline(segments);
+        if (points.Count < 4) return segments;
+
+        bool IsRequired(Vec3 p) => requiredPoints.Any(r => (r - p).Length < 1.0);
+        var mergeThreshold = Math.Max(options.TrayWidth * 0.75, 300.0);
+
+        var result = new List<Vec3> { points[0] };
+        var idx = 1;
+        while (idx <= points.Count - 2)
+        {
+            if (idx + 1 <= points.Count - 2 && !IsRequired(points[idx]) && !IsRequired(points[idx + 1]))
+            {
+                var jog = (points[idx + 1] - points[idx]).Length;
+                if (jog > 1 && jog < mergeThreshold)
+                {
+                    var prev = result[^1];
+                    var next = points[idx + 2];
+                    var inDir = points[idx] - prev;
+                    var outDir = next - points[idx + 1];
+                    // Same direction restriction as the LOS shortcut: a merged corner may only
+                    // introduce a multi-axis diagonal when it's anchored at the true route start
+                    // (the drop leaving the start PoC/equipment); never a horizontal-plane one.
+                    var isStartLeg = (prev - points[0]).Length < 1.0;
+                    if (inDir.Length > 1 && outDir.Length > 1
+                        && TryIntersectLines(prev, inDir, points[idx + 1], outDir, out var merged)
+                        && IsShortcutDirectionAllowed(merged - prev, isStartLeg)
+                        && IsShortcutDirectionAllowed(next - merged, isStartLeg)
+                        && IsSegmentClear(prev, merged, obstacles, options)
+                        && IsSegmentClear(merged, next, obstacles, options))
+                    {
+                        result.Add(merged);
+                        idx += 2;
+                        continue;
+                    }
+                }
+            }
+            result.Add(points[idx]);
+            idx++;
+        }
+        result.Add(points[^1]);
+        return MakeRubberLineSegments(result);
+    }
+
+    /// <summary>
+    /// Closest-point-between-two-lines intersection: line 1 through p1 with direction d1, line 2
+    /// through p2 with direction d2. Returns false for parallel/degenerate lines, or when the two
+    /// lines' closest points are too far apart to represent a genuine (near-coplanar) corner.
+    /// </summary>
+    private static bool TryIntersectLines(Vec3 p1, Vec3 d1, Vec3 p2, Vec3 d2, out Vec3 intersection)
+    {
+        intersection = default;
+        var a = Vec3.Dot(d1, d1);
+        var b = Vec3.Dot(d1, d2);
+        var c = Vec3.Dot(d2, d2);
+        var w = p1 - p2;
+        var d = Vec3.Dot(d1, w);
+        var e = Vec3.Dot(d2, w);
+        var denom = a * c - b * b;
+        if (Math.Abs(denom) < 1e-6) return false;
+
+        var t = (b * e - c * d) / denom;
+        var s = (a * e - b * d) / denom;
+        var pointOnLine1 = p1 + d1 * t;
+        var pointOnLine2 = p2 + d2 * s;
+        if ((pointOnLine1 - pointOnLine2).Length > Math.Max(50.0, (p1 - p2).Length * 0.1)) return false;
+
+        intersection = (pointOnLine1 + pointOnLine2) * 0.5;
+        return true;
     }
 
     public static List<List<Vec3>> DistributePipes(List<RouteSegment> segments, RubberBandOptions options)
     {
         var pipes = new List<List<Vec3>>();
         var half = (options.PipeCount - 1) / 2.0;
+        var normals = ComputeSegmentNormals(segments);
         for (var pipe = 0; pipe < options.PipeCount; pipe++)
         {
             var offset = (pipe - half) * options.PipePitch;
             var path = new List<Vec3>();
-            Vec3? previousNormal = null;
             for (var i = 0; i < segments.Count; i++)
             {
-                var normal = ComputeNormal(segments[i], previousNormal);
-                previousNormal = normal;
-                path.Add(segments[i].Start + normal * offset);
-                if (i == segments.Count - 1) path.Add(segments[i].End + normal * offset);
+                // Offset BOTH ends of segment i by segment i's own normal, so this pipe's edge
+                // stays parallel to the centerline segment. At a turn, the previous segment's
+                // offset end and this segment's offset start differ (different normals) — that
+                // gap is the natural connecting jog a parallel pipe bend actually has; it used
+                // to be silently skipped (sharing one corner point with the wrong normal),
+                // which drew a diagonal, non-parallel edge instead of a clean bend.
+                var normal = normals[i];
+                var start = segments[i].Start + normal * offset;
+                var end = segments[i].End + normal * offset;
+                if (path.Count == 0 || (path[^1] - start).Length > 1e-6) path.Add(start);
+                path.Add(end);
             }
             pipes.Add(path);
         }
         return pipes;
+    }
+
+    private static List<Vec3> ComputeSegmentNormals(List<RouteSegment> segments)
+    {
+        var normals = new List<Vec3>(segments.Count);
+        Vec3? previous = null;
+        foreach (var seg in segments)
+        {
+            var normal = ComputeNormal(seg, previous);
+            normals.Add(normal);
+            previous = normal;
+        }
+        return normals;
     }
 
     private static Vec3 ComputeNormal(RouteSegment segment, Vec3? previous)
@@ -498,8 +729,6 @@ public sealed class ManagedRubberBandEngine
         return ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
     }
 
-    private static bool Within(double value, double min, double max) => value >= min - Epsilon && value <= max + Epsilon;
-
     private readonly record struct GridNode(int X, int Y, int Z);
 
     private sealed class RubberBandResultBuilder
@@ -509,6 +738,7 @@ public sealed class ManagedRubberBandEngine
         public double TotalLength { get; init; }
         public int VerticalBends { get; init; }
         public bool IsValid { get; init; }
+        public List<string> SegmentReasonCodes { get; init; } = new();
         public RubberBandResult Build()
         {
             var result = new RubberBandResult { TotalLength = TotalLength, VerticalBends = VerticalBends, IsValid = IsValid };
@@ -516,6 +746,7 @@ public sealed class ManagedRubberBandEngine
             result.FinalSegments.AddRange(_source.FinalSegments);
             result.PipePaths.AddRange(_source.PipePaths);
             result.ValidationIssues.AddRange(_source.ValidationIssues);
+            result.SegmentReasonCodes.AddRange(SegmentReasonCodes);
             return result;
         }
     }
