@@ -233,17 +233,23 @@ namespace AutoRouteFinder.Models
             Pt3? lastTo = null;
             TaskInfo? currentTask = null;
 
+            var tempSegs = new List<RawSeg>();
             void Flush()
             {
                 if (cur == null) return;
+                
+                // IP 복원 전처리를 거친 포인트 리스트 생성
+                var reconstructedPts = ReconstructIntersectionPoints(tempSegs);
+                foreach (var pt in reconstructedPts)
+                {
+                    if (cur.Points.Count == 0 || Dist2(cur.Points[cur.Points.Count - 1], pt) > 1.0)
+                        cur.Points.Add(pt);
+                }
+
                 if (curStart.HasValue && curEnd.HasValue)
                     TrimToBoundary(cur.Points, curStart.Value, curEnd.Value);
                 if (cur.Points.Count >= 2) data.ExistingPipes.Add(cur);
-            }
-            void AddPt(Pt3 p)
-            {
-                if (cur!.Points.Count == 0 || Dist2(cur.Points[cur.Points.Count - 1], p) > 1.0)
-                    cur.Points.Add(p);
+                tempSegs.Clear();
             }
 
             while (r.Read())
@@ -316,11 +322,10 @@ namespace AutoRouteFinder.Models
                     }
                 }
 
-                if (rowFrom.HasValue)
-                    AddPt(rowFrom.Value);
-                if (rowTo.HasValue)
+                if (rowFrom.HasValue && rowTo.HasValue)
                 {
-                    AddPt(rowTo.Value);
+                    string? type = r.IsDBNull(18) ? null : r.GetString(18);
+                    tempSegs.Add(new RawSeg { From = rowFrom.Value, To = rowTo.Value, Type = type });
                     lastTo = rowTo.Value;
                 }
             }
@@ -416,6 +421,91 @@ namespace AutoRouteFinder.Models
             }
             return dict;
         }
+
+        internal class RawSeg
+        {
+            public Pt3 From { get; set; }
+            public Pt3 To { get; set; }
+            public string? Type { get; set; }
+        }
+
+        internal static List<Pt3> ReconstructIntersectionPoints(List<RawSeg> segments)
+        {
+            var pts = new List<Pt3>();
+            if (segments.Count == 0) return pts;
+
+            pts.Add(segments[0].From);
+
+            for (int i = 0; i < segments.Count; i++)
+            {
+                var curSeg = segments[i];
+
+                if (curSeg.Type == "ELBOW" && i > 0 && i < segments.Count - 1)
+                {
+                    var prevSeg = segments[i - 1];
+                    var nextSeg = segments[i + 1];
+
+                    Pt3 v1 = Sub(prevSeg.To, prevSeg.From);
+                    Pt3 v2 = Sub(nextSeg.To, nextSeg.From);
+
+                    double l1 = Len(v1);
+                    double l2 = Len(v2);
+
+                    if (l1 > 1e-3 && l2 > 1e-3)
+                    {
+                        v1 = new Pt3(v1.X / l1, v1.Y / l1, v1.Z / l1);
+                        v2 = new Pt3(v2.X / l2, v2.Y / l2, v2.Z / l2);
+
+                        Pt3 p1 = prevSeg.To;
+                        Pt3 p2 = nextSeg.From;
+                        Pt3 w0 = Sub(p1, p2);
+
+                        double a = Dot(v1, v1);
+                        double b = Dot(v1, v2);
+                        double c = Dot(v2, v2);
+                        double d = Dot(v1, w0);
+                        double e = Dot(v2, w0);
+
+                        double denom = a * c - b * b;
+                        if (denom > 1e-6)
+                        {
+                            double t = (b * e - c * d) / denom;
+                            double s = (a * e - b * d) / denom;
+
+                            Pt3 q1 = Add(p1, Mult(v1, t));
+                            Pt3 q2 = Add(p2, Mult(v2, s));
+
+                            Pt3 ip = new Pt3((q1.X + q2.X) * 0.5, (q1.Y + q2.Y) * 0.5, (q1.Z + q2.Z) * 0.5);
+
+                            double skewDist2 = Dist2(q1, q2);
+                            if (skewDist2 < 500.0 * 500.0)
+                            {
+                                if (pts.Count > 0)
+                                    pts[pts.Count - 1] = ip;
+                                else
+                                    pts.Add(ip);
+
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                Pt3 toPt = curSeg.To;
+                if (pts.Count == 0 || Dist2(pts[pts.Count - 1], toPt) > 1.0)
+                {
+                    pts.Add(toPt);
+                }
+            }
+
+            return pts;
+        }
+
+        private static Pt3 Sub(Pt3 a, Pt3 b) => new Pt3(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+        private static Pt3 Add(Pt3 a, Pt3 b) => new Pt3(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+        private static Pt3 Mult(Pt3 a, double s) => new Pt3(a.X * s, a.Y * s, a.Z * s);
+        private static double Dot(Pt3 a, Pt3 b) => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+        private static double Len(Pt3 a) => Math.Sqrt(a.X * a.X + a.Y * a.Y + a.Z * a.Z);
 
         private static double Dbl(NpgsqlDataReader r, int i) => r.IsDBNull(i) ? 0.0 : r.GetDouble(i);
         private static double Dist2(Pt3 a, Pt3 b)

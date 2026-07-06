@@ -403,29 +403,47 @@ namespace AutoRouteFinder
                 _ductLateralVisuals.Add((box, dl.Category, dl.Utility ?? ""));
             }
 
-            // 3. 기존 설계 배관 그리기 (반투명 주황/초록)
+            // 3. Existing pipe lines drawing with group merge and elbow segmentation
             var converter = new UtilityGroupToBrushConverter();
-            foreach (var pipe in sd.ExistingPipes)
+            var pipesByGroup = sd.ExistingPipes
+                .Where(p => p.Points != null && p.Points.Count >= 2)
+                .GroupBy(p => p.Group ?? "Unknown");
+
+            foreach (var group in pipesByGroup)
             {
-                if (pipe.Points == null || pipe.Points.Count < 2) continue;
+                string groupName = group.Key;
+                var brush = converter.Convert(groupName, typeof(Brush), null, System.Globalization.CultureInfo.InvariantCulture) as Brush ?? Brushes.Green;
+                var mergedPaths = MergeExistingPipes(group.ToList());
 
-                var pts = new Point3DCollection();
-                foreach (var p in pipe.Points) pts.Add(new Point3D(p.X, p.Y, p.Z));
-
-                var brush = converter.Convert(pipe.Group, typeof(Brush), null, System.Globalization.CultureInfo.InvariantCulture) as Brush ?? Brushes.Green;
-                var transparentBrush = brush.Clone();
-                transparentBrush.Opacity = 0.45; // 기존 설계는 반투명 튜브로 표기
-
-                var tube = new TubeVisual3D
+                foreach (var rawPath in mergedPaths)
                 {
-                    Path = pts,
-                    Diameter = pipe.DiameterMm > 0 ? pipe.DiameterMm : 100,
-                    Fill = transparentBrush,
-                    IsPathClosed = false,
-                    Visible = ChkShowExistingPipes.IsChecked == true
-                };
-                Viewport3D.Children.Add(tube);
-                _existingPipeVisuals.Add((tube, pipe.Group ?? "", pipe.Utility ?? ""));
+                    var firstPipe = group.FirstOrDefault();
+                    double diameter = (firstPipe != null && firstPipe.DiameterMm > 0) ? firstPipe.DiameterMm : 100;
+                    var dividedSegs = DividePathToElbows(rawPath, diameter);
+
+                    foreach (var seg in dividedSegs)
+                    {
+                        var pathPts = new Point3DCollection(seg.Points);
+                        var segmentBrush = brush.Clone();
+
+                        if (seg.IsElbow)
+                        {
+                            segmentBrush = new SolidColorBrush(Color.FromRgb(255, 165, 0)); // Orange for Elbows
+                        }
+                        segmentBrush.Opacity = 0.45;
+
+                        var tube = new TubeVisual3D
+                        {
+                            Path = pathPts,
+                            Diameter = diameter,
+                            Fill = segmentBrush,
+                            IsPathClosed = false,
+                            Visible = ChkShowExistingPipes.IsChecked == true
+                        };
+                        Viewport3D.Children.Add(tube);
+                        _existingPipeVisuals.Add((tube, groupName, firstPipe?.Utility ?? ""));
+                    }
+                }
             }
 
             // 4. 시작/종단 PoC 마커 표시 (시작=빨강, 종단=파랑 구체, 관경보다 20% 더 크게 렌더링)
@@ -1025,6 +1043,192 @@ namespace AutoRouteFinder
             };
         }
 
+        private double GetElbowSizeE(double diameterMm)
+        {
+            double d = diameterMm > 0 ? diameterMm : 50.0;
+            return 1.5 * d; // Long Radius (1.5D) 간이 규격
+        }
+
+        private struct DividedSegment
+        {
+            public List<Point3D> Points;
+            public bool IsElbow;
+        }
+
+        private List<DividedSegment> DividePathToElbows(List<Point3D> originalPath, double diameterMm)
+        {
+            var segments = new List<DividedSegment>();
+            if (originalPath.Count < 2) return segments;
+
+            double E = GetElbowSizeE(diameterMm);
+
+            var corners = new HashSet<int>();
+            for (int i = 1; i < originalPath.Count - 1; i++)
+            {
+                var p1 = originalPath[i - 1];
+                var p2 = originalPath[i];
+                var p3 = originalPath[i + 1];
+
+                var v1 = new System.Windows.Media.Media3D.Vector3D(p2.X - p1.X, p2.Y - p1.Y, p2.Z - p1.Z);
+                var v2 = new System.Windows.Media.Media3D.Vector3D(p3.X - p2.X, p3.Y - p2.Y, p3.Z - p2.Z);
+
+                if (v1.Length > 1e-3) v1.Normalize();
+                if (v2.Length > 1e-3) v2.Normalize();
+
+                if (Math.Abs(System.Windows.Media.Media3D.Vector3D.DotProduct(v1, v2)) < 0.99)
+                {
+                    corners.Add(i);
+                }
+            }
+
+            for (int i = 1; i < originalPath.Count; i++)
+            {
+                var isStartCorner = corners.Contains(i - 1);
+                var isEndCorner = corners.Contains(i);
+
+                Point3D segStart = originalPath[i - 1];
+                Point3D segEnd = originalPath[i];
+
+                var dir = new System.Windows.Media.Media3D.Vector3D(segEnd.X - segStart.X, segEnd.Y - segStart.Y, segEnd.Z - segStart.Z);
+                double len = dir.Length;
+                if (len > 1e-3) dir.Normalize();
+
+                Point3D pipeStart = segStart;
+                Point3D pipeEnd = segEnd;
+
+                if (isStartCorner)
+                {
+                    pipeStart = segStart + dir * Math.Min(E, len * 0.5);
+                }
+                if (isEndCorner)
+                {
+                    pipeEnd = segEnd - dir * Math.Min(E, len * 0.5);
+                }
+
+                var pipeLen = (pipeEnd - pipeStart).Length;
+                if (pipeLen > 1.0)
+                {
+                    segments.Add(new DividedSegment
+                    {
+                        Points = new List<Point3D> { pipeStart, pipeEnd },
+                        IsElbow = false
+                    });
+                }
+
+                if (isEndCorner && i < originalPath.Count - 1)
+                {
+                    Point3D prevPt = segEnd - dir * Math.Min(E, len * 0.5);
+
+                    var nextSegStart = originalPath[i];
+                    var nextSegEnd = originalPath[i + 1];
+                    var nextDir = new System.Windows.Media.Media3D.Vector3D(nextSegEnd.X - nextSegStart.X, nextSegEnd.Y - nextSegStart.Y, nextSegEnd.Z - nextSegStart.Z);
+                    double nextLen = nextDir.Length;
+                    if (nextLen > 1e-3) nextDir.Normalize();
+
+                    Point3D nextPt = nextSegStart + nextDir * Math.Min(E, nextLen * 0.5);
+
+                    segments.Add(new DividedSegment
+                    {
+                        Points = new List<Point3D> { prevPt, segEnd, nextPt },
+                        IsElbow = true
+                    });
+                }
+            }
+
+            return segments;
+        }
+
+        private List<List<Point3D>> MergeExistingPipes(List<ExistingPipe> pipes)
+        {
+            var mergedPaths = new List<List<Point3D>>();
+            if (pipes == null || pipes.Count == 0) return mergedPaths;
+
+            var tempPaths = new List<List<Point3D>>();
+            foreach (var p in pipes)
+            {
+                if (p.Points == null || p.Points.Count < 2) continue;
+                var path = new List<Point3D>();
+                foreach (var pt in p.Points) path.Add(new Point3D(pt.X, pt.Y, pt.Z));
+                tempPaths.Add(path);
+            }
+
+            bool mergedAny = true;
+            while (mergedAny)
+            {
+                mergedAny = false;
+                for (int i = 0; i < tempPaths.Count; i++)
+                {
+                    if (tempPaths[i] == null) continue;
+
+                    for (int j = i + 1; j < tempPaths.Count; j++)
+                    {
+                        if (tempPaths[j] == null) continue;
+
+                        var path1 = tempPaths[i];
+                        var path2 = tempPaths[j];
+
+                        Point3D p1Start = path1[0];
+                        Point3D p1End = path1[path1.Count - 1];
+                        Point3D p2Start = path2[0];
+                        Point3D p2End = path2[path2.Count - 1];
+
+                        const double connectThreshold = 300.0;
+                        const double connectThreshold2 = connectThreshold * connectThreshold;
+
+                        double d_e1_s2 = DistSq(p1End, p2Start);
+                        if (d_e1_s2 < connectThreshold2)
+                        {
+                            path1.AddRange(path2.Skip(1));
+                            tempPaths[j] = null;
+                            mergedAny = true;
+                            break;
+                        }
+
+                        double d_e2_s1 = DistSq(p2End, p1Start);
+                        if (d_e2_s1 < connectThreshold2)
+                        {
+                            path2.AddRange(path1.Skip(1));
+                            tempPaths[i] = path2;
+                            tempPaths[j] = null;
+                            mergedAny = true;
+                            break;
+                        }
+
+                        double d_e1_e2 = DistSq(p1End, p2End);
+                        if (d_e1_e2 < connectThreshold2)
+                        {
+                            var reversed = path2.AsEnumerable().Reverse().Skip(1);
+                            path1.AddRange(reversed);
+                            tempPaths[j] = null;
+                            mergedAny = true;
+                            break;
+                        }
+
+                        double d_s1_s2 = DistSq(p1Start, p2Start);
+                        if (d_s1_s2 < connectThreshold2)
+                        {
+                            var reversed = path1.AsEnumerable().Reverse().Concat(path2.Skip(1)).ToList();
+                            tempPaths[i] = reversed;
+                            tempPaths[j] = null;
+                            mergedAny = true;
+                            break;
+                        }
+                    }
+                    if (mergedAny) break;
+                }
+
+                tempPaths = tempPaths.Where(p => p != null).ToList();
+            }
+
+            return tempPaths;
+        }
+
+        private static double DistSq(Point3D a, Point3D b)
+        {
+            double dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
+            return dx * dx + dy * dy + dz * dz;
+        }
+
         private List<Pt3> LoadPathPoints(string guid)
         {
             var pts = new List<Pt3>();
@@ -1033,13 +1237,15 @@ namespace AutoRouteFinder
             conn.Open();
             using var cmd = new Npgsql.NpgsqlCommand(
                 @"SELECT sd.""FROM_POSX"", sd.""FROM_POSY"", sd.""FROM_POSZ"",
-                         sd.""TO_POSX"",   sd.""TO_POSY"",   sd.""TO_POSZ""
+                         sd.""TO_POSX"",   sd.""TO_POSY"",   sd.""TO_POSZ"",
+                         sd.""TYPE""
                     FROM ""TB_ROUTE_SEGMENT_DETAIL"" sd
                     JOIN ""TB_ROUTE_SEGMENTS"" s ON s.""SEGMENT_GUID"" = sd.""SEGMENT_GUID""
                    WHERE s.""ROUTE_PATH_GUID"" = @guid
                    ORDER BY s.""ORDER"", sd.""ORDER""", conn);
             cmd.Parameters.AddWithValue("@guid", guid);
 
+            var tempSegs = new List<ObstacleDbLoader.RawSeg>();
             using var r = cmd.ExecuteReader();
             Pt3? lastTo = null;
             while (r.Read())
@@ -1050,6 +1256,7 @@ namespace AutoRouteFinder
                 double tx = r.IsDBNull(3) ? 0 : r.GetDouble(3);
                 double ty = r.IsDBNull(4) ? 0 : r.GetDouble(4);
                 double tz = r.IsDBNull(5) ? 0 : r.GetDouble(5);
+                string? type = r.IsDBNull(6) ? null : r.GetString(6);
 
                 Pt3 from = new Pt3(fx, fy, fz);
                 Pt3 to = new Pt3(tx, ty, tz);
@@ -1065,30 +1272,30 @@ namespace AutoRouteFinder
                     }
                 }
 
+                tempSegs.Add(new ObstacleDbLoader.RawSeg { From = from, To = to, Type = type });
+                lastTo = to;
+            }
+
+            var reconstructedPts = ObstacleDbLoader.ReconstructIntersectionPoints(tempSegs);
+            foreach (var pt in reconstructedPts)
+            {
                 if (pts.Count == 0)
                 {
-                    pts.Add(from);
+                    pts.Add(pt);
                 }
                 else
                 {
-                    double d1 = (pts[pts.Count - 1].X - from.X) * (pts[pts.Count - 1].X - from.X) +
-                                (pts[pts.Count - 1].Y - from.Y) * (pts[pts.Count - 1].Y - from.Y) +
-                                (pts[pts.Count - 1].Z - from.Z) * (pts[pts.Count - 1].Z - from.Z);
-                    if (d1 > 1.0)
+                    var last = pts[pts.Count - 1];
+                    double dx = last.X - pt.X;
+                    double dy = last.Y - pt.Y;
+                    double dz = last.Z - pt.Z;
+                    if (dx * dx + dy * dy + dz * dz > 1.0)
                     {
-                        pts.Add(from);
+                        pts.Add(pt);
                     }
                 }
-
-                double dto = (pts[pts.Count - 1].X - to.X) * (pts[pts.Count - 1].X - to.X) +
-                            (pts[pts.Count - 1].Y - to.Y) * (pts[pts.Count - 1].Y - to.Y) +
-                            (pts[pts.Count - 1].Z - to.Z) * (pts[pts.Count - 1].Z - to.Z);
-                if (dto > 1.0)
-                {
-                    pts.Add(to);
-                }
-                lastTo = to;
             }
+
             return pts;
         }
 

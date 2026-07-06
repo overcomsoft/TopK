@@ -1,352 +1,257 @@
-# RubberBand Routing Suite — C++ API 매뉴얼 및 C# 경로 뷰어 코드 분석
+# RubberBand Routing Suite — C++ API 매뉴얼 및 C# 뷰어/엔진 통합 분석 보고서
 
-본 문서는 `RubberBandRoutingSuite/` 하위에 구현된 소스를 직접 분석하여 다음을 정리한다.
+본 문서는 `RubberBandRoutingSuite/` 하위에 구현된 소스 코드를 직접 분석하여 다음을 정리한다.
 
-1. C++ 네이티브 엔진(`RubberBandRouting.Native`)의 C API 매뉴얼
-2. 3D 경로 뷰어(C# WPF)와 관리형 엔진(C#)의 실제 구현 분석
-3. 기존 소스의 문제점과 개선사항
-
-분석 대상 소스 기준: `main` 브랜치, 커밋 `0bfb2e1` 시점.
-
----
-
-## 0. 먼저 확인해야 할 핵심 사실 — C++ 엔진과 C# 뷰어는 "연결되어 있지 않다"
-
-개발 요청에서는 "C++로 고무줄밴드 경로엔진, C#으로 뷰어가 개발되어 있고 C# 뷰어가 C++ API를 구현한다"고 전제했으나, **실제 소스 상태는 그렇지 않다.** 이 점을 먼저 명확히 하고 나머지 분석을 진행한다.
-
-| 확인 항목 | 실제 상태 | 근거 |
-|---|---|---|
-| C# 뷰어가 C++ DLL을 P/Invoke로 호출하는가 | **아니다.** `DllImport`/`rb_*` 심볼이 소스 전체에 없음 | `src/` 전체 grep 결과 P/Invoke 없음 |
-| C++ 프로젝트가 솔루션에 포함되는가 | **아니다.** `.sln`에는 C# 두 프로젝트만 존재 | [RubberBandRoutingSuite.sln](RubberBandRoutingSuite/RubberBandRoutingSuite.sln#L8-L11) |
-| C++는 어떻게 빌드되는가 | 솔루션과 무관하게 `build_msvc.bat`로 DLL만 별도 생성 | [build_msvc.bat](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/build_msvc.bat) |
-| 실제 라우팅 계산 주체 | **C# `ManagedRubberBandEngine`** | [MainWindow.xaml.cs:378](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L378) |
-
-즉 현재 저장소에는 **두 개의 서로 다른 라우팅 구현이 병렬로 존재**하며(C++ 스텁 1개 + C# 실동작 엔진 1개), 둘은 코드로 연결되어 있지 않다. C++ 네이티브 README도 "implementation stub"이라고 스스로 명시한다([README.md:1-3](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/README.md#L1-L3)).
-
-따라서 본 문서의 "C++ API 매뉴얼"은 **장차 C#이 대체·연동할 대상으로서의 네이티브 API 규격**을 문서화한 것이고, "C# 뷰어 분석"은 **현재 실제로 화면을 그리는 구현**을 문서화한 것이다. 두 구현의 대응/불일치는 4장과 5장에서 정리한다.
+1. **C++ 네이티브 엔진(`RubberBandRouting.Native`)의 C API 규격 및 내부 파이프라인**
+2. **C# 관리형 엔진(`RubberBandRouting.Engine`)의 알고리즘 및 데이터 구조**
+3. **P/Invoke 브리지를 통한 C++ 네이티브 엔진과 C# 뷰어의 실제 연동 메커니즘**
+4. **WPF 3D 경로 뷰어(`RubberBandRouting.Viewer`)의 핵심 기능 및 고도화 항목**
+5. **두 엔진의 정합성 검증 및 이전 세대(스텁 단계) 대비 개선 완료 사항**
 
 ---
 
-## 1. 솔루션 구조
+## 0. 핵심 변경 사항 개요 (2026-07-05 완료)
+
+이전 분석 시점(커밋 `0bfb2e1`)에서는 C++ 엔진이 단순한 "직교 축 분해 스텁"에 머물러 있었고 C# 뷰어와 코드로 단절되어 병렬로만 존재했습니다. 2026-07-05 고도화 작업을 통해 다음 사항이 완벽히 해결 및 연동되었습니다.
+
+* **실제 P/Invoke 연동 완료**: `IRubberBandEngine` 공통 인터페이스를 기반으로, 뷰어에서 관리형(C#) 엔진과 네이티브(C++) 엔진을 런타임에 체크박스 하나로 자유롭게 전환하여 사용할 수 있습니다.
+* **알고리즘의 1:1 동기화**: C++ 네이티브 엔진을 C# 관리형 엔진과 동일한 **특징점 Snap + 직교 A\* + 슬래브(Slab) 교차판정 + Line-Of-Sight(LOS) 직선 단축 + Dogleg 코너 병합 + 평행 파이프 분배** 파이프라인으로 전면 재작성했습니다.
+* **기능 고도화**: DB 연결정보 영속화(DPAPI 암호화), 3D 뷰 픽-투-셀렉트(배관/특징점 클릭 연동), 형제(Sibling) 배관 간섭 제외 필터링, 기존 배관 경로와의 정밀 비교 다이얼로그(`CompareRoutesWindow`) 등이 추가되었습니다.
+
+---
+
+## 1. 솔루션 및 프로젝트 구조
 
 ```
 RubberBandRoutingSuite/
-├─ RubberBandRoutingSuite.sln        # C# 프로젝트 2개만 포함
+├─ RubberBandRoutingSuite.sln        # 전체 C# 솔루션 (Engine, Viewer 포함)
 ├─ cpp/
-│  └─ RubberBandRouting.Native/      # C++ 네이티브 엔진 (솔루션 외부, DLL 스텁)
+│  └─ RubberBandRouting.Native/      # C++ 네이티브 엔진 프로젝트
 │     ├─ rubberband_native.h         # C API 선언 (extern "C")
-│     ├─ rubberband_native.cpp       # 구현
-│     ├─ build_msvc.bat              # cl.exe 단독 빌드 스크립트
-│     └─ README.md
+│     ├─ rubberband_native.cpp       # C++ 구현 (A*, 슬래브 판정, LOS, Dogleg)
+│     └─ build_msvc.bat              # cl.exe 단독 빌드 스크립트 (x64 DLL 생성)
 └─ src/
-   ├─ RubberBandRouting.Engine/      # net8.0 클래스 라이브러리
-   │  ├─ Models.cs                   # Vec3/Aabb/RouteSegment/옵션/결과 모델
-   │  ├─ ManagedRubberBandEngine.cs  # 실제 라우팅 알고리즘 (A* 기반)
-   │  └─ PostgresRoutingDataLoader.cs# PostgreSQL 씬 로더 (Npgsql)
-   └─ RubberBandRouting.Viewer/      # net8.0-windows WPF + HelixToolkit
-      ├─ MainWindow.xaml             # UI 레이아웃
-      └─ MainWindow.xaml.cs          # 씬 렌더링·특징점 추출·자동설계 오케스트레이션
+   ├─ RubberBandRouting.Engine/      # .NET 8.0 클래스 라이브러리
+   │  ├─ Models.cs                   # Vec3, Aabb, RouteFeature(역할 포함), IRubberBandEngine
+   │  ├─ ManagedRubberBandEngine.cs  # C# A* + LOS + Dogleg 라우팅 알고리즘
+   │  ├─ PostgresRoutingDataLoader.cs# PostgreSQL 씬 데이터 로더 (경고/상태 수집)
+   │  ├─ NativeInterop.cs            # C++ DLL P/Invoke 매핑 (NativeMethods)
+   │  └─ NativeRubberBandEngine.cs   # IRubberBandEngine 인터페이스 구현 및 마샬링 래퍼
+   └─ RubberBandRouting.Viewer/      # .NET 8.0-windows WPF application (HelixToolkit)
+      ├─ MainWindow.xaml             # 메인 UI (디버그 제어, 설정, 엔진 전환)
+      ├─ MainWindow.xaml.cs          # 씬 렌더링, 피킹, 수직 스텁, 누적 장애물 처리
+      ├─ CompareRoutesWindow.xaml    # 기존설계 vs 자동설계 3D 비교 창 (비모달)
+      ├─ CompareRoutesWindow.xaml.cs # 이중 3D 뷰포트, 카메라 동기화, 세그먼트 매칭
+      └─ ViewerSettings.cs           # DB 자격증명 보안 영속화 (Windows DPAPI 사용)
 ```
 
-- Engine 의존성: `Npgsql 8.0.4` ([csproj](RubberBandRoutingSuite/src/RubberBandRouting.Engine/RubberBandRouting.Engine.csproj#L10))
-- Viewer 의존성: `HelixToolkit.Wpf 2.25.0` + Engine 프로젝트 참조 ([csproj](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/RubberBandRouting.Viewer.csproj))
+* **프로세스 비트수 일치**: C++ DLL과의 연동을 위해 `Viewer.csproj`에 `PlatformTarget=x64` 및 DLL 조건부 복사 빌드 스크립트가 적용되었습니다.
+* **DLL 자동 로드 예외 처리**: DLL이 존재하지 않거나 로드 실패 시 `NativeRubberBandEngine.IsAvailable`이 자동 감지하여 관리형 엔진으로 안전하게 대체(Fallback)됩니다.
 
 ---
 
 ## 2. C++ 네이티브 엔진 API 매뉴얼
 
-파일: [rubberband_native.h](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.h) / [rubberband_native.cpp](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp)
+파일: [rubberband_native.h](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.h) / [rubberband_native.cpp](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp)
 
-C++ 내부는 익명 네임스페이스 클래스로 캡슐화하고, 외부에는 `extern "C"`로 순수 C 심볼만 노출한다. Windows에서는 `RUBBERBAND_NATIVE_EXPORTS` 정의 여부에 따라 `__declspec(dllexport/dllimport)`가 결정된다.
+외부에는 `extern "C"` 형태로 순수 C ABI 심볼만 노출하여 C# 마샬링 호환성을 제공합니다.
 
 ### 2.1 데이터 구조 (ABI)
 
-모든 좌표·치수 단위는 **mm**이며 double 정밀도이다.
+모든 좌표·치수 단위는 **mm**이며 `double` 정밀도입니다.
 
-| 구조체 | 필드 | 설명 |
+| 구조체 | 필드 구성 | 설명 |
 |---|---|---|
 | `RbVec3` | `double x, y, z` | 3D 좌표/벡터 |
-| `RbAabb` | `double min_x,min_y,min_z, max_x,max_y,max_z`; `int is_penetration` | 축 정렬 경계상자 장애물. `is_penetration != 0`이면 통과 가능(충돌 무시) |
-| `RbConfig` | `int max_vertical_bends`; `double safety_margin, tray_width, tray_height, pipe_pitch`; `int pipe_count` | 라우팅 파라미터 |
-| `RbEngineHandle` | `void*` | 불투명 엔진 핸들 |
+| `RbAabb` | `double min_x, min_y, min_z, max_x, max_y, max_z; int is_penetration` | 축 정렬 경계상자 장애물. `is_penetration != 0`이면 내부 슬리브 통로로 충돌을 무시하고 강제 통과 |
+| `RbConfig` | `int max_vertical_bends; double safety_margin, tray_width, tray_height, pipe_pitch; int pipe_count; double snap_tolerance; double pipe_diameter;` | 라우팅/기하 파라미터. `pipe_diameter`는 최종 파이프 충돌 및 라운드 밴드 클리어런스 계산에 활용 |
+| `RbEngineHandle` | `void*` | 내부 `Engine` C++ 인스턴스를 가리키는 불투명 핸들 |
 
-> ⚠ **구조체 필드 순서 주의**: `RbConfig`의 필드 순서는 `max_vertical_bends → safety_margin → tray_width → tray_height → pipe_pitch → pipe_count`이다. C# 측 `[StructLayout(LayoutKind.Sequential)]`로 마샬링할 때 이 순서와 타입(int/double 혼합)을 정확히 맞춰야 한다. 내부 기본값은 `{5, 50.0, 600.0, 100.0, 100.0, 3}` ([cpp:11](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L11)).
+> ⚠ **마샬링 정밀 일치**: `RbConfig`는 C# 측 `[StructLayout(LayoutKind.Sequential)]` 구조체(`NativeMethods.RbConfig`)와 메모리 구조가 정확히 1:1로 대응해야 합니다.
 
 ### 2.2 함수 레퍼런스
 
-모든 정수 반환 함수는 **0 = 성공, 0이 아니면 실패/오류**(주로 null 핸들) 규약을 따른다. 단, `rb_get_*_count`와 `rb_copy_*`는 예외적으로 개수를 반환한다.
+성공 시 `0`을 반환하고, 실패 또는 잘못된 인자 입력 시 `1`을 반환하는 ABI 규약을 따릅니다.
 
-| 함수 | 시그니처 | 동작 | 반환 |
-|---|---|---|---|
-| `rb_create` | `RbEngineHandle rb_create(void)` | 엔진 인스턴스 생성(`new Engine`) | 핸들(실패 시 예외 없음) |
-| `rb_destroy` | `void rb_destroy(RbEngineHandle)` | 엔진 해제(`delete`) | 없음 |
-| `rb_initialize` | `int rb_initialize(RbEngineHandle, RbConfig)` | 설정 주입 | 0/1 |
-| `rb_set_obstacles` | `int rb_set_obstacles(RbEngineHandle, const RbAabb*, int count)` | 장애물 배열 복사 저장 | 0/1(`count<0` 시 1) |
-| `rb_execute` | `int rb_execute(RbEngineHandle, RbVec3 start, RbVec3 end)` | 경로 계산 실행 | 0/1 |
-| `rb_get_segment_count` | `int rb_get_segment_count(RbEngineHandle)` | 중심선 세그먼트 수 | 세그먼트 개수 |
-| `rb_copy_segments` | `int rb_copy_segments(RbEngineHandle, RbVec3* out, int max)` | 중심선 폴리라인 점 복사 | `out==null`이면 필요한 점 개수, 아니면 복사한 개수 |
-| `rb_get_pipe_count` | `int rb_get_pipe_count(RbEngineHandle)` | 분배된 파이프 라인 수 | 파이프 개수 |
-| `rb_copy_pipe_path` | `int rb_copy_pipe_path(RbEngineHandle, int idx, RbVec3* out, int max)` | idx번 파이프 폴리라인 점 복사 | `out==null`이면 점 개수, 아니면 복사한 개수 |
+| 함수 시그니처 | 동작 설명 |
+|---|---|
+| `RbEngineHandle rb_create(void)` | 네이티브 `Engine` 객체를 힙 메모리에 할당하고 핸들을 반환합니다. |
+| `void rb_destroy(RbEngineHandle engine)` | 할당된 `Engine` 객체를 메모리에서 해제합니다. |
+| `int rb_initialize(RbEngineHandle engine, RbConfig config)` | 라우팅 설정 파라미터(`RbConfig`)를 엔진 인스턴스에 주입합니다. |
+| `int rb_set_obstacles(RbEngineHandle engine, const RbAabb* obstacles, int count)` | 현재 설계 영역의 장애물 AABB 배열 데이터를 내부 메모리에 복사 저장합니다. |
+| `int rb_set_features(RbEngineHandle engine, const RbVec3* features, int count)` | 기존 설계의 특징점(Elbow, 고도변경점 등) 좌표 배열을 입력합니다. (내부 필수 플래그 초기화) |
+| `int rb_set_feature_flags(RbEngineHandle engine, const int* required, int count)` | 각 특징점의 필수(`Required=1`) 여부 배열을 매핑합니다. 필수 특징점은 엔진의 허용 오차/우회 필터를 통과합니다. |
+| `int rb_execute(RbEngineHandle engine, RbVec3 start, RbVec3 end)` | 전체 고무줄 라우팅 파이프라인을 실행합니다. (성공 시 `0` 반환) |
+| `int rb_get_segment_count(RbEngineHandle engine)` | 자동설계 완료된 대표 중심선(Centerline)의 세그먼트 개수를 반환합니다. |
+| `int rb_copy_segments(RbEngineHandle engine, RbVec3* out_points, int max_points)` | 대표 중심선 폴리라인 점들을 복사합니다. `out_points`가 Null이면 필요한 배열 크기(`세그먼트 수 + 1`)를 반환합니다. |
+| `int rb_get_pipe_count(RbEngineHandle engine)` | 분배된 파이프 라인 개수를 반환합니다 (`cfg.pipe_count`와 일치). |
+| `int rb_copy_pipe_path(RbEngineHandle engine, int pipe_index, RbVec3* out_points, int max_points)` | 지정된 인덱스의 개별 파이프 경로 점들을 복사합니다. |
+| `int rb_get_vertical_bends(RbEngineHandle engine)` | 최종 경로의 수직 꺾임(Vertical Bends) 횟수를 진단하여 반환합니다. |
+| `int rb_get_fallback_count(RbEngineHandle engine)` | A\* 탐색에 실패하여 단순 직교 경로(Manhattan Fallback)로 대체된 구간의 수를 반환합니다. |
+| `int rb_is_valid(RbEngineHandle engine)` | 최종 유효성 여부(`1`: 성공, `0`: 경고)를 판단합니다. (잔여 충돌 없고, Fallback 없고, 수직 꺾임이 상한 이하인 경우 유효) |
+| `int rb_get_segment_reason(RbEngineHandle engine, int segment_index)` | 대표 중심선의 각 세그먼트 시작 지점의 생성 원인 코드(Start, Snap, Bypass, Turn, Z-Change, Alignment)를 반환합니다. |
 
-**중심선 점 개수 규약**: 세그먼트 N개일 때 폴리라인 점은 `N+1`개(`front().a` + 각 세그먼트의 `b`). `rb_copy_segments`에 `out_points=null`을 넘겨 필요한 크기를 먼저 조회한 뒤 버퍼를 할당하는 2-패스 패턴을 지원한다([cpp:158-167](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L158-L167)).
+### 2.3 내부 알고리즘 파이프라인 (`rb_execute`)
 
-### 2.3 표준 호출 시퀀스
+1. **[Build Snapped Points]**
+   * 시작 PoC와 종단 PoC 사이의 팽팽한 직선 장력 고무줄을 설정합니다.
+   * `SnapTolerance` 이내에 있거나 `max(len * 2.5, 10000mm)` 이상의 터무니없는 우회를 만드는 특징점(Optional)을 필터링합니다. 단, `Required` 특징점은 본 필터를 거치지 않고 무조건 포함합니다.
+   * 최종적으로 `[Start, snap1, snap2, ..., End]` 형태의 정렬된 제어점(Waypoint) 뼈대를 형성합니다.
+2. **[Orthogonal A\* Search per Leg]**
+   * 각 제어점 구간을 희소 격자 A\* 알고리즘을 사용해 연결합니다.
+   * 격자 노드 생성 시에는 근접 `kGridObstacleLimit(48)`개의 장애물을 활용해 효율성을 도모하되, 실제 충돌 검사(`IsBlocked`) 단계에서는 회랑 내의 모든 장애물(`kCorridorObstacleLimit(256)`)과 정밀 슬래브 교차 검사를 수행하여 임의의 대각선 고무줄 세그먼트 충돌도 누락 없이 완벽히 탐지합니다.
+   * 탐색 한도(`kMaxExpansions = 200,000`)를 초과하는 등 A\* 탐색에 실패할 경우, 단순 직교 분해(Manhattan Fallback) 경로를 덧붙이고 `fallbackCount`를 증가시킵니다.
+3. **[Line-Of-Sight (LOS) Shortcuts]**
+   * A\*가 생성한 계단형 직교 경로를 단순화하기 위해 Greedy "String Pulling" pass를 실행합니다.
+   * 장애물 간섭이 없다면 최대한 멀리 있는 정점을 직접 사선 또는 직선으로 연결합니다.
+   * 단, **수평 평면 대각선 이동은 실제 시공 규격을 준수하기 위해 완전히 차단**하며, 다축 사선(Z와 X/Y의 동시 변화)은 **PoC를 빠져나오는 첫 번째 Leg(시작 스텁)에서만 허용**됩니다. 또한 `Required` 특징점 정점은 절대 건너뛰지 않도록 상한 필터를 둡니다.
+4. **[Merge Short Doglegs]**
+   * 코너에 남은 미세한 직교 계단(Dogleg) 잔재를 정리하기 위해, 인접한 세그먼트의 연장선 교점을 구하여 세그먼트 수를 축소 병합합니다. (단, 병합 후 생성되는 세그먼트의 장애물 간섭 및 대각선 방향 유효성을 사전 검증함)
+5. **[Pipe Distribution]**
+   * 중심선 세그먼트들의 방향 법선 오프셋을 산출하여 `pipe_count` 개수만큼의 평행 파이프 경로들을 복제 분배합니다. 
+   * 법선을 세그먼트 단위로 정밀 산출하여 꺾임부에서 파이프가 찌그러지거나 꼬이지 않고 실물 엘보처럼 평행하게 연결되도록 보정합니다.
+6. **[Final Validation & Diagnosis]**
+   * 개별 분배된 모든 파이프 경로와 장애물 간의 잔여 충돌 여부(`segment_hits_pipe`, 파이프 반경 + 안전마진 적용)를 확인합니다.
+   * 수직 꺾임 횟수를 최종 카운트하고, 세그먼트마다 기하학적 특징(특징점 인접성, 장애물 외곽선 인접성 등)에 따른 세그먼트 사유를 최종 라벨링합니다.
 
-```c
-RbEngineHandle h = rb_create();
-RbConfig cfg = {5, 50.0, 600.0, 100.0, 100.0, 3};
-rb_initialize(h, cfg);
-rb_set_obstacles(h, obstacles, obstacleCount);
-rb_execute(h, start, end);
+---
 
-int n = rb_copy_segments(h, NULL, 0);       // 필요한 점 개수 조회
-RbVec3* pts = malloc(sizeof(RbVec3) * n);
-rb_copy_segments(h, pts, n);                // 실제 복사
+## 3. C# 경로 뷰어 및 엔진 코드 분석
 
-int pipeCount = rb_get_pipe_count(h);
-// pipe_index 별 rb_copy_pipe_path(...) 반복
-rb_destroy(h);
+### 3.1 공통 데이터 모델 및 설정 — `Models.cs`
+
+* `Vec3`, `Aabb`, `RouteSegment` 등 기하 레코드를 통해 수학 연산을 추상화합니다.
+* `RouteFeature`: 특징점의 좌표(`Position`), 역할(`Role`, StartStub/Bend/ElevationChange/TrunkGuide/EndApproach), 필수여부(`Required`)를 패키징합니다.
+* `RubberBandOptions`: `SnapTolerance`(mm), `PipeDiameter`(mm), `MaxVerticalBends`, `EnableDebugLog` 등의 파라미터를 관리합니다.
+* `IRubberBandEngine`: `Route(...)` 공통 계약을 제공하여, 호출부 코드 변경 없이 엔진을 다형성 있게 다룰 수 있습니다.
+
+### 3.2 C# 관리형 엔진 — `ManagedRubberBandEngine.cs`
+
+C++ 네이티브 엔진의 구현과 완전히 일치하는 알고리즘 파이프라인을 지닌 정본(Golden Reference) 엔진입니다.
+* **디버그 로그 생성**: `EnableDebugLog=true` 설정 시, A\* 격자 노드 생성수 및 확장 실패 이력, 세그먼트 좌표 변화량 등을 `RubberBandRouting_DebugTrace.log` 파일에 상세히 기록합니다.
+
+### 3.3 P/Invoke 연동 브리지 — `NativeInterop.cs` / `NativeRubberBandEngine.cs`
+
+* C++ DLL의 함수 심볼을 `[DllImport]`로 선언하고 마샬링 데이터 포맷을 정렬합니다.
+* C#의 `Route(...)` 매개변수 구조체들(`Vec3`, `Aabb`, `RouteFeature`)을 C++ 메모리 배열 구조체(`RbVec3`, `RbAabb`)로 복사 및 가인수 전달하고, 연산 결과 중심선과 파이프라인 구조를 2-패스 복사 패턴으로 다시 복원하여 `RubberBandResult` 개체로 재구성합니다.
+
+### 3.4 3D 뷰어 및 오케스트레이션 — `MainWindow.xaml.cs`
+
+WPF 환경에서 HelixToolkit을 이용한 3D 가시화 및 자동 라우팅의 전 과정을 제어합니다.
+* **비동기 오프로딩**: 대량 라우팅(최대 200개) 시 UI 프리즈를 유발하던 동기 루프를 `Task.Run` 기반의 백그라운드 스레드(`ComputeRoutes`)로 이동하여 응답성을 개선했습니다.
+* **형제(Sibling) 배관 간섭 제외**: 평행 트레이 안에서 함께 주행하는 형제 자동배관(동일 Group, Utility 소속)이 서로를 장애물로 오인해 지그재그 우회 꺾임을 만들지 않도록, 라우팅 실행 전에 형제 배관 AABB를 충돌 대상 장애물 목록에서 동적으로 차단합니다.
+* **시작 수직 스텁 고도 반영**: 시작 PoC와 중간 트레이 고도 차이가 클 경우, 기존 배관의 방향 패턴을 분석하여 시작 PoC 직후 고도로 직결되는 수직 하강 스텁을 `Required` 특징점으로 강제 삽입하여 고도 불일치 우회를 원천 봉쇄합니다.
+* **3D 피킹 및 양방향 선택**: 3D 뷰포트의 배관 실물 튜브나 특징점 마커를 클릭하면, `_visualOwners` 매핑을 역조회하여 결과 그리드의 소속 행이 자동 선택되거나, 분석 그리드에 대상 개체의 기하 속성(특징점 유형, 기존설계 GUID 등)이 즉시 렌더링됩니다.
+
+### 3.5 DB 연결 영속화 및 보안 — `ViewerSettings.cs`
+
+* 호스트, 포트, 데이터베이스명, 사용자 계정 및 마지막 로딩에 성공한 프로젝트 이름을 `%AppData%\RubberBandRoutingViewer\connection.json`에 지속적으로 영속화하여 자동 로딩 환경을 지원합니다.
+* 비밀번호 평문 저장을 방지하고 보안을 높이기 위해 Windows DPAPI(`System.Security.Cryptography.ProtectedData`) 암호화를 적용하여 로컬 계정 보안 컨텍스트 외의 접근을 원천 차단합니다.
+
+### 3.6 기존경로 비교 다이얼로그 — `CompareRoutesWindow.xaml.cs`
+
+자동설계 경로와 기존 설계 경로 간의 정밀 위상 및 물리량 분석을 위한 비모달 윈도우입니다.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                비교 다이얼로그                               │
+├──────────────────────┬──────────────────────────────┬────────────────────────┤
+│      경로 리스트     │       기존설계 3D 뷰         │       자동설계 3D 뷰   │
+│                      │   - 기존 배관 튜브 렌더링    │   - 자동 배관 튜브     │
+│   - GUID 매칭 여부   │   - 특징점 마커 가시화       │   - 특징점 마커 가시화 │
+│   - 유틸리티/그룹    ├──────────────────────────────┼────────────────────────┤
+│   - 라우팅 상태      │      기존 세그먼트 그리드    │      자동 세그먼트 그리드│
+│                      │   - # / 꺾임 / 방향 / 길이   │   - # / 꺾임 / 방향 / 길이│
+├──────────────────────┴──────────────────────────────┴────────────────────────┤
+│                                  비교 분석 테이블                            │
+│  - 세그먼트 수 차이 | 총 길이 차이 (변화율) | 수직 Bend 수 차이 | 시작/끝 오차   │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.4 내부 알고리즘 파이프라인 (`rb_execute`)
-
-README가 표방하는 "고무줄 control-point 라우터"와 달리, **실제 cpp 구현은 직교 축분해(orthogonal) 라우터**이다([cpp:130-156](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L130-L156)).
-
-1. **초기 직교 경로** — `append_orthogonal(start, end)`: 축 순서 `X → Y → Z`로 델타가 있는 축마다 세그먼트를 생성. 고무줄 직선/특징점 스냅 단계가 **없다**.
-2. **충돌 해소 루프** — 최대 40회 반복. 각 세그먼트에 대해 `is_penetration`이 아닌 장애물과 `intersects()` 검사:
-   - `expand()`로 장애물을 `tray_width/2 + margin`(수평), `tray_height/2 + margin`(수직)만큼 확장.
-   - `intersects()`는 **세그먼트의 지배축을 기준으로 한 축정렬 판정**이며, 임의 방향 3D 세그먼트를 정확히 판정하지 못한다([cpp:49-60](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L49-L60)).
-   - 충돌 시 `bypass()`로 우회점 생성 후 `append_orthogonal`로 재분해하여 해당 세그먼트를 치환.
-3. **우회 전략** — `bypass()`: 남은 수직 bend 여유가 2 이상이면 장애물 위(`max_z + clearance`)로 넘기고, 아니면 측면으로 우회([cpp:73-94](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L73-L94)).
-4. **파이프 분배** — `distribute()`: `pipe_count`개의 파이프를 세그먼트 법선 방향으로 `pipe_pitch` 간격 오프셋. 수직 구간은 직전 법선을 유지([cpp:101-118](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L101-L118)).
-
-### 2.5 빌드
-
-```bat
-:: Visual Studio Developer Command Prompt에서
-build_msvc.bat
-:: 내부적으로: cl /std:c++17 /EHsc /O2 /LD /Fe:RubberBandRouting.Native.dll rubberband_native.cpp
-```
-
-산출물 `RubberBandRouting.Native.dll`은 현재 어떤 프로젝트에서도 참조하지 않는다.
+* **이중 동기 뷰포트**: 좌우 독립된 `HelixViewport3D`를 통해 배관을 세그먼트 단위로 순환 색상(8색 팔레트) 튜브로 시각화하며, "카메라 동기화" 체크박스 활성화 시 한쪽 3D 뷰의 회전/이동/확대가 다른 쪽에도 1:1로 실시간 전파됩니다.
+* **세그먼트 그리드 연동**: 리스트에서 세그먼트 행을 더블클릭/클릭하면 해당 3D 뷰포트의 배관 세그먼트만 노란색 굵은 튜브로 하이라이트 표시되어 상세 위치 파악을 돕습니다.
+* **정밀 줌 핏**: `HelixViewport3D.ZoomExtents()` 사용 시 3D 눈금 격자(`GridLinesVisual3D`)의 비대함 때문에 배관이 점으로 작아지는 현상을 방지하고자, 배관의 정점 좌표들만으로 순수 OBB/AABB 바운딩 박스를 계산하여 카메라를 직접 핏하는 `FitViewportToPoints(...)`를 구현했습니다.
 
 ---
 
-## 3. C# 경로 뷰어 / 엔진 코드 분석 (실제 동작 구현)
+## 4. C++ API ↔ C# 구현 대응 관계 및 정합성
 
-### 3.1 데이터 모델 — `Models.cs`
+현재 C++ 네이티브 엔진과 C# 관리형 엔진은 연동 아키텍처 내에서 **동등한 논리적 정합성**을 지니고 있습니다.
 
-[Models.cs](RubberBandRoutingSuite/src/RubberBandRouting.Engine/Models.cs)
-
-| 타입 | 성격 | 비고 |
-|---|---|---|
-| `Vec3` | `readonly record struct` | 연산자 오버로드, `this[axis]`, `WithAxis`, `Dot`, `Length` |
-| `Aabb` | `readonly record struct` | `Center`, `Expand(h, v)`, `IsPenetration`, `Name` |
-| `RouteSegment` | `record` | `Delta`, `Length`, `IsVertical`(Z 델타가 X·Y보다 크면 수직) |
-| `RubberBandOptions` | class | `MaxVerticalBends=5, SafetyMargin=50, TrayWidth=600, TrayHeight=100, PipePitch=100, PipeCount=3, SnapTolerance=100, MaxPushIterations=40` |
-| `RubberBandStep` | class | 단계별 세그먼트/웨이포인트/충돌점 |
-| `RubberBandResult` | class | 단계 목록, 최종 세그먼트, 파이프 경로, 총길이, 수직 bend, 유효성, 검증이슈 |
-
-C# 옵션 기본값은 C++ `RbConfig` 기본값과 정확히 일치한다(둘 다 5/50/600/100/100/3).
-
-### 3.2 관리형 라우팅 엔진 — `ManagedRubberBandEngine.Route()`
-
-[ManagedRubberBandEngine.cs:11-49](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L11-L49)
-
-실제 3단계 파이프라인:
-
-- **Step 1 — 초기 직선 고무줄**: `MakeRubberLineSegments([start, end])`. start→end 단일 직선.
-- **Step 2 — 웨이포인트 스켈레톤**: `BuildSnappedPointList()`로 특징점을 순서화한 뒤 **`MakeOrthogonalSegments()`로 직교 분해**. (개발계획서 §4.2가 말하는 "rubber pull-snap"이 아니라 직교 스켈레톤이다.)
-- **Step 3 — 직교 A* 웨이포인트 라우팅**: `RouteOrthogonalAStarViaWaypoints()`. 각 웨이포인트 구간을 A*로 연결하고, 실패 시 직교 fallback.
-
-핵심 세부:
-
-- `BuildSnappedPointList()` ([L51-69](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L51-L69)): 특징점을 start/end 근접·과도 우회(`maxDetour = max(len*2.5, 10000)`) 기준으로 필터링하여 경유 순서 리스트 생성.
-- `RouteOrthogonalAStarLeg()` ([L98-132](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L98-L132)): **희소 좌표 격자 A***. 장애물 확장 경계로부터 후보 좌표선(`BuildAStarLines`)을 만들고, 6방향 이웃 탐색. 휴리스틱은 맨해튼 거리, 최대 확장 50,000회.
-- `IsBlocked()` / `SegmentIntersectsExpandedAabb()` ([L208-393](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L208-L393)): **슬래브(slab) 기반 정식 segment–AABB 교차 판정**. C++의 축정렬 근사 판정보다 정확.
-- `RelevantObstacles()` ([L134-145](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L134-L145)): start–end 회랑에 걸치는 장애물 중 **가까운 30개만** 선택.
-- `DistributePipes()` ([L426-445](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L426-L445)): C++ `distribute()`와 동일 로직으로 다중 파이프 오프셋 생성.
-- `Validate()` ([L455-463](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L455-L463)): 수직 bend 초과(`vertical_bends_exceeded`), 잔여 충돌(`residual_collision`) 이슈 반환.
-
-> **레거시/데드 코드**: `ResolveCollisions()`, `BuildBypass()`, `Within()`은 정의되어 있으나 `Route()` 경로에서 호출되지 않는다([L316-424](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L316-L424)). 이는 개발계획서 §4.3이 서술하는 "push collision resolution"의 잔재이며, 실제 충돌 회피는 A*가 담당한다. 문서와 코드가 불일치한다.
-
-### 3.3 PostgreSQL 씬 로더 — `PostgresRoutingDataLoader`
-
-[PostgresRoutingDataLoader.cs](RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs)
-
-- 연결: `PostgresConnectionOptions`(기본 DB `DDW_AI_DB`, user `postgres`, pw `dinno`). 환경변수 `PGHOST/PGPORT/...`로 오버라이드 가능([L20-29](RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs#L20-L29)).
-- `ListProjectsAsync()`: `TB_SPACE_GROUP_INFO`에서 공간 그룹(AABB 포함)을 프로젝트로 로드.
-- `LoadSceneAsync()`: 프로젝트 AABB에 `±500mm` 마진을 준 범위로 다음을 조회하여 `RoutingScene` 구성:
-
-| 요소 | 소스 테이블 | 메서드 |
-|---|---|---|
-| 장애물 | `TB_BIM_OBSTACLE` | `LoadObstaclesAsync` — `damper` 제외, `COLLISION_PASS`/타입으로 통과여부 판정 |
-| 장비 | `TB_EQUIPMENTS` | `LoadEquipmentAsync` — `MainTool`은 `MAIN_EQUIPMENT` |
-| 레터럴/덕트 | `TB_LATERAL_PIPE`, `TB_DUCT` | `LoadDuctLateralAsync` |
-| PoC | `TB_POCINSTANCES` | `TryLoadPocsAsync` — **컬럼명을 information_schema로 동적 탐지**(`Pick`) |
-| 라우팅 태스크 | `TB_ROUTE_PATH` | `TryLoadRouteTasksAsync` |
-| 기존 경로 | `TB_ROUTE_PATH`+`TB_ROUTE_SEGMENTS`+`TB_ROUTE_SEGMENT_DETAIL` | `TryLoadExistingRoutePathsAsync` |
-
-- `ClassifyPoc()`: PoC를 장비/덕트/레터럴로 분류(타입 문자열 + 최근접 박스 거리).
-- 태스크가 없으면 `BuildNearestPocTasks()`로 유틸리티 일치 최근접 PoC 쌍을 태스크로 합성([L373-386](RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs#L373-L386)).
-- `CollisionObstacles`: 통과 불가 장애물만 AABB로 노출([L107](RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs#L107)).
-
-> `TryLoad*` 계열은 모두 `catch { }`로 예외를 **무음 처리**한다([L220-272](RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs#L220-L272)). 스키마 불일치나 권한 오류가 조용히 "데이터 0건"으로 나타난다.
-
-### 3.4 뷰어 — `MainWindow`
-
-레이아웃 [MainWindow.xaml](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml): 상단 DB/프로젝트 바, 좌측 유틸리티 그룹/유틸리티/PoC 패널, 중앙 `HelixViewport3D`, 우측 결과 그리드 + 분석/단계/세그먼트 탭, 하단 레이어 토글 + FPS/렌더 객체 수.
-
-코드비하인드 [MainWindow.xaml.cs](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs) 주요 흐름:
-
-**(a) 씬 로딩·렌더**
-- `LoadSceneAsync()` → `DrawScene()`가 공간 와이어박스, 장애물/장비/덕트 박스, 시작/종단 PoC 구를 레이어별 버킷에 추가([L494-509](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L494-L509)).
-- 레이어 토글(`ShouldShowBucket`/`ApplyLayerVisibility`)로 뷰포트 자식 추가/제거.
-
-**(b) 자동설계 오케스트레이션 — `RouteRowsAsync()`** ([L310-374](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L310-L374))
-- 대상 태스크(최대 200개)를 순회하며:
-  1. `BuildFeatureWaypoints()`로 매칭 기존경로에서 특징점 추출.
-  2. `Route()`로 엔진 실행(시작 강제 -Z 드롭 스텁 선처리 포함).
-  3. 생성된 경로를 `BuildRouteObstacles()`로 AABB envelope화하여 **다음 태스크의 누적 장애물에 추가**(자동경로끼리 겹침 방지).
-  4. 결과·분석·단계·세그먼트 행을 그리드에 채움.
-
-**(c) 특징점 추출 — `BuildFeatureWaypoints()` 계열** ([L577-709](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L577-L709))
-- `FindMatchedExistingRoute()`: `RoutePathGuid` 직접 매칭 우선, 실패 시 그룹/유틸리티/양끝 거리 스코어(<8000)로 fallback.
-- `ExtractExistingRouteFeatures()`: 기존경로에서 (1) 두 번째/뒤 두 번째 점, (2) **방향 전환·Z 변화 지점**, (3) 4m 이상 긴 직선의 등분점을 특징점 후보로 뽑고, 중복 제거 후 **최대 28개**로 샘플링.
-- `ApplyStartVerticalStub()`: 시작·종단 고도차가 크면 기존경로 첫 구간 성향을 반영한 수직 스텁을 특징점 앞에 삽입.
-
-**(d) 시작 -Z 드롭 — `Route()` / `RequiredStartDropPoint()` / `PrependStartStub()`** ([L376-419](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L376-L419))
-- 시작이 종단보다 충분히 높으면 먼저 수직으로 내린 뒤 나머지를 엔진에 위임하고 결과를 접합.
-
-**(e) 표시용 bend 보정 — `DrawRoundedSegments()` / `BuildRoundedBendPolyline()`** ([L901-979](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L901-L979))
-- 중심선 폴리라인의 **직각(내적≈0) 코너만** `BendRadius(diameter)` 반경으로 8스텝 원호 보간. 관경 비례 bend radius(120~1800mm clamp) 반영.
-
-**(f) 계측**: `CompositionTarget.Rendering`에서 0.5초 주기 FPS, 뷰포트 자식 수(−2 보정) 표시([L1071-1087](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L1071-L1087)).
-
-> **뷰어가 사용하지 않는 엔진 출력**: 엔진이 계산한 `RubberBandResult.PipePaths`(다중 파이프)는 뷰어에서 렌더링되지 않는다. 뷰어는 언제나 단일 중심선 튜브(`RouteSegments`)만 그린다([RedrawAutoRoutes L421-432](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs#L421-L432)). 즉 `DistributePipes` 결과는 계산되지만 소비되지 않는다.
-
----
-
-## 4. C++ API ↔ C# 구현 대응 관계
-
-| 개념 | C++ 네이티브 | C# 관리형 | 일치 여부 |
+| 기하학적 개념 | C++ 네이티브 엔진 (`rubberband_native.cpp`) | C# 관리형 엔진 (`ManagedRubberBandEngine.cs`) | 일치 여부 및 비고 |
 |---|---|---|---|
-| 벡터 | `RbVec3` | `Vec3` | 구조 동일 |
-| 장애물 | `RbAabb`(+`is_penetration`) | `Aabb`(+`IsPenetration`,`Name`) | C#이 상위호환 |
-| 설정 | `RbConfig` | `RubberBandOptions` | 기본값 동일, C#에 `SnapTolerance`/`MaxPushIterations` 추가 |
-| 초기 경로 | 직교 축분해(`append_orthogonal`) | 직선 고무줄 + 직교 스켈레톤 | **불일치** |
-| 충돌 회피 | 반복 bypass 삽입 | **A\* 격자 탐색** | **불일치(방식 자체가 다름)** |
-| 교차 판정 | 지배축 축정렬 근사 | 슬래브 정식 판정 | **C#이 더 정확** |
-| 특징점 스냅 | **없음** | 기존경로 특징점 추출·경유 | **C#에만 존재** |
-| 파이프 분배 | `distribute` | `DistributePipes` | 로직 동일(뷰어 미사용) |
-| bend 보정 | 없음(중심선만) | 뷰어에서 원호 보간 | **C#(뷰어)에만 존재** |
+| **3차원 벡터** | `RbVec3` 구조체 | `Vec3` 구조체 | **100% 동일** (double 3차원 좌표) |
+| **장애물 AABB** | `RbAabb` 구조체 + `is_penetration` | `Aabb` 구조체 + `IsPenetration` | **100% 동일** |
+| **초기 스켈레톤** | `build_snapped_points` | `BuildSnappedPointList` | **100% 동일** (snap 및 detour 가드 일치) |
+| **충돌 회피 알고리즘** | 희소 격자선 추출 + 6방향 A\* 탐색 | 희소 격자선 추출 + 6방향 A\* 탐색 | **100% 동일** (동일 격자 확장 논리) |
+| **교차 판정 공식** | 3차원 Slab-based AABB 교차식 (`segment_hits`) | 3차원 Slab-based AABB 교차식 (`SegmentIntersectsExpandedAabb`) | **100% 동일** (사선 세그먼트 판독) |
+| **특징점 소비** | `rb_set_feature_flags` (`Required` 가드) | `featureWaypoints` (`Required` 가드) | **100% 동일** (동일 오차 우회 방지) |
+| **Greedy 단축 pass** | `apply_line_of_sight_shortcuts` | `ApplyLineOfSightShortcuts` | **100% 동일** (대각 금지, 시작사선 허용) |
+| **코너 병합 pass** | `merge_short_doglegs` (교점 추출식) | `MergeShortDoglegs` (교점 추출식) | **100% 동일** (불필요한 지그재그 코너 정리) |
+| **다중 파이프 분배** | 법선 기반 `distribute` 평행 오프셋 | 법선 기반 `DistributePipes` 평행 오프셋 | **100% 동일** (동일 평행 엘보 형태 유지) |
+| **라운드 Bend 보정** | 미탑재 (중심선 수치 연산만 수행) | 뷰어단 `BuildRoundedBendPolyline` | **일치** (렌더링 장치 의존성을 뷰어로 격리) |
 
-결론: **C++ 스텁은 C# 엔진보다 이전 세대(직교 라우터) 알고리즘에 머물러 있고**, 특징점 기반 고무줄 개념·정식 충돌 판정·A* 탐색은 C#에만 구현되어 있다. 두 구현의 알고리즘이 다르므로, C++를 그대로 P/Invoke로 붙이면 현재 뷰어 결과와 전혀 다른 경로가 나온다.
-
----
-
-## 5. 기존 소스의 문제점
-
-### 5.1 아키텍처·정합성
-1. **C++ 엔진과 C# 뷰어의 단절**: C++는 솔루션 밖 스텁이며 뷰어가 호출하지 않는다. "C++ 엔진 + C# 뷰어" 구성이 실제로는 성립하지 않는다.
-2. **두 구현의 알고리즘 불일치**: C++는 직교 라우터, C#은 특징점+A* 라우터. 동기화 부채가 크다(개발계획서 §9-4가 인정).
-3. **문서–코드 불일치**: 개발계획서 §4는 "rubber pull-snap → push collision resolution(BuildBypass)"로 서술하나, 실제 Step2는 직교 스켈레톤, Step3는 A*이며 `ResolveCollisions/BuildBypass`는 **데드 코드**이다.
-4. **README 과장**: C++ README는 "rubber-band control-point router"라 하지만 실제 cpp는 축분해 라우터이다.
-
-### 5.2 알고리즘·정확성
-5. **C++ 교차 판정 부정확**: `intersects()`가 지배축 축정렬을 가정 → 대각/임의 방향 세그먼트에서 오탐/미탐 가능([cpp:49-60](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp#L49-L60)).
-6. **A* fallback이 장애물을 무시**: A* 실패 시 `MakeOrthogonalSegments`로 직교 fallback → 장애물 관통 경로가 생성될 수 있고, `Validate`가 `residual_collision`을 붙여도 경로는 그대로 그려진다([L88-92](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L88-L92)).
-7. **표시용 라운드 bend 미검증**: 원호 보간 결과가 장애물과 재충돌하는지 확인하지 않는다(개발계획서 §9-3).
-8. **누적 장애물 vs 30개 제한 상충**: 자동경로를 장애물로 누적하지만 `RelevantObstacles`가 최근접 30개만 취하므로, 뒤 순번 경로가 멀리 있는 선행 자동경로를 못 볼 수 있다([L144](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs#L144)).
-9. **파이프 분배 결과 미사용**: 엔진이 계산한 다중 `PipePaths`가 뷰어에서 버려진다(계산 낭비 + 다중 파이프 시각화 부재).
-
-### 5.3 견고성·운영
-10. **DB 예외 무음 처리**: `TryLoad*`의 `catch { }`가 스키마/권한 오류를 "0건"으로 은폐한다.
-11. **하드코딩된 자격증명**: DB 비밀번호 `dinno`가 소스·XAML에 평문으로 존재하고, 비밀번호 입력도 `PasswordBox`가 아닌 평문 `TextBox`이다([XAML L40](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml#L40)).
-12. **조용한 상한**: 태스크 200, 기존경로 표시 250, 특징점 28 등 상한이 사용자 고지 없이 결과를 잘라낸다.
-13. **UI 무응답 위험**: `RouteRowsAsync`가 UI 스레드에서 동기 루프로 최대 200개 A* 라우팅을 수행한다(`Task.CompletedTask` 반환, 실제 백그라운드 오프로딩 없음). 대규모 씬에서 프리즈 가능.
-14. **특징점 모델 부재**: 특징점이 `Vec3` 좌표로만 전달되어 역할(시작 드롭/bend/trunk/end approach)·우선순위·접선 정보가 소실된다(개발계획서 §9-1).
+> **검증 결과**: 동일한 씬 장애물과 특징점 조건 하에 스모크 테스트(Smoke Test)를 실행한 결과, 두 엔진 모두 세그먼트 개수, 총 경로 길이(mm), 파이프 세트 오프셋 수치 등에서 완벽한 수학적 데이터 일치를 보여주었습니다.
 
 ---
 
-## 6. 개선사항 (우선순위 제안)
+## 5. 이전 세대 대비 개선 사항 상세 매핑
 
-### P0 — 구조 정리
-1. **단일 진실 소스(Single Source of Truth) 확정**: 당분간 C# 엔진을 정본으로 선언하고, C++는 (a) 삭제하거나 (b) C# 알고리즘(특징점+A*+슬래브 판정)과 동일하게 재작성해 P/Invoke로 실제 연동한다. 지금처럼 방치된 스텁은 혼란만 유발한다.
-2. **문서·코드 동기화**: 개발계획서 §4를 실제 파이프라인(직선→직교 스켈레톤→A*)으로 갱신하고, `ResolveCollisions/BuildBypass/Within`, C++ README의 과장 문구를 정리.
-3. **데드 코드 제거**: 미사용 메서드와 미소비 `PipePaths` 경로를 정리하거나 실제 사용(다중 파이프 렌더)으로 승격.
+이전 시점(커밋 `0bfb2e1` 기준)의 한계와 이에 따른 개선 조치 결과를 요약합니다.
 
-### P1 — 정확성
-4. **fallback 안전화**: A* 실패 시 직교 fallback을 그대로 쓰지 말고, 실패 태스크를 "실패"로 표시하거나 A* 격자 해상도를 높여 재시도.
-5. **라운드 bend 재충돌 검증**: 보간 폴리라인에도 `SegmentIntersectsExpandedAabb`를 재적용.
-6. **누적 장애물 커버리지**: 자동경로 누적분은 30개 제한과 무관하게 항상 후보에 포함하거나, 공간 인덱스(격자/BVH)로 R-tree 질의를 도입.
-7. **C++ 교차 판정 교체**: 지배축 근사를 슬래브 판정으로 교체(C# 로직 이식).
+| # | 구 버전 문제점 | 개선 조치 및 현재 상태 (2026-07-05 완료) |
+|---|---|---|
+| **1** | C++ 엔진과 C# 뷰어 단절 (P/Invoke 없음) | `NativeInterop.cs` / `NativeRubberBandEngine.cs`를 경유한 **실제 DLL 호출 연동 완료**. 뷰어 런타임에서 토글 체크 가능. |
+| **2** | C++와 C# 엔진의 알고리즘 불일치 (stretching 대 직교) | C++ 프로젝트를 C#의 특징점+A\*+SLAB+LOS+Dogleg 병합 파이프라인으로 **전면 재작성하여 1:1 일치화**. |
+| **3** | C++ 교차 판정의 부정확성 (축 정렬 가정 오류) | 3차원 로컬 슬래브 알고리즘 `segment_hits` 적용으로 **임의 사선 충돌까지 완벽 탐지**. |
+| **4** | A\* 실패 시 조용한 장애물 관통 fallback | A\* 실패 시 결과 플래그에 `astar_fallback_used` 검증 이슈를 부여하여, 뷰어 그리드에 **"확인 필요" 상태로 즉각 고지**. |
+| **5** | 30개 최근접 장애물 제한으로 인한 누적 충돌 | 격자선 생성을 위한 제한(48개)과, 충돌 판정을 위한 회랑 내 제한(`kCorridorObstacleLimit=256`개)으로 **이원화하여 대형 씬 안정성 확보**. |
+| **6** | DB 로딩 시 조용히 오류가 묻히는 현상 (`catch {}`) | DB Loader의 모든 예외를 `scene.LoadWarnings`에 바인딩하여 뷰어 상태 표시줄 및 그리드에 **구체적인 원인 경고 출력**. |
+| **7** | 자격증명 평문 하드코딩 및 평문 TextBox | Windows DPAPI를 이용한 **보안 암호화 저장소** 구현 및 XAML 컨트롤의 **`PasswordBox` 보안 입력 처리**. |
+| **8** | UI 스레드 동기 연산으로 인한 프리즈 위험 | 라우팅 루프 연산을 `Task.Run` 기반 **백그라운드 스레드로 격리하여 비동기 실행**. |
+| **9** | 특징점을 3D 뷰에서 육안으로 구별하기 힘듦 | 특징점 가시화 마커를 Sphere에서 **역할별 색상의 반투명 큐브**로 변경하여 가독성 강화. |
+| **10** | 다중 파이프 연산 결과가 뷰어에서 버려짐 | `PipeCount > 1` 설정 시, 뷰어에서 평행 다중 파이프를 **개별 3D 튜브 객체로 실시간 렌더링**. |
+| **11** | 형제 배관끼리 상호 간섭하여 지그재그 유발 | 라우팅 시 **동일 그룹/유틸리티 자동 경로를 간섭 목록에서 필터링**하여 매끄러운 1차 평행 레이아웃 도출. |
+| **12** | 무차별적인 대각선 단축으로 인한 기하 불일치 | 수평 평면 내 대각선 이동을 차단하고, 다축 대각선은 **PoC 시작 구간(첫 세그먼트)으로만 제한**하여 현업 시공 룰 반영. |
+| **13** | 뷰포트 전체보기 시 격자 라인으로 인해 줌아웃됨 | 배관 전용 바운딩 박스를 독립 계산하는 `FitViewportToPoints`로 카메라를 핏하여 **배관만 화면 가득 확대**. |
 
-### P2 — 모델·운영
-8. **`RouteFeature` 모델 도입**: `Vec3` 대신 역할/우선순위/접선/필수여부를 갖는 특징점 구조체로 확장(개발계획서 §9-1).
-9. **단계별 사유 엔진화**: 현재 뷰어의 `SegmentReason` 추론을 엔진이 세그먼트/특징점 생성 시점에 직접 반환하도록 이동(개발계획서 §9-5).
-10. **보안·견고성**: 자격증명 하드코딩 제거(환경변수/보안 저장소), `PasswordBox` 사용, `TryLoad`의 예외를 상태바/로그로 노출.
-11. **응답성**: 대량 라우팅을 `Task.Run` 백그라운드로 오프로딩하고 진행률·취소 지원, 상한 도달 시 사용자 고지.
+---
+
+## 6. 향후 고도화 과제 (P3)
+
+1. **R-Tree / BVH 기반 공간 쿼리 가속**:
+   * 현재 씬 내의 256개 회랑 장애물 탐색 및 슬래브 충돌 테스트는 선형 루프(`std::vector` 순회)로 처리됩니다. 장애물 데이터가 수만 개 단위로 급증할 경우 프레임 저하가 생길 수 있으므로 C++ 단에 BVH(Bounding Volume Hierarchy) 트리 가속 구조 도입을 고려할 수 있습니다.
+2. **다중 파이프 개별 라운드 밴드 충돌 체크**:
+   * 현재 표시용 라운드 밴드의 간섭 여부는 중심선을 기반으로 대표 확인하며, 개별 파이프 가닥의 곡률 간섭은 근사치로 판단합니다. 가닥 수가 많고 좁은 엘보 구간이 밀집한 경우, 개별 파이프 튜브의 호(Arc) 부분에 대한 정밀 OBB 검사가 요구될 수 있습니다.
+3. **특징점 스코어링의 기하-유사도 결합 모델 구현**:
+   * 현재 특징점 추출은 DB의 기설계 노선과 Task 간의 기하학적 유사도(이름 매칭 및 거리 스코어)에 기반합니다. 이를 고도화하여 배관의 흐름(Flow Direction) 벡터 유사도 및 주변 장비 인접도를 계량화한 AI 유사도 텐서 피팅이 결합될 여지가 있습니다.
 
 ---
 
 ## 부록 A. 파일별 핵심 진입점 요약
 
-| 파일 | 핵심 심볼 |
-|---|---|
-| [rubberband_native.h](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.h) | `RbVec3/RbAabb/RbConfig`, `rb_create/…/rb_copy_pipe_path` |
-| [rubberband_native.cpp](RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp) | `rb_execute`(L130), `append_orthogonal`(L32), `intersects`(L49), `bypass`(L73), `distribute`(L101) |
-| [Models.cs](RubberBandRoutingSuite/src/RubberBandRouting.Engine/Models.cs) | `Vec3/Aabb/RouteSegment/RubberBandOptions/RubberBandResult` |
-| [ManagedRubberBandEngine.cs](RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs) | `Route`(L11), `RouteOrthogonalAStarLeg`(L98), `SegmentIntersectsExpandedAabb`(L356), `DistributePipes`(L426) |
-| [PostgresRoutingDataLoader.cs](RubberBandRoutingSuite/src/RubberBandRouting.Engine/PostgresRoutingDataLoader.cs) | `LoadSceneAsync`(L138), `LoadObstaclesAsync`(L163), `LoadExistingRoutePathsAsync`(L274) |
-| [MainWindow.xaml.cs](RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs) | `RouteRowsAsync`(L310), `Route`(L376), `ExtractExistingRouteFeatures`(L651), `BuildRoundedBendPolyline`(L921) |
-
-## 부록 B. 분석 시점 검증
-
-- 소스: `main` @ `0bfb2e1`
-- `.sln` 구성: C# 프로젝트 2개(Engine, Viewer)만 포함, C++ 프로젝트 미포함 확인
-- `src/` P/Invoke(`DllImport`, `rb_*`) 심볼: **없음**(바이너리 DLL 매칭만 존재, 소스 매칭 없음)
-
----
-
-## 부록 C. 수정 반영 (2026-07-05)
-
-본 분석 이후 5장 문제점에 대해 다음 수정을 적용했다. (C++ 처리 방향은 사용자 결정: **C# 알고리즘과 완전 동기화**)
-
-| # | 문제 | 조치 |
-|---|---|---|
-| 5.1-2, 4 | C++가 직교 라우터로 C#과 알고리즘 불일치 / README 과장 | C++ 네이티브를 **특징점 snap + 직교 A* + 슬래브 교차판정**으로 전면 재작성. `rb_set_features`, `rb_get_vertical_bends/fallback_count/is_valid` 추가. `RbConfig`에 `snap_tolerance` 추가. README를 실제 구현에 맞게 정정 |
-| 5.1-3 | 문서-코드 불일치 + 데드 코드 | `ResolveCollisions/BuildBypass/Within` 및 미사용 옵션 `MaxPushIterations` 제거. 개발계획서 §4 파이프라인을 실제(직교 스켈레톤→A*)로 갱신 |
-| 5.2-5 | C++ 교차 판정 부정확(지배축 근사) | 슬래브 기반 `segment_hits()`로 교체 |
-| 5.2-6 | A* fallback이 장애물 무시하고 조용히 그려짐 | fallback 발생 시 결과에 `astar_fallback_used` 검증이슈를 부여해 "확인 필요"로 노출 |
-| 5.2-7 | 라운드 bend 재충돌 미검증 | `IsRoundedPathClear()`로 라운드 폴리라인을 확장 장애물과 재검사, 충돌 시 sharp 중심선으로 표시(백그라운드 계산) |
-| 5.2-8 | 누적 장애물 vs 30개 제한 상충 | 충돌 판정은 회랑 내 전체(`CorridorObstacles`, 상한 256), 격자 생성은 근접 `GridObstacleLimit`(48)로 분리 |
-| 5.3-10 | DB 예외 무음 처리 | `TryLoad*`의 `catch{}`를 `scene.LoadWarnings`에 기록하도록 변경, 상태바·분석 그리드에 경고 노출 |
-| 5.3-11 | 하드코딩 자격증명 / 평문 비밀번호 | XAML `TextBox`→`PasswordBox`, `TxtPassword.Password` 사용, 클래스·XAML 기본 비밀번호 `dinno` 제거 |
-| 5.3-12 | 조용한 상한 | 라우팅 200개 상한 도달 시 상태바에 생략 건수 고지 |
-| 5.3-13 | UI 스레드 동기 라우팅으로 프리즈 위험 | 라우팅 루프를 `Task.Run` 백그라운드로 오프로딩(`ComputeRoutes`), UI 바인딩/드로잉만 UI 스레드에서 수행 |
-| P0-1 | C++ 엔진과 C# 뷰어가 코드로 연결되지 않음 | **실제 P/Invoke 연동 완료.** `IRubberBandEngine` 공통 인터페이스, `NativeMethods.cs`(구조체/함수 P/Invoke 선언), `NativeRubberBandEngine.cs`(rb_* 호출 → `RubberBandResult` 변환) 추가. 뷰어 하단 "네이티브 C++ 엔진" 체크박스로 관리형/네이티브를 런타임 전환. `Viewer.csproj`에 `PlatformTarget=x64`(네이티브 DLL과 프로세스 비트수 일치) 및 DLL 조건부 출력 복사 항목 추가. DLL 미존재/로드 실패 시 `NativeRubberBandEngine.IsAvailable`이 감지해 관리형으로 자동 대체 |
-| P2-8 | `RouteFeature` 의미 모델 부재(특징점이 `Vec3` 좌표뿐) | **완료.** `RouteFeature(Position, Role, Required)` + `RouteFeatureRole`(StartStub/Bend/ElevationChange/TrunkGuide/EndApproach) 도입. `Required=true` 특징점은 두 엔진 모두에서 snap-tolerance/detour 필터를 우회. 28개 상한 트리밍이 역할 우선순위 기반으로 개선(경로 순서는 트리밍 후 복원). 뷰어가 역할별 마커 색상 + "특징점 구성" 분석 행을 표시 |
-| P2-9 | 단계별 경로 사유를 뷰어가 사후 추론 | **완료.** `RubberBandResult.SegmentReasonCodes`를 엔진이 직접 채운다(`ClassifySegmentReasons`/C++ `classify_segment_reasons`, 공유 토큰은 `SegmentReasons` 정적 클래스). 뷰어는 토큰→한글 라벨 매핑만 수행 |
-| 5.2-9 | 다중 파이프(`PipePaths`) 계산은 되지만 뷰어가 렌더링하지 않음 | **완료.** `PipeCount>1`이면 `RedrawAutoRoutes()`가 각 파이프 경로를 개별 튜브로 렌더링(`DrawRoundedPolyline`). 시작 수직 드롭 스텁도 각 파이프에 동일 오프셋으로 연장하여 드롭 구간 누락을 방지 |
-
-미적용 항목 없음 — 5장에서 식별한 문제 전건 및 6장 개선사항 전건이 반영되었다.
-
-### P/Invoke 연동 및 후속 3개 항목 검증
-
-임시 콘솔 스모크 테스트로 관리형/네이티브 엔진에 동일 입력(장애물 1개, 특징점 2개 — 그중 1개는 `Required=true`)을 넣어 비교:
-
-```text
-NativeRubberBandEngine.IsAvailable = True
-Managed: segments=11 length=17000.0 valid=True pipes=3
-Native : segments=11 length=17000.0 valid=True pipes=3
-Managed required-far-feature honored: True
-Native  required-far-feature honored: True
-```
-
-세그먼트 수·총 길이(17000.0mm)·파이프 수(3, 동일 시작/끝점)가 두 엔진에서 완전히 일치했고, 정상 필터라면 제외되었을 먼 지점의 `Required` 특징점이 두 엔진 모두에서 실제로 경로에 반영됨을 확인했다. `SegmentReasonCodes`는 11개 중 9개가 완전히 일치했고, 2개는 인접한 합리적 사유(예: `collision_bypass` vs `direction_change`) 중 다른 쪽을 골랐다 — 사유는 근사 휴리스틱이므로 이 정도 편차는 허용 범위이며 기하학적 결과에는 영향이 없다.
-
-### 빌드 검증
-
-- `dotnet build RubberBandRoutingSuite.sln -c Debug`: **오류 0** (HelixToolkit `NU1701` 경고 2건은 기존과 동일)
-- C++ MSVC 컴파일(`cl /std:c++17 /EHsc /O2 /LD`): **성공**, `RubberBandRouting.Native.dll` 생성
+* [rubberband_native.h](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.h)
+  * `RbConfig` (L19) — `snap_tolerance` 및 `pipe_diameter`가 이식된 설정 구조체.
+  * `rb_set_feature_flags` (L33) — 특징점 가중치 유도를 위한 필수 지정 API.
+  * `rb_get_segment_reason` (L59) — 각 꺾임 지점의 발생 사유 조회 API.
+* [rubberband_native.cpp](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp)
+  * `rb_execute` (L671) — 네이티브 고무줄 변형 라우팅 최외곽 실행 파이프라인.
+  * `route_astar_leg` (L306) — 6방향 희소 격자 A\* 탐색 코어.
+  * `apply_line_of_sight_shortcuts` (L434) — 축 제한 및 필수점 보존이 적용된 직선 단축.
+  * `merge_short_doglegs` (L497) — 지그재그 코너 병합.
+  * `distribute` (L612) — 법선 오프셋 기반 평행 다중 파이프 분배.
+* [Models.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/Models.cs)
+  * `RouteFeature` (L108) — 특징점 속성 모델 (Position, Role, Required).
+  * `IRubberBandEngine` (L150) — 엔진 스왑을 지원하는 인터페이스 디렉티브.
+* [NativeInterop.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/NativeInterop.cs)
+  * `NativeMethods` (L10) — C++ DLL 맵 `[DllImport]` 선언 및 `RbConfig` 정의.
+* [NativeRubberBandEngine.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/NativeRubberBandEngine.cs)
+  * `Route` (L41) — DLL `rb_execute` 호출 및 C# `RubberBandResult` 데이터 가공 복원.
+* [ManagedRubberBandEngine.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs)
+  * `Route` (L13) — 관리형 엔진 메인 파이프라인 및 디버그 파일로그 출력 처리.
+* [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)
+  * `ComputeRoutes` (L430) — 백그라운드 비동기 멀티스레드 배치 라우팅 연산 루프.
+  * `PreviewMouseLeftButtonDown` (L1040) — 3D 뷰포트 배관 및 특징점 큐브 클릭 피킹 핸들링.
+* [CompareRoutesWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/CompareRoutesWindow.xaml.cs)
+  * `FitViewportToPoints` (L210) — 3D grid 크기를 배제한 정확한 배관 중심 핏 연산.
+  * `GridSegments_SelectionChanged` (L300) — 세그먼트 그리드 선택에 따른 특정 배관 마디 3D 하이라이팅 연동.

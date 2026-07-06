@@ -548,31 +548,100 @@ def fetch_routes(conn, args) -> list[RouteRecord]:
 def fetch_route_points(conn, guid: str) -> list[tuple[float, float, float]]:
     """ROUTE_PATH_GUID 하나의 중심선 폴리라인을 복원한다.
 
-    TB_ROUTE_SEGMENTS.ORDER, TB_ROUTE_SEGMENT_DETAIL.ORDER 순서로 FROM/TO 좌표를 이어붙인다.
-    이전 점과 다음 FROM이 살짝 어긋난 경우에도 점열을 유지하되, 완전 중복점은 제거한다.
+    TB_ROUTE_SEGMENTS.ORDER, TB_ROUTE_SEGMENT_DETAIL.ORDER 순서로 FROM/TO 좌표를 이어붙이고,
+    ELBOW 타입 세그먼트를 감지하여 기하학적 꺾임점(IP)을 복원한다.
     """
     sql = '''
         SELECT sd."FROM_POSX", sd."FROM_POSY", sd."FROM_POSZ",
-               sd."TO_POSX", sd."TO_POSY", sd."TO_POSZ"
+               sd."TO_POSX", sd."TO_POSY", sd."TO_POSZ",
+               sd."TYPE"
         FROM "TB_ROUTE_SEGMENTS" rs
         JOIN "TB_ROUTE_SEGMENT_DETAIL" sd ON rs."SEGMENT_GUID" = sd."SEGMENT_GUID"
         WHERE rs."ROUTE_PATH_GUID" = %s
         ORDER BY rs."ORDER", sd."ORDER"
     '''
-    pts: list[tuple[float, float, float]] = []
+    raw_segs = []
     with conn.cursor() as cur:
         cur.execute(sql, (guid,))
         for row in cur.fetchall():
             a = triple(row[0], row[1], row[2])
             b = triple(row[3], row[4], row[5])
-            if not a or not b:
-                continue
-            if not pts:
-                pts.append(a)
-            elif dist(pts[-1], a) > 1e-6:
-                pts.append(a)
-            if dist(pts[-1], b) > 1e-6:
-                pts.append(b)
+            t = row[6]
+            if a and b:
+                raw_segs.append({'from': a, 'to': b, 'type': t})
+
+    if not raw_segs:
+        return []
+
+    pts: list[tuple[float, float, float]] = []
+    pts.append(raw_segs[0]['from'])
+
+    def sub(v1, v2):
+        return (v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2])
+
+    def add(v1, v2):
+        return (v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2])
+
+    def mult(v1, s):
+        return (v1[0] * s, v1[1] * s, v1[2] * s)
+
+    def dot(v1, v2):
+        return sum(x * y for x, y in zip(v1, v2))
+
+    def norm(v):
+        l = math.sqrt(dot(v, v))
+        return mult(v, 1.0 / l) if l > 1e-3 else v
+
+    i = 0
+    n = len(raw_segs)
+    while i < n:
+        cur = raw_segs[i]
+
+        # ELBOW 타입인 경우 인접한 직선 세그먼트들과의 교차점(IP) 복원
+        if cur['type'] == 'ELBOW' and i > 0 and i < n - 1:
+            prev_seg = raw_segs[i - 1]
+            next_seg = raw_segs[i + 1]
+
+            p1 = prev_seg['to']
+            p2 = next_seg['from']
+
+            v1 = norm(sub(prev_seg['to'], prev_seg['from']))
+            v2 = norm(sub(next_seg['to'], next_seg['from']))
+
+            w0 = sub(p1, p2)
+
+            a_val = dot(v1, v1)
+            b_val = dot(v1, v2)
+            c_val = dot(v2, v2)
+            d_val = dot(v1, w0)
+            e_val = dot(v2, w0)
+
+            denom = a_val * c_val - b_val * b_val
+            if denom > 1e-6:
+                t = (b_val * e_val - c_val * d_val) / denom
+                s = (a_val * e_val - b_val * d_val) / denom
+
+                q1 = add(p1, mult(v1, t))
+                q2 = add(p2, mult(v2, s))
+
+                # 3D 교차 근접 지점의 중심을 가상 IP로 산정
+                ip = mult(add(q1, q2), 0.5)
+
+                skew_dist = dist(q1, q2)
+                if skew_dist < 500.0:
+                    if pts:
+                        pts[-1] = ip
+                    else:
+                        pts.append(ip)
+                    # ELBOW 세그먼트 건너뛰기
+                    i += 1
+                    continue
+
+        to_pt = cur['to']
+        if not pts or dist(pts[-1], to_pt) > 1e-3:
+            pts.append(to_pt)
+        i += 1
+
     return pts
 
 
