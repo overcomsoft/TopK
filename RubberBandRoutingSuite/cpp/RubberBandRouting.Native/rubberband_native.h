@@ -16,7 +16,7 @@ extern "C" {
 
 typedef struct RbVec3 { double x, y, z; } RbVec3;
 typedef struct RbAabb { double min_x, min_y, min_z, max_x, max_y, max_z; int is_penetration; } RbAabb;
-typedef struct RbConfig { int max_vertical_bends; double safety_margin, tray_width, tray_height, pipe_pitch; int pipe_count; double snap_tolerance; } RbConfig;
+typedef struct RbConfig { int max_vertical_bends; double safety_margin, tray_width, tray_height, pipe_pitch; int pipe_count; double snap_tolerance; double pipe_diameter; } RbConfig;
 
 typedef void* RbEngineHandle;
 

@@ -145,7 +145,8 @@ public sealed class NativeRubberBandEngine : IRubberBandEngine
         TrayHeight = options.TrayHeight,
         PipePitch = options.PipePitch,
         PipeCount = options.PipeCount,
-        SnapTolerance = options.SnapTolerance
+        SnapTolerance = options.SnapTolerance,
+        PipeDiameter = options.PipeDiameter
     };
 
     private static NativeMethods.RbVec3 ToRbVec3(Vec3 v) => new(v.X, v.Y, v.Z);

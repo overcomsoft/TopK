@@ -1,6 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace RubberBandRouting.Engine;
 
@@ -19,32 +21,34 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
         var obstacleList = obstacles?.ToList() ?? new List<Aabb>();
         var features = featureWaypoints?.ToList() ?? new List<RouteFeature>();
 
+        var sb = new StringBuilder();
+        sb.AppendLine($"==================================================================================");
+        sb.AppendLine($"[Task Trace] Start: ({start.X:F1}, {start.Y:F1}, {start.Z:F1}) ➔ End: ({end.X:F1}, {end.Y:F1}, {end.Z:F1})");
+        sb.AppendLine($" - SafetyMargin: {options.SafetyMargin}mm, TrayWidth: {options.TrayWidth}mm, PipeDiameter: {options.PipeDiameter}mm");
+        sb.AppendLine($" - Total Obstacles in Scene: {obstacleList.Count}");
+        sb.AppendLine($" - Matched Features Count: {features.Count}");
+
         var result = new RubberBandResult();
 
         var step1Segments = MakeRubberLineSegments(new[] { start, end });
         result.Steps.Add(MakeStep(1, "Initial straight rubber tension", step1Segments));
 
         var snappedPoints = BuildSnappedPointList(start, end, features, options.SnapTolerance);
+        sb.AppendLine($" - Waypoint skeleton snapped points ({snappedPoints.Count} total):");
+        for (int i = 0; i < snappedPoints.Count; i++)
+        {
+            sb.AppendLine($"   [{i}] ({snappedPoints[i].X:F1}, {snappedPoints[i].Y:F1}, {snappedPoints[i].Z:F1})");
+        }
+
         var step2Segments = MakeOrthogonalSegments(snappedPoints);
         var step2 = MakeStep(2, $"Waypoint skeleton ({snappedPoints.Count - 2} ordered waypoints)", step2Segments);
         foreach (var wp in snappedPoints.Skip(1).Take(Math.Max(0, snappedPoints.Count - 2))) step2.Waypoints.Add(wp);
         result.Steps.Add(step2);
 
-        var step3Segments = RouteOrthogonalAStarViaWaypoints(snappedPoints, obstacleList, options, out var fallbackCount);
-        // Step 4 — pull the orthogonal A* staircase taut: greedily replace any run of corners
-        // with a single straight (possibly diagonal) segment when that line-of-sight shortcut
-        // stays clear of every obstacle. This is what actually makes the route look like a
-        // rubber band pulled between control points instead of a Manhattan-only staircase.
-        // Required features (e.g. a forced start-drop stub) must remain their own vertex even
-        // when nothing obstructs a longer shortcut past them.
+        var step3Segments = RouteOrthogonalAStarViaWaypoints(snappedPoints, obstacleList, options, out var fallbackCount, sb, result.FallbackLegs);
+        
         var requiredPoints = features.Where(f => f.Required).Select(f => f.Position).ToList();
         var straightened = ApplyLineOfSightShortcuts(step3Segments, obstacleList, options, requiredPoints);
-        // Step 5 — collapse any short "dogleg" (two corners joined by a very short connecting run,
-        // e.g. a tiny lateral jog A* took around a sparse-grid line) into a single clean corner.
-        // LOS shortcutting above only replaces fully-straight runs; it does not remove a short
-        // in-between segment sandwiched between two otherwise-long legs, so this extra corner pair
-        // used to survive and make the display-side bend rounding (which shrinks the usable radius
-        // to a fraction of the shortest adjoining run) look pinched/zigzagged there.
         var merged = MergeShortDoglegs(straightened, obstacleList, options, requiredPoints);
         var step3 = MakeStep(3, fallbackCount == 0 ? "Orthogonal A* + line-of-sight straightening + dogleg merge" : $"Orthogonal A* + line-of-sight straightening + dogleg merge ({fallbackCount} fallback legs)", merged);
         result.Steps.Add(step3);
@@ -52,19 +56,38 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
         result.FinalSegments.AddRange(step3.Segments);
         foreach (var pipe in DistributePipes(step3.Segments, options)) result.PipePaths.Add(pipe);
 
-        var issues = Validate(step3.Segments, obstacleList, options);
+        var issues = Validate(step3.Segments, result.PipePaths, obstacleList, options, result.CollisionPoints, result.VerticalBendPoints);
         if (fallbackCount > 0) issues.Add("astar_fallback_used");
         foreach (var issue in issues) result.ValidationIssues.Add(issue);
 
         var reasons = ClassifySegmentReasons(step3.Segments, features, obstacleList, options);
 
-        return new RubberBandResultBuilder(result)
+        var finalResult = new RubberBandResultBuilder(result)
         {
             TotalLength = step3.Segments.Sum(s => s.Length),
             VerticalBends = CountVerticalBends(step3.Segments),
             IsValid = issues.Count == 0,
             SegmentReasonCodes = reasons
         }.Build();
+
+        sb.AppendLine($"\r\n - Final Result Status: {(finalResult.IsValid ? "SUCCESS (Valid)" : "CHECK (Has Validation Issues)")}");
+        sb.AppendLine($"   Validation Issues: {string.Join(", ", finalResult.ValidationIssues)}");
+        sb.AppendLine($"   Final Path Segment Count: {finalResult.FinalSegments.Count}");
+        sb.AppendLine($"   Total Length: {finalResult.TotalLength:N0}mm");
+        sb.AppendLine($"   Vertical Bends: {finalResult.VerticalBends}");
+        sb.AppendLine($"==================================================================================\r\n");
+
+        if (options.EnableDebugLog)
+        {
+            var logPath = @"d:\DINNO\DEV\AI-AutoRouting\TopKGen\Docs\RubberBandRouting_DebugTrace.log";
+            try
+            {
+                File.AppendAllText(logPath, sb.ToString());
+            }
+            catch { }
+        }
+
+        return finalResult;
     }
 
     private static List<Vec3> BuildSnappedPointList(Vec3 start, Vec3 end, List<RouteFeature> features, double tolerance)
@@ -166,32 +189,50 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
 
     private static double DistancePointToSegment(Vec3 point, Vec3 a, Vec3 b)
     {
-        var ab = b - a;
-        var len2 = Vec3.Dot(ab, ab);
-        if (len2 <= Epsilon) return (point - a).Length;
-        var t = Math.Clamp(Vec3.Dot(point - a, ab) / len2, 0.0, 1.0);
-        var projection = a + ab * t;
-        return (point - projection).Length;
+        return (point - ClosestPointOnSegment(point, a, b)).Length;
     }
 
-    private static List<RouteSegment> RouteOrthogonalAStarViaWaypoints(IReadOnlyList<Vec3> points, List<Aabb> obstacles, RubberBandOptions options, out int fallbackCount)
+    public static Vec3 ClosestPointOnSegment(Vec3 point, Vec3 a, Vec3 b)
+    {
+        var ab = b - a;
+        var len2 = Vec3.Dot(ab, ab);
+        if (len2 <= Epsilon) return a;
+        var t = Math.Clamp(Vec3.Dot(point - a, ab) / len2, 0.0, 1.0);
+        return a + ab * t;
+    }
+
+    private static List<RouteSegment> RouteOrthogonalAStarViaWaypoints(IReadOnlyList<Vec3> points, List<Aabb> obstacles, RubberBandOptions options, out int fallbackCount, StringBuilder sb, List<RouteSegment> fallbackLegs)
     {
         fallbackCount = 0;
         var route = new List<RouteSegment>();
         for (var i = 0; i < points.Count - 1; i++)
         {
-            var leg = RouteOrthogonalAStarLeg(points[i], points[i + 1], obstacles, options);
+            var ptStart = points[i];
+            var ptEnd = points[i + 1];
+            sb.AppendLine($"\r\n [Leg {i}] ({ptStart.X:F1}, {ptStart.Y:F1}, {ptStart.Z:F1}) ➔ ({ptEnd.X:F1}, {ptEnd.Y:F1}, {ptEnd.Z:F1})");
+
+            var leg = RouteOrthogonalAStarLeg(ptStart, ptEnd, obstacles, options, sb);
             if (leg.Count == 0)
             {
                 fallbackCount++;
-                leg = MakeOrthogonalSegments(new[] { points[i], points[i + 1] });
+                leg = MakeOrthogonalSegments(new[] { ptStart, ptEnd });
+                sb.AppendLine($"   ➔ Leg {i} A* FAILED. Fell back to Orthogonal straight routing.");
+                fallbackLegs.Add(new RouteSegment(ptStart, ptEnd));
+            }
+            else
+            {
+                sb.AppendLine($"   ➔ Leg {i} SUCCESS. Created {leg.Count} orthogonal segments (total length: {leg.Sum(s => s.Length):N0}mm)");
+                for (int j = 0; j < leg.Count; j++)
+                {
+                    sb.AppendLine($"     Segment {j}: ({leg[j].Start.X:F1}, {leg[j].Start.Y:F1}, {leg[j].Start.Z:F1}) ➔ ({leg[j].End.X:F1}, {leg[j].End.Y:F1}, {leg[j].End.Z:F1}) (len: {leg[j].Length:N0}mm)");
+                }
             }
             AppendMerged(route, leg);
         }
         return route;
     }
 
-    private static List<RouteSegment> RouteOrthogonalAStarLeg(Vec3 start, Vec3 end, List<Aabb> obstacles, RubberBandOptions options)
+    private static List<RouteSegment> RouteOrthogonalAStarLeg(Vec3 start, Vec3 end, List<Aabb> obstacles, RubberBandOptions options, StringBuilder sb)
     {
         if ((end - start).Length <= 1e-3) return new List<RouteSegment>();
         // Split obstacle usage: every corridor-intersecting obstacle is used for collision
@@ -203,6 +244,10 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
             .Take(GridObstacleLimit)
             .ToList();
         var (xs, ys, zs) = BuildAStarLines(start, end, grid, options);
+        
+        sb.AppendLine($"   * Grid lines: X={xs.Count}, Y={ys.Count}, Z={zs.Count} (Total potential grid nodes: {xs.Count * ys.Count * zs.Count})");
+        sb.AppendLine($"     Corridor obstacles used for collision test: {collision.Count}");
+
         var startNode = new GridNode(IndexOf(xs, start.X), IndexOf(ys, start.Y), IndexOf(zs, start.Z));
         var endNode = new GridNode(IndexOf(xs, end.X), IndexOf(ys, end.Y), IndexOf(zs, end.Z));
 
@@ -218,10 +263,16 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
         // routed back-to-back in a tight area — if it's still hit, the obstacles may genuinely
         // leave no orthogonal gap at the current TrayWidth/SafetyMargin clearance.
         const int maxExpansions = 200000;
-        while (open.Count > 0 && expansions++ < maxExpansions)
+        while (open.Count > 0 && expansions < maxExpansions)
         {
+            expansions++;
             var current = open.Dequeue();
-            if (current.Equals(endNode)) return NodesToSegments(Reconstruct(cameFrom, current), xs, ys, zs);
+            if (current.Equals(endNode))
+            {
+                var path = NodesToSegments(Reconstruct(cameFrom, current), xs, ys, zs);
+                sb.AppendLine($"   * A* search SUCCESS after {expansions} expansions.");
+                return path;
+            }
 
             foreach (var next in Neighbors(current, xs.Count, ys.Count, zs.Count))
             {
@@ -234,6 +285,15 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
                 cameFrom[next] = current;
                 open.Enqueue(next, newCost + Heuristic(next, endNode, xs, ys, zs));
             }
+        }
+
+        if (expansions >= maxExpansions)
+        {
+            sb.AppendLine($"   * A* search TIMEOUT (max expansions limit {maxExpansions} reached).");
+        }
+        else
+        {
+            sb.AppendLine($"   * A* search FAILED after {expansions} expansions (destination unreachable on grid).");
         }
 
         return new List<RouteSegment>();
@@ -683,14 +743,66 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
         return new Vec3(-Math.Sign(d.Y == 0 ? 1 : d.Y), 0, 0);
     }
 
-    private static List<string> Validate(List<RouteSegment> segments, List<Aabb> obstacles, RubberBandOptions options)
+    private static List<string> Validate(List<RouteSegment> segments, List<List<Vec3>> pipePaths, List<Aabb> obstacles, RubberBandOptions options, List<Vec3> collisionPoints, List<Vec3> verticalBends)
     {
         var issues = new List<string>();
 
-        if (CountVerticalBends(segments) > options.MaxVerticalBends) issues.Add("vertical_bends_exceeded");
-        var residual = FindFirstCollision(segments, obstacles, options);
-        if (residual != null) issues.Add("residual_collision");
+        if (FindVerticalBends(segments, verticalBends) > options.MaxVerticalBends) issues.Add("vertical_bends_exceeded");
+        
+        FindAllPipeCollisions(pipePaths, obstacles, options, collisionPoints);
+        if (collisionPoints.Count > 0) issues.Add("residual_collision");
         return issues;
+    }
+
+    private static void FindAllPipeCollisions(List<List<Vec3>> pipePaths, List<Aabb> obstacles, RubberBandOptions options, List<Vec3> collisionPoints)
+    {
+        var radius = options.PipeDiameter / 2.0;
+        foreach (var pipe in pipePaths)
+        {
+            for (var i = 0; i < pipe.Count - 1; i++)
+            {
+                var seg = new RouteSegment(pipe[i], pipe[i + 1]);
+                foreach (var obs in obstacles.Where(o => !o.IsPenetration))
+                {
+                    if (SegmentIntersectsPipeAabb(seg, obs, radius, options.SafetyMargin))
+                    {
+                        var cp = ClosestPointOnSegment(obs.Center, seg.Start, seg.End);
+                        if (!collisionPoints.Any(p => (p - cp).Length <= 100.0))
+                        {
+                            collisionPoints.Add(cp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    public static bool SegmentIntersectsPipeAabb(RouteSegment seg, Aabb obs, double radius, double safetyMargin)
+    {
+        var expanded = obs.Expand(radius + safetyMargin, radius + safetyMargin);
+        var delta = seg.Delta;
+        var tMin = 0.0;
+        var tMax = 1.0;
+
+        for (var axis = 0; axis < 3; axis++)
+        {
+            var start = seg.Start[axis];
+            var direction = delta[axis];
+            if (Math.Abs(direction) <= Epsilon)
+            {
+                if (start < expanded.Min[axis] || start > expanded.Max[axis]) return false;
+                continue;
+            }
+
+            var inv = 1.0 / direction;
+            var t0 = (expanded.Min[axis] - start) * inv;
+            var t1 = (expanded.Max[axis] - start) * inv;
+            if (t0 > t1) (t0, t1) = (t1, t0);
+            tMin = Math.Max(tMin, t0);
+            tMax = Math.Min(tMax, t1);
+            if (tMin > tMax) return false;
+        }
+        return true;
     }
 
     private static RubberBandStep MakeStep(int index, string description, IEnumerable<RouteSegment> segments)
@@ -711,12 +823,24 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
 
     private static int CountVerticalBends(List<RouteSegment> segments)
     {
+        return FindVerticalBends(segments, new List<Vec3>());
+    }
+
+    public static int FindVerticalBends(List<RouteSegment> segments, List<Vec3> bendPoints)
+    {
         var count = 0;
-        bool? prev = null;
-        foreach (var seg in segments)
+        for (int i = 0; i < segments.Count - 1; i++)
         {
-            if (prev.HasValue && prev.Value != seg.IsVertical && seg.IsVertical) count++;
-            prev = seg.IsVertical;
+            var s1 = segments[i];
+            var s2 = segments[i + 1];
+            if (s1.IsVertical != s2.IsVertical)
+            {
+                count++;
+                if (bendPoints != null)
+                {
+                    bendPoints.Add(s1.End);
+                }
+            }
         }
         return count;
     }

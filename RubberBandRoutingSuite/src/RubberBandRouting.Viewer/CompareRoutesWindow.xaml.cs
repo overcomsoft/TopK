@@ -96,6 +96,7 @@ public partial class CompareRoutesWindow : Window
     private int? _existingHighlightIndex;
     private int? _autoHighlightIndex;
     private bool _initialFitDone;
+    private bool _isSyncingCameras;
 
     internal CompareRoutesWindow(IReadOnlyList<RouteCompareEntry> entries)
     {
@@ -126,6 +127,65 @@ public partial class CompareRoutesWindow : Window
     private void BtnFitAuto_Click(object sender, RoutedEventArgs e)
     {
         if (_currentEntry != null) FitViewportToPoints(ViewportAuto, _currentEntry.AutoPoints);
+    }
+
+    private void ChkSyncCamera_Checked(object sender, RoutedEventArgs e)
+    {
+        SyncCameras(fromExisting: true);
+    }
+
+    private void ChkSyncCamera_Unchecked(object sender, RoutedEventArgs e)
+    {
+    }
+
+    private void ViewportExisting_CameraChanged(object sender, RoutedEventArgs e)
+    {
+        if (_isSyncingCameras || ChkSyncCamera?.IsChecked != true) return;
+        SyncCameras(fromExisting: true);
+    }
+
+    private void ViewportAuto_CameraChanged(object sender, RoutedEventArgs e)
+    {
+        if (_isSyncingCameras || ChkSyncCamera?.IsChecked != true) return;
+        SyncCameras(fromExisting: false);
+    }
+
+    private void SyncCameras(bool fromExisting)
+    {
+        if (_isSyncingCameras) return;
+        _isSyncingCameras = true;
+        try
+        {
+            var source = fromExisting ? ViewportExisting : ViewportAuto;
+            var target = fromExisting ? ViewportAuto : ViewportExisting;
+            if (source?.Camera is ProjectionCamera srcProj && target?.Camera is ProjectionCamera tgtProj)
+            {
+                CopyCamera(srcProj, tgtProj);
+            }
+        }
+        finally
+        {
+            _isSyncingCameras = false;
+        }
+    }
+
+    private static void CopyCamera(ProjectionCamera source, ProjectionCamera target)
+    {
+        if (source == null || target == null) return;
+        target.Position = source.Position;
+        target.LookDirection = source.LookDirection;
+        target.UpDirection = source.UpDirection;
+        target.NearPlaneDistance = source.NearPlaneDistance;
+        target.FarPlaneDistance = source.FarPlaneDistance;
+
+        if (source is PerspectiveCamera srcPersp && target is PerspectiveCamera tgtPersp)
+        {
+            tgtPersp.FieldOfView = srcPersp.FieldOfView;
+        }
+        else if (source is OrthographicCamera srcOrtho && target is OrthographicCamera tgtOrtho)
+        {
+            tgtOrtho.Width = srcOrtho.Width;
+        }
     }
 
     /// <summary>

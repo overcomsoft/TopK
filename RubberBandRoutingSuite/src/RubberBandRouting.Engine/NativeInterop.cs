@@ -35,6 +35,7 @@ internal static class NativeMethods
         public double PipePitch;
         public int PipeCount;
         public double SnapTolerance;
+        public double PipeDiameter;
     }
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]

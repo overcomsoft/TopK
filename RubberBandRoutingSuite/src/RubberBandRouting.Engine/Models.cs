@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -50,6 +50,8 @@ public sealed class RubberBandOptions
     // set this explicitly.
     public int PipeCount { get; init; } = 1;
     public double SnapTolerance { get; init; } = 100.0;
+    public double PipeDiameter { get; set; } = 50.0;
+    public bool EnableDebugLog { get; set; } = true;
 
     /// <summary>
     /// Pipe bend radius as a multiple of pipe outer diameter (R = BendRadiusFactor × D), i.e. the
@@ -78,6 +80,9 @@ public sealed class RubberBandResult
     public int VerticalBends { get; init; }
     public bool IsValid { get; init; }
     public List<string> ValidationIssues { get; } = new();
+    public List<Vec3> CollisionPoints { get; } = new();
+    public List<RouteSegment> FallbackLegs { get; } = new();
+    public List<Vec3> VerticalBendPoints { get; } = new();
 
     /// <summary>
     /// One entry per <see cref="FinalSegments"/> element, naming why that segment's leading

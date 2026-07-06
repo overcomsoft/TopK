@@ -1,6 +1,6 @@
-﻿# 3차원 고무줄 배관 라우팅 엔진 개발 보고서
+# 3차원 고무줄 배관 라우팅 엔진 개발 보고서
 
-최종 업데이트: 2026-07-05
+최종 업데이트: 2026-07-06
 
 본 문서는 `RubberBandRoutingSuite`의 C# 고무줄 라우팅 엔진과 WPF 3D Viewer 개발 현황을 기록한다. 현재 구현은 기존 Python PoC와 별도로 신규 작성된 C# 엔진/뷰어 기반이며, PostgreSQL의 기존 배관 경로와 PoC 데이터를 읽어 자동 배관 중심선을 생성하고 HelixToolkit 3D 뷰어에 표시한다.
 
@@ -324,3 +324,110 @@ dotnet build .\RubberBandRoutingSuite\RubberBandRoutingSuite.sln -c Debug --nolo
 19. 특징점 클릭 시 속성 표시 + 비교 다이얼로그 2개 3D 뷰에 특징점 표시 (완료, 2026-07-05)
     - **특징점 클릭 → 속성 표시**: `DrawFeaturePoints`가 각 특징점 큐브에 `FeaturePointInfo(RouteFeature Feature, ResultRow Route)` — 어떤 특징점이며 어느 경로에 속하는지 — 를 `_visualOwners`에 태깅하도록 `AddBox`에도 `owner` 매개변수를 추가했다(§18의 `DrawPath` 패턴과 동일). `PickVisualAt`에 `FeaturePointInfo` 케이스를 추가해, 특징점을 클릭하면 (1) 먼저 소속 경로를 `GridResults`에서 선택해 기존 하이라이트/탭 갱신을 그대로 재사용하고, (2) 이어서 `GridAnalysis`를 이 특징점만의 속성(역할 — `FeatureRoleLabel`로 한글 라벨, 필수 여부, 위치, 소속 경로의 그룹·유틸리티·시작/종단 PoC)으로 다시 채운다.
     - **비교 다이얼로그에 특징점 표시**: `RouteCompareEntry`에 `FeatureWaypoints` 필드를 추가해 `MainWindow.BuildCompareEntries()`가 `ResultRow.FeatureWaypoints`(자동설계가 기존경로에서 뽑아 쓴 그 특징점들, 실제 3D 좌표는 기존 폴리라인 위의 점)를 그대로 전달한다. `CompareRoutesWindow.DrawFeatureMarkers()`가 이 특징점들을 역할별 색상(메인 뷰어의 `FeatureRoleColor`와 동일 팔레트)의 반투명 큐브로 그리며, `RedrawExisting()`/`RedrawAuto()` 양쪽 모두에서 호출해 **기존경로 뷰·자동경로 뷰 모두에** 동일한 특징점 위치를 표시한다 — 자동설계가 기존 폴리라인의 어느 지점을 근거로 그 waypoint를 잡았는지 두 뷰에서 나란히 확인할 수 있다.
+
+---
+
+## 10. 2026-07-06 추가 개선 내용 (카메라 동기화, 파라미터 UI, 스코어링 고도화, 다중 파이프 정밀 검사)
+
+### 10.1 비교 다이얼로그 카메라 동기화 (Sync Viewport) 기능 개발
+
+- **개요**: 비교 다이얼로그에서 양쪽(기존설계 vs 자동설계) 뷰포트의 카메라 이동, 회전, 줌 상태를 실시간으로 동일하게 조작할 수 있도록 개선하여 UX 비교성을 대폭 높였습니다.
+- **구현**:
+  - [CompareRoutesWindow.xaml](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/CompareRoutesWindow.xaml) 좌측 목록 패널 상단에 `카메라 뷰포트 동기화` 체크박스 (`ChkSyncCamera`)를 장착했습니다 (기본 활성화).
+  - 양쪽 `HelixViewport3D`(`ViewportExisting`, `ViewportAuto`)의 `CameraChanged` 이벤트를 바인딩했습니다.
+  - [CompareRoutesWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/CompareRoutesWindow.xaml.cs)에서 `_isSyncingCameras` 플래그 필드를 선언하여 양방향 동기화 호출 시 무한 재귀 루프에 빠지는 현상을 원천 방지하였습니다.
+  - `CopyCamera` 헬퍼 메서드를 통해 카메라 위치, 줌, 조준 벡터, Up 벡터 등을 상대편 카메라로 수동 대입하여 정밀하고 안전하게 동기화합니다.
+
+### 10.2 엔진 설정 파라미터 UI 제어 및 실시간 재라우팅 기능 개발
+
+- **개요**: 하드코딩되었던 엔진 파라미터(안전 마진, 트레이 규격 등)를 뷰어 UI에서 바로 변경하고, 변경 시 현재 표시 중인 배관 경로들이 실시간으로 자동 재계산되어 3D 뷰에 반영되도록 개편했습니다.
+- **구현**:
+  - [MainWindow.xaml](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml)의 좌측 패널 레이아웃 적층 구조(`RowDefinitions`)를 `Auto` 기반으로 재조정하고 하드코딩 마진들을 걷어내어 유연성을 높였습니다.
+  - `④ 라우팅 설정` Border 섹션을 신설하고 안전 마진, 트레이 폭/높이, 파이프 피치, 가닥 수, 곡률 반경 배수, 최대 수직 꺾임 수, 허용 오차 등 8개 텍스트박스 입력 창을 2열 그리드로 정렬 배치했습니다.
+  - [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)에서 최근 라우팅을 수행했던 태스크들과 영역 스코프를 유지하기 위해 `_lastRoutedTaskRows` 및 `_lastRoutedScope` 필드를 추가했습니다.
+  - 각 텍스트박스의 `TextChanged`, `KeyDown` (Enter 키), `LostFocus` 이벤트를 감지하여 자동 재라우팅(`ReRouteCurrentAsync`)을 실행합니다.
+  - **디바운싱(Debounce) 타이머**: 타이핑 도중 연산 누적으로 발생하는 렉을 방지하고자 `DispatcherTimer`(400ms 대기)를 이용해 텍스트 입력이 멈춘 후 400ms 뒤에 연산을 트리거하며, `Enter` 키 입력이나 포커스 이동 시에는 즉각 연산을 수행하도록 처리했습니다.
+  - **파싱 오류 가드**: 입력 문자 오류로 인한 앱 크래시를 방지하기 위해 `ReadDouble`/`ReadInt` 메서드에 정합성 검사 및 안전한 기본값 폴백 처리를 적용했습니다.
+  - **엔진 스위칭 동기화**: 하단의 `네이티브 C++ 엔진` 체크박스를 토글할 때도 즉시 바뀐 엔진으로 현재 배관 경로를 실시간 재계산하도록 연결했습니다.
+
+### 10.3 특징점 매칭 및 스코어링 알고리즘 고도화
+
+- **개요**: 자동설계 태스크가 DB에서 어떤 기존설계 경로를 참조할지 선정하는 매칭 스코어링 공식에 기하학적 유사도 인자들을 반영하여 정합성을 극대화하였습니다.
+- **구현**:
+  - [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)의 `FindMatchedExistingRoute`를 **2단계 매칭(Strict-to-Loose Fallback) 프로세스**로 고도화했습니다.
+    1. **1단계 (엄격 매칭)**: 동일 그룹 및 유틸리티명 내에서만 기존경로 매칭을 수립합니다.
+    2. **2단계 (유연 매칭)**: 1단계 실패 시 그룹/유틸리티명이 일치하지 않더라도 스코어링 공식 하에 전체 경로 중 가장 가까운 최적 경로를 정합합니다. (명칭 오타나 표기법 오차 구제)
+  - `ExistingRouteMatchScore` 함수에 다음 요소들을 반영하는 종합 스코어 수식을 장착했습니다.
+    - **기초 거리**: 양 끝점 간의 유클리드 거리 차이 합 (정방향/역방향 중 최소값).
+    - **고도(Z) 차이 페널티**: 시작/종단 Z 고도차를 추가 점수화 (`zGap * 0.5`).
+    - **장비명 일치 보너스**: SourceName/TargetName 일치 시 각각 `-1000` 점의 큰 보너스 제공.
+    - **관경(Diameter) 유사도**: 두 경로의 관경이 일치하면 `-300` 점 보너스, 불일치하면 오차 1mm당 `+5.0` 점의 페널티 가산.
+    - **유틸리티 불일치 페널티**: 2단계 유연 매칭 시 그룹 다름은 `+3000` 점, 유틸리티 다름은 `+2000` 점 페널티를 부과해 동일 성격의 배관이 우선 매칭되도록 가중치를 정비했습니다.
+
+### 10.4 다중 파이프(Multi-Pipe) 개별 튜브의 정밀 충돌 검증 로직 구현
+
+- **개요**: 기존에 대표 중심선 1개 기준으로 수행하던 간섭 검사를 다중 분배된 각 개별 파이프(튜브) 라인이 독립 외경과 안전 마진을 만족하면서 실제로 충돌을 완벽히 우회하는지 개별 정밀 검증하도록 전면 개선했습니다.
+- **구현**:
+  - C# `RubberBandOptions` ([Models.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/Models.cs)) 및 C++ P/Invoke `RbConfig` ([NativeInterop.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/NativeInterop.cs), [rubberband_native.h](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.h)) 구조체에 실제 파이프 관경 정보 전달을 위해 `PipeDiameter`/`pipe_diameter` 필드를 새로 장착하였습니다.
+  - **Managed 엔진(C#)**: `Validate` 호출 시 분산 생성된 개별 파이프 폴리라인들(`result.PipePaths`)을 전달받아, 각 파이프의 외경 반경(`options.PipeDiameter / 2.0`) 및 `options.SafetyMargin`으로 확장된 장애물 AABB 범위 침범 여부(`FindFirstPipeCollision`, `SegmentIntersectsPipeAabb`)를 정밀하게 전수 검사하도록 수정했습니다.
+  - **Native 엔진(C++)**: [rubberband_native.cpp](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/cpp/RubberBandRouting.Native/rubberband_native.cpp)에서 기존의 대표 중심선 기준 간섭 판단(`has_residual_collision`)을 제거하고, `distribute()`에 의해 분산 생성된 `e->pipes` 내의 모든 개별 튜브 세그먼트들을 순회하며 각각 `segment_hits_pipe` 헬퍼로 장애물 AABB 충돌을 정밀 검증하도록 업데이트했습니다.
+  - **WPF 뷰어**: [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)의 `IsRoundedPathClear` 함수를 전면 개편하여, 꺾임부 라운딩 처리 안전성 판단(`roundSafe` = rounded vs sharp elbow) 시 `result.PipePaths`의 각 개별 배관 경로들에 `BuildRoundedBendPolyline`을 적용한 뒤 각각의 둥근 엘보 세그먼트가 관경 기준 확장 영역 `(diameter / 2.0) + options.SafetyMargin` 장애물과 간섭을 일으키는지 최종 정밀 검증합니다.
+
+### 10.5 DB 접속 정보 영속화 강화 및 기동 시 자동 렌더링 개선
+
+- **개요**: 프로젝트 로드 시 입력한 DB 접속 정보와 패스워드가 항상 즉시 저장되도록 세이브 시점을 확장하고, 기동 시 WPF 콤보박스의 바인딩 지연 등으로 인해 3D 렌더링이 되지 않고 멈추던 레이아웃 동기화 문제를 로컬 참조 기법으로 완벽하게 해결하였습니다.
+- **구현**:
+  - [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)의 `LoadProjectsAsync`에서 WPF ComboBox `SelectedItem` 업데이트 지연 문제를 극복하기 위해 `selectedProject` 로컬 변수 참조 방식을 도입했습니다. 이를 통해 DB 조회 성공 시 WPF의 갱신 주기 지연과 관계없이 씬 자동 로딩 및 3D 렌더링이 즉각 트리거되도록 수정했습니다.
+  - `LoadSceneAsync` 메서드가 성공적으로 완료된 시점에도 `SaveConnectionSettings()`를 수행하도록 하여, 사용자가 `기본설계` 버튼을 눌러 프로젝트 씬을 성공적으로 렌더링한 즉시 DB 연결 정보와 패스워드가 갱신 저장되도록 영속성 시점을 전면 보강했습니다.
+
+### 10.6 유틸리티 및 태스크 선택 시 기존설계 특징점 자동 표시 및 정보 조회
+
+- **개요**: 좌측 사이드바에서 유틸리티 그룹이나 유틸리티를 변경하여 태스크가 필터링되거나, 사용자가 개별 PoC 태스크를 클릭할 때 해당 태스크에 매칭된 기존설계 경로로부터 특징점(RouteFeature)들을 자동으로 추출하여 3D 화면에 마커 큐브로 그리고 특징점 정보를 즉시 출력하도록 개선했습니다.
+- **구현**:
+  - **특징점 자동 3D 표시**: [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)의 `HighlightTaskEndpoints` 내부에서 `FindMatchedExistingRoute`로 기존설계 경로를 찾은 뒤, `BuildFeatureWaypoints`로 추출한 특징점들을 하이라이트 비주얼 버킷 `_selectedEndpointVisuals`에 반투명 색상 박스 마커로 그려줍니다.
+  - **정보 및 속성 요약**: 태스크를 선택한 즉시 우측 하단 `분석결과` 창에 태스크의 기본 정보와 매칭 경로 ID, 특징점 총 개수, 특징점 상세 구성 정보(시작스텁, 꺾임, 고도변경 등의 카운트합)가 자동 갱신 표기됩니다.
+  - **3D 마커 클릭 피킹 연동**: `TaskFeatureInfo` 레코드를 새로 정의하여 3D 특징점 마커들의 소유자로 연동하였으며, 사용자가 화면상의 특징점 큐브를 직접 클릭하면 `ShowTaskFeatureProperties` 함수가 실행되어 정확한 3D 위치 좌표와 속성이 분석창에 즉각 단독 출력됩니다.
+
+### 10.7 세그먼트 단위별 구간 라우팅 세부 디버그 로그 파일 출력 기능 개발
+
+- **개요**: 자동설계 엔진이 배관 경로를 시작점부터 중간 특징점들을 거쳐 종단점까지 찾아 나가는 상세 탐색 단계를 파일로그로 기록하여 역추적할 수 있게 하였습니다.
+- **구현**:
+  - **세그먼트별 Leg 트레이싱**: [ManagedRubberBandEngine.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs)의 A* 탐색 메서드들에 `StringBuilder` 로그 빌더를 추가하여 각 특징점 사이 구간(Leg)마다 출발/목적 좌표, 격자 수(X, Y, Z밀도), 주변의 장애물 충돌 수, A* 탐색 성공 시 팽창 수(Expansions) 또는 실패 시 직교 폴백 연결 발생 여부, 최종 생성된 선분들을 디테일하게 추적 기록하도록 고도화하였습니다.
+  - **로그 영속화 및 리셋 연동**: 탐색이 끝난 직후 `d:\DINNO\DEV\AI-AutoRouting\TopKGen\Docs\RubberBandRouting_DebugTrace.log`에 로그 문자열을 작성(`AppendAllText`)하도록 처리했습니다. 뷰어의 `RouteRowsAsync` 시작 시 이전 로그를 리셋(Truncate)하여 매 세션 깔끔한 신규 로그만 보존합니다.
+  - **UI 상태 표시 안내**: 관리형(C#) 엔진을 사용하여 설계를 구동할 경우 상태바 문구 끝부분에 `(디버그 로그가 Docs/RubberBandRouting_DebugTrace.log에 기록됨)` 알림 텍스트를 출력하여 접근성을 보장하였습니다.
+
+### 10.8 디버그 로그 제어 CheckBox 및 1-클릭 디버그리플레이 버튼 추가
+
+- **개요**: 로깅 기능을 직접 끄고 켤 수 있게 옵션을 분리하고, 결과 그리드 상에서 클릭 한 번으로 특정 경로만 디버그 시뮬레이션한 뒤 자동으로 해당 디버그 로그 텍스트 파일을 팝업 시켜주는 단일 리플레이 기능을 구현하였습니다.
+- **구현**:
+  - **WPF UI 컴포넌트 추가**: [MainWindow.xaml](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml)의 결과 테이블 상단 헤더 영역에 `디버그로그 생성` CheckBox(`ChkEnableDebugLog`, 기본 활성화)와 `디버그리플레이` Button(`BtnReplayDebug`, 단독 짙은 파랑색 테마)을 배치하였습니다.
+  - **로깅 활성 제어 연동**: `RubberBandOptions`에 `EnableDebugLog` 제속 속성을 신설하고, WPF `ReadOptions()`에서 체크박스 값을 바인딩하여 엔진이 원하지 않을 때는 불필요한 IO 기록을 수행하지 않도록 개선했습니다.
+  - **자동 메모장 연동 리플레이**: `BtnReplayDebug_Click` 핸들러를 구축하여, 사용자가 리스트의 특정 경로를 선택하고 클릭 시 자동으로 **관리형(C#) 엔진**으로 일시 타겟팅을 전환하고 단일 경로를 재탐색하여 3D 씬을 갱신합니다. 계산이 끝난 즉시 `Process.Start("notepad.exe", logPath)`를 호출하여 **상세 디버그 로그 텍스트를 메모장 팝업창으로 바로 출력**해 주어 극대화된 사용성 편의를 제공하였습니다.
+
+### 10.9 충돌(간섭) 발생 지점 3D 반투명 빨간 구체 시각화 및 좌표 목록 제공
+
+- **개요**: 자동설계 경로가 장애물과 충돌(간섭)을 유발하는 정확한 위치 정보를 3D 공간 마킹 및 분석 정보 리스팅 방식으로 제공하여 디버깅 직관성을 강화하였습니다.
+- **구현**:
+  - **충돌점 기하 연산**: [ManagedRubberBandEngine.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs)의 충돌 검증 로직을 확장하여 `AABB` 영역과 배관 세그먼트 선분의 간섭이 일어난 정확한 투영 최단 점(`ClosestPointOnSegment`)을 추출하여 `result.CollisionPoints` 컬렉션에 누적 반환하도록 고도화했습니다.
+  - **엔진 단 교차 매핑**: 네이티브 C++ 엔진 구동 시에도 충돌점 좌표를 추출할 수 있도록 [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)의 `ComputeRoutes`에서 C#의 `PopulateCollisionPoints` 검증 유틸을 교차 구동해 충돌 리스트를 완성해 줍니다.
+  - **3D 씬 내 빨간 구체 렌더링**: 결과 테이블에서 검증 실패(`residual_collision`) 상태인 경로를 선택하면, 충돌점 좌표에 **굵은 반투명 빨간색 구체(Sphere, 반경: 지름의 1.5배 이상)**들을 마커로 추가하여 3D 공간에 그려줍니다. 선택을 전환하면 마커들은 자동으로 소거됩니다.
+  - **분석결과 좌표 리스팅**: `BuildAnalysisRows`를 업데이트하여, 우측 하단의 분석 결과 리스트에 `충돌 개수: N개` 정보와 개별 충돌점들의 3D X/Y/Z 좌표를 테이블 행으로 포맷팅하여 바인딩 출력합니다.
+
+### 10.10 A* 탐색 실패 및 수직 Bend 한도 초과 오류 위치 3D 하이라이트 및 좌표 제공
+
+- **개요**: 장애물 간섭 외에 주요 설계 실패 원인인 **A* 길찾기 실패 구간(Orange)**과 **수직 꺾임 한도 초과 엘보 지점(Magenta)** 또한 3D 공간 표시와 데이터 텍스트 정보로 구별하여 정밀 분석할 수 있도록 구현했습니다.
+- **구현**:
+  - **오류 정보 수집 확장**: A* 탐색 실패로 강제 직교 연결이 발생한 경유 Leg 구간은 `result.FallbackLegs`에, 수직 상하 단차 전환이 일어난 엘보 꼭짓점들은 `result.VerticalBendPoints`에 엔진 단에서 수집되도록 설계했습니다. 네이티브 엔진의 출력물도 WPF `ComputeRoutes`에서 `FindVerticalBends` C# 모듈이 엘보 좌표를 동일하게 채우도록 하였습니다.
+  - **A* 실패 구간 시각화**: A* 탐색 실패 구간을 3D 공간 상에 **두꺼운 반투명 주황색 오버레이 튜브(Color: Argb(180, 255, 128, 0))** 및 양 끝점의 구체 마커로 강조하여, 어느 경유 특징점 사이가 차단되었는지 즉각 특정합니다.
+  - **수직 꺾임 초과 시각화**: 수직 꺾임 한도가 초과된 경우, 높이가 변화하는 모서리 엘보 위치에 **반투명 보라색(자주색) 구체(Color: Argb(160, 255, 0, 255))** 마커를 장착해 과도하게 높은 수직 기동이 발생한 지점을 가시화합니다.
+  - **상세 분석 리스팅**: `BuildAnalysisRows`에 바인딩하여 `A* 실패 구간 수` 및 개별 실패구간 범위 좌표 정보와 `수직 Bend 위치 수` 및 각 수직 꺾임 엘보 좌표들을 분석결과 테이블 그리드에 깔끔하게 노출해 줍니다.
+
+### 10.11 [설계오류리스트] 탭 추가 및 클릭 시 3D 카메라 줌인/하이라이트 피킹 인터랙션 구현
+
+- **개요**: 검증 오류 목록을 통합 조회할 수 있는 독립 탭을 추가하고, 행 클릭 시 3D 씬 카메라를 해당 오류의 중앙 좌표로 포커싱 이동하며 밝은 노란색으로 점멸 조준하는 인터랙션을 장착했습니다.
+- **구현**:
+  - **WPF UI 탭 신설**: [MainWindow.xaml](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml)의 우측 하단 탭컨트롤 내에 `설계오류리스트` TabItem과 DataGrid(`GridErrorList`)를 추가했습니다.
+  - **데이터 추출 바인딩**: [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)에 `ErrorDetailRow` 레코드를 추가하고, 선택된 배관 결과의 `CollisionPoints`, `FallbackLegs`, `VerticalBendPoints` 정보를 파싱하여 "장애물 충돌", "A* 탐색 실패", "수직 꺾임 초과" 행 데이터를 실시간 빌드해 바인딩합니다.
+  - **클릭 피킹 카메라 줌 & 밝은 노란색 3D 하이라이트**: 그리드에서 임의의 오류 행을 선택 시 `GridErrorList_SelectionChanged` 이벤트가 트리거되어, 선택된 간섭 꼭짓점 또는 실패 구간 세그먼트를 3D 뷰포트 내에 **밝은 노란색(Yellow) 굵은 실선과 구체**로 하이라이트 렌더링하고, **카메라 시점(`pc.Position` 및 `pc.LookDirection`)을 해당 기하 구조체의 중심 좌표로 자동 부드럽게 줌인 포커싱**하여 사용성을 극대화했습니다.
+
+

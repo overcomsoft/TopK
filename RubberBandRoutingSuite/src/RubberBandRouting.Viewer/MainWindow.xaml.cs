@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -29,6 +30,9 @@ public partial class MainWindow : Window
     private readonly List<Visual3D> _existingRouteVisuals = new();
     private readonly PostgresRoutingDataLoader _loader = new();
     private readonly List<ResultRow> _resultRows = new();
+    private List<TaskRow>? _lastRoutedTaskRows;
+    private string _lastRoutedScope = string.Empty;
+    private DispatcherTimer? _settingChangeTimer;
     private readonly Stopwatch _fpsWatch = Stopwatch.StartNew();
     // Maps a clickable pipe visual (auto-route or existing-route tube) back to the ResultRow/
     // ExistingRoutePath it represents, so a 3D click can show its properties and select the
@@ -185,8 +189,100 @@ public partial class MainWindow : Window
         UpdateVisibleObjectText();
     }
 
+    private async void BtnReplayDebug_Click(object sender, RoutedEventArgs e)
+    {
+        if (GridResults.SelectedItem is not ResultRow selectedRow)
+        {
+            TxtStatus.Text = "리플레이할 자동설계 경로를 결과 목록에서 먼저 선택하세요.";
+            return;
+        }
+
+        var wasNative = ChkUseNativeEngine.IsChecked;
+        if (ChkUseNativeEngine.IsChecked == true)
+        {
+            // Temporarily switch to Managed C# to capture segment-by-segment debug text trace
+            ChkUseNativeEngine.IsChecked = false;
+        }
+
+        var task = selectedRow.Task;
+        TxtStatus.Text = $"[{task.Group}] {task.Utility} 경로 디버그 리플레이 중...";
+
+        var logPath = @"d:\DINNO\DEV\AI-AutoRouting\TopKGen\Docs\RubberBandRouting_DebugTrace.log";
+        try
+        {
+            var dir = Path.GetDirectoryName(logPath);
+            if (dir != null) Directory.CreateDirectory(dir);
+            File.WriteAllText(logPath, $"=== RubberBand Replay Debug Trace - {DateTime.Now} ===\r\n" +
+                                       $"Utility Group: {task.Group}, Utility: {task.Utility}\r\n" +
+                                       $"Start PoC: {task.SourceName} ({task.Start.X:F0}, {task.Start.Y:F0}, {task.Start.Z:F0})\r\n" +
+                                       $"End PoC: {task.TargetName} ({task.End.X:F0}, {task.End.Y:F0}, {task.End.Z:F0})\r\n\r\n");
+        }
+        catch { }
+
+        var options = ReadOptions();
+        var baseObstacles = _scene.CollisionObstacles.ToList();
+        var engine = ResolveEngine();
+
+        ResultRow? newRow = null;
+        await RunBusyAsync("디버그 리플레이 연산 중...", async () =>
+        {
+            var totalSw = Stopwatch.StartNew();
+            var computed = await Task.Run(() => ComputeRoutes(new[] { new TaskRow(selectedRow.Index, selectedRow.Task) }, options, baseObstacles, engine));
+            totalSw.Stop();
+            if (computed.Count > 0)
+            {
+                newRow = computed[0];
+            }
+        });
+
+        if (wasNative == true)
+        {
+            ChkUseNativeEngine.IsChecked = true;
+        }
+
+        if (newRow != null)
+        {
+            var idx = _resultRows.IndexOf(selectedRow);
+            if (idx >= 0)
+            {
+                _resultRows[idx] = newRow;
+            }
+            else
+            {
+                _resultRows.Add(newRow);
+            }
+
+            GridResults.ItemsSource = null;
+            GridResults.ItemsSource = _resultRows;
+            GridResults.SelectedItem = newRow;
+            GridResults.ScrollIntoView(newRow);
+            RedrawAutoRoutes(newRow);
+
+            TxtStatus.Text = $"디버그 리플레이 완료. 로그가 Docs/RubberBandRouting_DebugTrace.log에 기록되었습니다.";
+
+            try
+            {
+                if (File.Exists(logPath))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "notepad.exe",
+                        Arguments = $"\"{logPath}\"",
+                        UseShellExecute = true
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                TxtStatus.Text += $" (메모장 실행 실패: {ex.Message})";
+            }
+        }
+    }
+
     private async Task LoadProjectsAsync()
     {
+        RoutingProject? selectedProject = null;
+
         await RunBusyAsync("프로젝트 목록을 불러오는 중...", async () =>
         {
             var projects = await _loader.ListProjectsAsync(ReadDbOptions());
@@ -194,8 +290,16 @@ public partial class MainWindow : Window
             var remembered = _lastProjectDisplayName != null
                 ? projects.FirstOrDefault(p => p.DisplayName == _lastProjectDisplayName)
                 : null;
-            if (remembered != null) CmbProjects.SelectedItem = remembered;
-            else if (projects.Count > 0) CmbProjects.SelectedIndex = 0;
+            if (remembered != null)
+            {
+                CmbProjects.SelectedItem = remembered;
+                selectedProject = remembered;
+            }
+            else if (projects.Count > 0)
+            {
+                CmbProjects.SelectedIndex = 0;
+                selectedProject = projects[0];
+            }
             TxtStatus.Text = $"프로젝트 {projects.Count}건을 불러왔습니다.";
             GridAnalysis.ItemsSource = projects.Take(20).Select(p => new AnalysisRow(p.Index.ToString(CultureInfo.InvariantCulture), p.DisplayName)).ToList();
             // Connection succeeded (the query above didn't throw), so remember these credentials
@@ -203,9 +307,13 @@ public partial class MainWindow : Window
             if (projects.Count > 0) SaveConnectionSettings();
         });
 
-        if (!_loadedInitialScene && CmbProjects.SelectedItem is RoutingProject)
+        if (!_loadedInitialScene && selectedProject != null)
         {
             _loadedInitialScene = true;
+            if ((CmbProjects.SelectedItem as RoutingProject) != selectedProject)
+            {
+                CmbProjects.SelectedItem = selectedProject;
+            }
             await LoadSceneAsync();
         }
     }
@@ -240,6 +348,10 @@ public partial class MainWindow : Window
             var warning = _scene.LoadWarnings.Count > 0 ? $" | ⚠ 로드 경고 {_scene.LoadWarnings.Count}건" : string.Empty;
             TxtStatus.Text = $"씬 로딩 완료: 라우팅 태스크 {_scene.Tasks.Count}건, 기존경로 {_scene.ExistingRoutePaths.Count}건.{warning}";
             ScheduleProjectZoomFit();
+
+            // Save credentials and last project immediately upon successful scene load,
+            // so we don't rely only on the window's Closing event.
+            SaveConnectionSettings();
         });
     }
 
@@ -291,6 +403,9 @@ public partial class MainWindow : Window
         GridTasks.ItemsSource = _visibleTaskRows;
         if (_visibleTaskRows.Count > 0) GridTasks.SelectedIndex = 0;
         else HighlightTaskEndpoints(null);
+
+        // Keep 3D auto-routes and feature points synchronized with the active filter.
+        RedrawAutoRoutes(GridResults.SelectedItem as ResultRow);
     }
 
     private void GridTasks_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -301,12 +416,55 @@ public partial class MainWindow : Window
     private void HighlightTaskEndpoints(TaskRow? row)
     {
         ClearVisuals(_selectedEndpointVisuals);
-        if (row == null) return;
+        if (row == null)
+        {
+            GridAnalysis.ItemsSource = null;
+            return;
+        }
 
         var diameter = row.Task.DiameterMm > 0 ? Math.Clamp(row.Task.DiameterMm, 80, 520) : 180;
         AddSphere(row.Task.Start, Math.Max(diameter * 0.75, 180), Brushes.Red, _selectedEndpointVisuals);
         AddSphere(row.Task.End, Math.Max(diameter * 0.75, 180), Brushes.DodgerBlue, _selectedEndpointVisuals);
         DrawPath(new[] { row.Task.Start, row.Task.End }, Brushes.White, Math.Max(diameter * 0.15, 24), _selectedEndpointVisuals);
+
+        // Load features from the matched existing route
+        var matchedPath = FindMatchedExistingRoute(row.Task);
+        List<AnalysisRow> analysisRows = new()
+        {
+            new AnalysisRow("유틸리티 그룹", row.Group),
+            new AnalysisRow("유틸리티", row.Utility),
+            new AnalysisRow("시작 PoC", row.SourceName),
+            new AnalysisRow("종단 PoC", row.TargetName),
+            new AnalysisRow("배관 관경(mm)", row.Task.DiameterMm.ToString(CultureInfo.InvariantCulture)),
+            new AnalysisRow("기존경로 매칭", matchedPath != null ? (matchedPath.RoutePathGuid ?? "조건 매칭") : "매칭 없음")
+        };
+
+        if (matchedPath != null)
+        {
+            var featureInfo = BuildFeatureWaypoints(row.Task, ReadOptions());
+            var features = featureInfo.Waypoints;
+
+            // Draw features as semitransparent cubes in _selectedEndpointVisuals
+            var halfSize = 69.0;
+            foreach (var feature in features)
+            {
+                var color = FeatureRoleColor(feature.Role);
+                var box = new Aabb(
+                    new Vec3(feature.Position.X - halfSize, feature.Position.Y - halfSize, feature.Position.Z - halfSize),
+                    new Vec3(feature.Position.X + halfSize, feature.Position.Y + halfSize, feature.Position.Z + halfSize));
+                var owner = new TaskFeatureInfo(feature, row);
+                AddBox(box, Color.FromArgb(128, color.R, color.G, color.B), _selectedEndpointVisuals, owner);
+            }
+
+            analysisRows.Add(new AnalysisRow("기존설계 특징점", $"{features.Count} 개"));
+            analysisRows.Add(new AnalysisRow("특징점 상세", FeatureRoleSummary(features)));
+        }
+        else
+        {
+            analysisRows.Add(new AnalysisRow("기존설계 특징점", "0 개 (기존설계 매칭 없음)"));
+        }
+
+        GridAnalysis.ItemsSource = analysisRows;
     }
 
     private void Viewport_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) => _viewportMouseDownPos = e.GetPosition(Viewport);
@@ -335,6 +493,9 @@ public partial class MainWindow : Window
                 GridResults.ScrollIntoView(featureInfo.Route);
                 ShowFeaturePointProperties(featureInfo);
                 break;
+            case TaskFeatureInfo taskFeatureInfo:
+                ShowTaskFeatureProperties(taskFeatureInfo);
+                break;
             case ResultRow resultRow:
                 GridResults.SelectedItem = resultRow;
                 GridResults.ScrollIntoView(resultRow);
@@ -358,6 +519,22 @@ public partial class MainWindow : Window
             new AnalysisRow("소속 경로", $"[{route.Group}] {route.Utility}"),
             new AnalysisRow("소속 경로 시작PoC", route.StartPoC),
             new AnalysisRow("소속 경로 종단PoC", route.EndPoC)
+        };
+    }
+
+    private void ShowTaskFeatureProperties(TaskFeatureInfo info)
+    {
+        var feature = info.Feature;
+        var task = info.Task;
+        GridAnalysis.ItemsSource = new[]
+        {
+            new AnalysisRow("종류", "기존설계 특징점 (태스크 선택)"),
+            new AnalysisRow("역할", FeatureRoleLabel(feature.Role)),
+            new AnalysisRow("필수 여부", feature.Required ? "필수 (Required)" : "선택"),
+            new AnalysisRow("위치", FormatVec(feature.Position)),
+            new AnalysisRow("소속 태스크", $"[{task.Group}] {task.Utility}"),
+            new AnalysisRow("태스크 시작PoC", task.SourceName),
+            new AnalysisRow("태스크 종단PoC", task.TargetName)
         };
     }
 
@@ -491,6 +668,19 @@ public partial class MainWindow : Window
             return;
         }
 
+        _lastRoutedTaskRows = rows.ToList();
+        _lastRoutedScope = scope;
+
+        // Clear or initialize the debug log file for a fresh batch trace
+        var logPath = @"d:\DINNO\DEV\AI-AutoRouting\TopKGen\Docs\RubberBandRouting_DebugTrace.log";
+        try
+        {
+            var dir = Path.GetDirectoryName(logPath);
+            if (dir != null) Directory.CreateDirectory(dir);
+            File.WriteAllText(logPath, $"=== RubberBand AutoRouting Debug Trace - {DateTime.Now} (Scope: {scope}) ===\r\n\r\n");
+        }
+        catch { }
+
         const int maxTasks = 200;
         var max = Math.Min(rows.Count, maxTasks);
         var options = ReadOptions();
@@ -518,7 +708,8 @@ public partial class MainWindow : Window
             RedrawAutoRoutes(GridResults.SelectedItem as ResultRow);
             var truncated = rows.Count > max ? $" | ⚠ 상한 {max}개 적용, {rows.Count - max}개 생략" : string.Empty;
             var engineLabel = engine is NativeRubberBandEngine ? "네이티브(C++)" : "관리형(C#)";
-            TxtStatus.Text = $"자동설계 완료: {max}/{rows.Count}건, {totalSw.Elapsed.TotalMilliseconds:N0} ms 소요. [{engineLabel}]{truncated}";
+            var logLabel = engine is ManagedRubberBandEngine ? " (디버그 로그가 Docs/RubberBandRouting_DebugTrace.log에 기록됨)" : "";
+            TxtStatus.Text = $"자동설계 완료: {max}/{rows.Count}건, {totalSw.Elapsed.TotalMilliseconds:N0} ms 소요. [{engineLabel}]{truncated}{logLabel}";
             UpdateVisibleObjectText();
         });
     }
@@ -551,17 +742,43 @@ public partial class MainWindow : Window
                     .Where(o => !(string.Equals(o.Group, taskGroup, StringComparison.OrdinalIgnoreCase) && string.Equals(o.Utility, taskUtility, StringComparison.OrdinalIgnoreCase)))
                     .Select(o => o.Box))
                 .ToList();
-            var featureInfo = BuildFeatureWaypoints(row.Task, options);
-            var result = Route(engine, row.Task, obstaclesForTask, options, featureInfo.Waypoints);
-            sw.Stop();
             var displayDiameter = AutoRouteDiameter(row.Task);
+            var taskOptions = new RubberBandOptions
+            {
+                MaxVerticalBends = options.MaxVerticalBends,
+                SafetyMargin = options.SafetyMargin,
+                TrayWidth = options.TrayWidth,
+                TrayHeight = options.TrayHeight,
+                PipePitch = options.PipePitch,
+                PipeCount = options.PipeCount,
+                SnapTolerance = options.SnapTolerance,
+                BendRadiusFactor = options.BendRadiusFactor,
+                PipeDiameter = displayDiameter
+            };
+
+            var featureInfo = BuildFeatureWaypoints(row.Task, taskOptions);
+            var result = Route(engine, row.Task, obstaclesForTask, taskOptions, featureInfo.Waypoints);
+            sw.Stop();
             // Decide rounded vs sharp against scene + earlier (non-sibling) routes, before this route joins the obstacle set.
-            var roundSafe = IsRoundedPathClear(result.FinalSegments, displayDiameter, obstaclesForTask, options);
+            var roundSafe = IsRoundedPathClear(result, displayDiameter, obstaclesForTask, taskOptions);
             if (result.FinalSegments.Count > 0)
             {
-                routeObstacles.AddRange(BuildRouteObstacles(result.FinalSegments, options, $"auto_route_{i + 1}")
+                routeObstacles.AddRange(BuildRouteObstacles(result.FinalSegments, taskOptions, $"auto_route_{i + 1}")
                     .Select(b => new RouteObstacleEntry(b, taskGroup, taskUtility)));
             }
+
+            // Cross-check and populate collision points for both native (C++) and managed (C#) engine outputs
+            if (result.CollisionPoints.Count == 0 && result.ValidationIssues.Contains("residual_collision"))
+            {
+                PopulateCollisionPoints(result, obstaclesForTask, taskOptions);
+            }
+
+            // Cross-check and populate vertical bend coordinates for both engines
+            if (result.VerticalBendPoints.Count == 0 && result.FinalSegments.Count > 0)
+            {
+                ManagedRubberBandEngine.FindVerticalBends(result.FinalSegments, result.VerticalBendPoints);
+            }
+
             var failure = result.IsValid ? string.Empty : string.Join("; ", result.ValidationIssues);
             var analysis = BuildAnalysisRows(row, result, featureInfo);
             var steps = BuildRouteStepRows(result, featureInfo);
@@ -592,9 +809,35 @@ public partial class MainWindow : Window
                 result.PipePaths.Select(p => p.ToList()).ToList(),
                 sw.Elapsed.TotalMilliseconds,
                 row.Task,
-                matchedExisting));
+                matchedExisting,
+                result.CollisionPoints.ToList(),
+                result.FallbackLegs.ToList(),
+                result.VerticalBendPoints.ToList()));
         }
         return results;
+    }
+
+    private static void PopulateCollisionPoints(RubberBandResult result, List<Aabb> obstacles, RubberBandOptions options)
+    {
+        var radius = options.PipeDiameter / 2.0;
+        foreach (var pipe in result.PipePaths)
+        {
+            for (var i = 0; i < pipe.Count - 1; i++)
+            {
+                var seg = new RouteSegment(pipe[i], pipe[i + 1]);
+                foreach (var obs in obstacles.Where(o => !o.IsPenetration))
+                {
+                    if (ManagedRubberBandEngine.SegmentIntersectsPipeAabb(seg, obs, radius, options.SafetyMargin))
+                    {
+                        var cp = ManagedRubberBandEngine.ClosestPointOnSegment(obs.Center, seg.Start, seg.End);
+                        if (!result.CollisionPoints.Any(p => (p - cp).Length <= 100.0))
+                        {
+                            result.CollisionPoints.Add(cp);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private RubberBandResult Route(IRubberBandEngine engine, RouteTask task, IReadOnlyList<Aabb> obstacles, RubberBandOptions options, IReadOnlyList<RouteFeature> featureWaypoints)
@@ -667,8 +910,19 @@ public partial class MainWindow : Window
     private void RedrawAutoRoutes(ResultRow? selected)
     {
         ClearVisuals(_routeVisuals);
+        ClearVisuals(_featureVisuals);
+
+        var group = SelectedGroup();
+        var utility = SelectedUtility();
+
         foreach (var row in _resultRows)
         {
+            // Filter auto-routes to only render those matching the currently selected utility filter.
+            if (!string.IsNullOrWhiteSpace(group) && !string.Equals(NormalizeGroup(row.Group), group, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!string.IsNullOrWhiteSpace(utility) && !string.Equals(row.Utility, utility, StringComparison.OrdinalIgnoreCase))
+                continue;
+
             var isSelected = selected != null && ReferenceEquals(row, selected);
             var brush = isSelected ? Brushes.Yellow : row.RouteBrush;
             var diameter = isSelected ? Math.Max(row.RouteDiameter + 70, row.RouteDiameter * 1.55) : row.RouteDiameter;
@@ -689,7 +943,7 @@ public partial class MainWindow : Window
 
     private void DrawFeaturePoints(IReadOnlyList<RouteFeature> features, bool isSelected, ResultRow? owningRoute = null)
     {
-        var halfSize = isSelected ? 80 : 60;
+        var halfSize = isSelected ? 92.0 : 69.0;
         foreach (var feature in features)
         {
             var color = isSelected ? Colors.White : FeatureRoleColor(feature.Role);
@@ -805,6 +1059,41 @@ public partial class MainWindow : Window
         AddSphere(row.StartPoint, radius, Brushes.Red, _selectedEndpointVisuals);
         AddSphere(row.EndPoint, radius, Brushes.DodgerBlue, _selectedEndpointVisuals);
         DrawPath(new[] { row.StartPoint, row.EndPoint }, Brushes.Gray, Math.Max(row.RouteDiameter * 0.18, 28), _selectedEndpointVisuals);
+
+        // Highlight collision points in 3D using semi-transparent red spheres
+        if (row.CollisionPoints != null && row.CollisionPoints.Count > 0)
+        {
+            var collBrush = new SolidColorBrush(Color.FromArgb(160, 255, 0, 0)); // semi-transparent red
+            var collRadius = Math.Max(row.RouteDiameter * 1.5, 300); // larger than normal endpoints
+            foreach (var pt in row.CollisionPoints)
+            {
+                AddSphere(pt, collRadius, collBrush, _selectedEndpointVisuals);
+            }
+        }
+
+        // Highlight A* search fallback legs in 3D using semi-transparent thick orange segments & spheres
+        if (row.FallbackLegs != null && row.FallbackLegs.Count > 0)
+        {
+            var fallbackBrush = new SolidColorBrush(Color.FromArgb(180, 255, 128, 0)); // semi-transparent orange
+            var fallbackDiameter = Math.Max(row.RouteDiameter * 1.4, 200);
+            foreach (var leg in row.FallbackLegs)
+            {
+                DrawRoundedSegments(new[] { leg }, fallbackBrush, fallbackDiameter, _selectedEndpointVisuals, false, null);
+                AddSphere(leg.Start, fallbackDiameter * 0.8, fallbackBrush, _selectedEndpointVisuals);
+                AddSphere(leg.End, fallbackDiameter * 0.8, fallbackBrush, _selectedEndpointVisuals);
+            }
+        }
+
+        // Highlight all vertical bend (Z direction change) elbow points in 3D using semi-transparent purple spheres
+        if (row.VerticalBendPoints != null && row.VerticalBendPoints.Count > 0)
+        {
+            var bendBrush = new SolidColorBrush(Color.FromArgb(160, 255, 0, 255)); // semi-transparent magenta
+            var bendRadius = Math.Max(row.RouteDiameter * 1.1, 220);
+            foreach (var pt in row.VerticalBendPoints)
+            {
+                AddSphere(pt, bendRadius, bendBrush, _selectedEndpointVisuals);
+            }
+        }
     }
 
     private void GridStepDetails_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -847,6 +1136,82 @@ public partial class MainWindow : Window
         GridAnalysis.ItemsSource = row == null ? new List<AnalysisRow>() : row.AnalysisRows;
         GridStepDetails.ItemsSource = row == null ? new List<StepDetailRow>() : row.StepRows;
         GridSegmentDetails.ItemsSource = row == null ? new List<SegmentDetailRow>() : row.SegmentRows;
+        GridErrorList.ItemsSource = row == null ? new List<ErrorDetailRow>() : BuildErrorRows(row);
+    }
+
+    private static List<ErrorDetailRow> BuildErrorRows(ResultRow row)
+    {
+        var rows = new List<ErrorDetailRow>();
+        var index = 1;
+
+        if (row.CollisionPoints != null)
+        {
+            foreach (var pt in row.CollisionPoints)
+            {
+                rows.Add(new ErrorDetailRow(index++, "장애물 충돌", $"충돌 좌표: ({pt.X:F0}, {pt.Y:F0}, {pt.Z:F0})", pt));
+            }
+        }
+
+        if (row.FallbackLegs != null)
+        {
+            foreach (var leg in row.FallbackLegs)
+            {
+                rows.Add(new ErrorDetailRow(index++, "A* 탐색 실패", $"실패 구간: ({leg.Start.X:F0}, {leg.Start.Y:F0}, {leg.Start.Z:F0}) ➔ ({leg.End.X:F0}, {leg.End.Y:F0}, {leg.End.Z:F0})", leg));
+            }
+        }
+
+        if (row.VerticalBendPoints != null)
+        {
+            foreach (var pt in row.VerticalBendPoints)
+            {
+                rows.Add(new ErrorDetailRow(index++, "수직 꺾임 초과", $"수직 Bend 좌표: ({pt.X:F0}, {pt.Y:F0}, {pt.Z:F0})", pt));
+            }
+        }
+
+        return rows;
+    }
+
+    private void GridErrorList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var route = GridResults.SelectedItem as ResultRow;
+        var error = GridErrorList.SelectedItem as ErrorDetailRow;
+        HighlightErrorLocation(route, error);
+    }
+
+    private void HighlightErrorLocation(ResultRow? route, ErrorDetailRow? error)
+    {
+        ClearVisuals(_selectedStepVisuals);
+        if (route == null || error == null) return;
+
+        var highlightDiameter = Math.Max(route.RouteDiameter * 1.8, 300);
+        var highlightBrush = Brushes.Yellow;
+
+        if (error.GeometryData is Vec3 pt)
+        {
+            AddSphere(pt, highlightDiameter * 0.7, highlightBrush, _selectedStepVisuals);
+            LookAtPoint(pt);
+        }
+        else if (error.GeometryData is RouteSegment seg)
+        {
+            DrawRoundedSegments(new[] { seg }, highlightBrush, highlightDiameter, _selectedStepVisuals, false, null);
+            AddSphere(seg.Start, highlightDiameter * 0.5, highlightBrush, _selectedStepVisuals);
+            AddSphere(seg.End, highlightDiameter * 0.5, highlightBrush, _selectedStepVisuals);
+            
+            var mid = seg.Start + (seg.End - seg.Start) * 0.5;
+            LookAtPoint(mid);
+        }
+    }
+
+    private void LookAtPoint(Vec3 pt)
+    {
+        if (Viewport != null && Viewport.Camera is ProjectionCamera pc)
+        {
+            var dir = pc.LookDirection;
+            dir.Normalize();
+            var distance = 1500.0; // typical zoom distance
+            pc.Position = new Point3D(pt.X - dir.X * distance, pt.Y - dir.Y * distance, pt.Z - dir.Z * distance);
+            pc.LookDirection = new Vector3D(dir.X * distance, dir.Y * distance, dir.Z * distance);
+        }
     }
 
     private FeatureRouteInfo BuildFeatureWaypoints(RouteTask task, RubberBandOptions options)
@@ -872,23 +1237,76 @@ public partial class MainWindow : Window
             if (direct != null) return direct;
         }
 
-        return _scene.ExistingRoutePaths
-            .Where(x => string.IsNullOrWhiteSpace(task.Group) || string.Equals(NormalizeGroup(x.Group), NormalizeGroup(task.Group), StringComparison.OrdinalIgnoreCase))
-            .Where(x => string.IsNullOrWhiteSpace(task.Utility) || string.Equals(NormalizeGroup(x.Utility), NormalizeGroup(task.Utility), StringComparison.OrdinalIgnoreCase))
+        // 1. Strict match: must match both group and utility exactly
+        var exactMatch = _scene.ExistingRoutePaths
+            .Where(x => string.Equals(NormalizeGroup(x.Group), NormalizeGroup(task.Group), StringComparison.OrdinalIgnoreCase))
+            .Where(x => string.Equals(NormalizeGroup(x.Utility), NormalizeGroup(task.Utility), StringComparison.OrdinalIgnoreCase))
             .Where(x => x.Points.Count >= 2)
-            .Select(x => new { Path = x, Score = ExistingRouteMatchScore(task, x) })
+            .Select(x => new { Path = x, Score = ExistingRouteMatchScore(task, x, exactMetaMatch: true) })
             .OrderBy(x => x.Score)
-            .FirstOrDefault(x => x.Score < 8000)?.Path;
+            .FirstOrDefault(x => x.Score < 8000);
+
+        if (exactMatch != null) return exactMatch.Path;
+
+        // 2. Loose match fallback: relax group/utility checks but penalize mismatches
+        return _scene.ExistingRoutePaths
+            .Where(x => x.Points.Count >= 2)
+            .Select(x => new { Path = x, Score = ExistingRouteMatchScore(task, x, exactMetaMatch: false) })
+            .OrderBy(x => x.Score)
+            .FirstOrDefault(x => x.Score < 10000)?.Path;
     }
 
-    private static double ExistingRouteMatchScore(RouteTask task, ExistingRoutePath path)
+    private static double ExistingRouteMatchScore(RouteTask task, ExistingRoutePath path, bool exactMetaMatch)
     {
         if (path.Points.Count < 2) return double.MaxValue;
+
+        // Base distance gap between endpoints (minimum of forward or reverse)
         var forward = Distance(task.Start, path.Points[0]) + Distance(task.End, path.Points[^1]);
         var reverse = Distance(task.Start, path.Points[^1]) + Distance(task.End, path.Points[0]);
         var score = Math.Min(forward, reverse);
-        if (!string.IsNullOrWhiteSpace(task.SourceName) && !string.IsNullOrWhiteSpace(path.SourceName) && string.Equals(task.SourceName, path.SourceName, StringComparison.OrdinalIgnoreCase)) score -= 500;
-        if (!string.IsNullOrWhiteSpace(task.TargetName) && !string.IsNullOrWhiteSpace(path.TargetName) && string.Equals(task.TargetName, path.TargetName, StringComparison.OrdinalIgnoreCase)) score -= 500;
+
+        // Z-level (Elevation) Gap: penalize height difference (0.5 weight per mm)
+        var zGap = Math.Abs(task.Start.Z - path.Points[0].Z) + Math.Abs(task.End.Z - path.Points[^1].Z);
+        score += zGap * 0.5;
+
+        // Source/Target name match bonus
+        if (!string.IsNullOrWhiteSpace(task.SourceName) && !string.IsNullOrWhiteSpace(path.SourceName) && 
+            string.Equals(task.SourceName, path.SourceName, StringComparison.OrdinalIgnoreCase)) score -= 1000;
+        if (!string.IsNullOrWhiteSpace(task.TargetName) && !string.IsNullOrWhiteSpace(path.TargetName) && 
+            string.Equals(task.TargetName, path.TargetName, StringComparison.OrdinalIgnoreCase)) score -= 1000;
+
+        // Pipe Size (Diameter) match/difference penalty
+        if (task.DiameterMm > 0 && path.DiameterMm > 0)
+        {
+            var sizeDiff = Math.Abs(task.DiameterMm - path.DiameterMm);
+            if (sizeDiff < 1e-3)
+            {
+                score -= 300; // Bonus for exact diameter match
+            }
+            else
+            {
+                score += sizeDiff * 5.0; // Penalty for size difference
+            }
+        }
+
+        // If doing loose match fallback, penalize group/utility mismatches
+        if (!exactMetaMatch)
+        {
+            var taskGroup = NormalizeGroup(task.Group);
+            var pathGroup = NormalizeGroup(path.Group);
+            if (!string.Equals(taskGroup, pathGroup, StringComparison.OrdinalIgnoreCase))
+            {
+                score += 3000; // Heavy penalty for group mismatch
+            }
+
+            var taskUtil = NormalizeGroup(task.Utility);
+            var pathUtil = NormalizeGroup(path.Utility);
+            if (!string.Equals(taskUtil, pathUtil, StringComparison.OrdinalIgnoreCase))
+            {
+                score += 2000; // Medium penalty for utility mismatch
+            }
+        }
+
         return score;
     }
 
@@ -1061,21 +1479,56 @@ public partial class MainWindow : Window
         if (nonZero > 1) return "Rubber";
         return axis switch { 0 => prefix + "X", 1 => prefix + "Y", _ => prefix + "Z" };
     }
-    private static List<AnalysisRow> BuildAnalysisRows(TaskRow row, RubberBandResult result, FeatureRouteInfo featureInfo) => new()
+    private static List<AnalysisRow> BuildAnalysisRows(TaskRow row, RubberBandResult result, FeatureRouteInfo featureInfo)
     {
-        new AnalysisRow("상태", result.IsValid ? "성공" : "확인 필요"),
-        new AnalysisRow("유틸리티", row.UtilityLabel),
-        new AnalysisRow("시작PoC", row.SourceName),
-        new AnalysisRow("종단PoC", row.TargetName),
-        new AnalysisRow("기존경로 매칭", featureInfo.MatchMode),
-        new AnalysisRow("기존경로 GUID", featureInfo.RoutePathGuid ?? "-"),
-        new AnalysisRow("특징점 구성", FeatureRoleSummary(featureInfo.Waypoints)),
-        new AnalysisRow("특징점", featureInfo.Waypoints.Count.ToString(CultureInfo.InvariantCulture)),
-        new AnalysisRow("총 길이", $"{result.TotalLength:N0} mm"),
-        new AnalysisRow("수직 Bend", result.VerticalBends.ToString(CultureInfo.InvariantCulture)),
-        new AnalysisRow("세그먼트", result.FinalSegments.Count.ToString(CultureInfo.InvariantCulture)),
-        new AnalysisRow("검증", result.ValidationIssues.Count == 0 ? "이상 없음" : string.Join("; ", result.ValidationIssues))
-    };
+        var rows = new List<AnalysisRow>
+        {
+            new AnalysisRow("상태", result.IsValid ? "성공" : "확인 필요"),
+            new AnalysisRow("유틸리티", row.UtilityLabel),
+            new AnalysisRow("시작PoC", row.SourceName),
+            new AnalysisRow("종단PoC", row.TargetName),
+            new AnalysisRow("기존경로 매칭", featureInfo.MatchMode),
+            new AnalysisRow("기존경로 GUID", featureInfo.RoutePathGuid ?? "-"),
+            new AnalysisRow("특징점 구성", FeatureRoleSummary(featureInfo.Waypoints)),
+            new AnalysisRow("특징점", featureInfo.Waypoints.Count.ToString(CultureInfo.InvariantCulture)),
+            new AnalysisRow("총 길이", $"{result.TotalLength:N0} mm"),
+            new AnalysisRow("수직 Bend", result.VerticalBends.ToString(CultureInfo.InvariantCulture)),
+            new AnalysisRow("세그먼트", result.FinalSegments.Count.ToString(CultureInfo.InvariantCulture)),
+            new AnalysisRow("검증", result.ValidationIssues.Count == 0 ? "이상 없음" : string.Join("; ", result.ValidationIssues))
+        };
+
+        if (result.CollisionPoints.Count > 0)
+        {
+            rows.Add(new AnalysisRow("충돌 개수", $"{result.CollisionPoints.Count} 개"));
+            for (int i = 0; i < result.CollisionPoints.Count; i++)
+            {
+                var pt = result.CollisionPoints[i];
+                rows.Add(new AnalysisRow($"충돌점 #{i + 1}", $"({pt.X:F0}, {pt.Y:F0}, {pt.Z:F0})"));
+            }
+        }
+
+        if (result.FallbackLegs.Count > 0)
+        {
+            rows.Add(new AnalysisRow("A* 실패 구간 수", $"{result.FallbackLegs.Count} 개"));
+            for (int i = 0; i < result.FallbackLegs.Count; i++)
+            {
+                var leg = result.FallbackLegs[i];
+                rows.Add(new AnalysisRow($"실패구간 #{i + 1}", $"({leg.Start.X:F0}, {leg.Start.Y:F0}, {leg.Start.Z:F0}) ➔ ({leg.End.X:F0}, {leg.End.Y:F0}, {leg.End.Z:F0})"));
+            }
+        }
+
+        if (result.VerticalBendPoints.Count > 0)
+        {
+            rows.Add(new AnalysisRow("수직 Bend 위치 수", $"{result.VerticalBendPoints.Count} 개"));
+            for (int i = 0; i < result.VerticalBendPoints.Count; i++)
+            {
+                var pt = result.VerticalBendPoints[i];
+                rows.Add(new AnalysisRow($"수직 Bend #{i + 1}", $"({pt.X:F0}, {pt.Y:F0}, {pt.Z:F0})"));
+            }
+        }
+
+        return rows;
+    }
 
     private static string FeatureRoleSummary(IReadOnlyList<RouteFeature> features)
     {
@@ -1141,18 +1594,63 @@ public partial class MainWindow : Window
 
     private RubberBandOptions ReadOptions() => new()
     {
-        MaxVerticalBends = 5,
-        SafetyMargin = 50,
-        TrayWidth = 600,
-        TrayHeight = 100,
-        PipePitch = 100,
-        // One pipe per task by default — see RubberBandOptions.PipeCount for why forcing a
-        // multiplier here previously drew 3 near-duplicate lines per connection.
-        PipeCount = 1,
-        // Pipe bend radius = BendRadiusFactor × outer diameter. 3D is the common minimum for a
-        // smooth (non-kinking) pipe bend; raise this for processes that require a gentler bend.
-        BendRadiusFactor = 3.0
+        SafetyMargin = TxtSafetyMargin != null ? ReadDouble(TxtSafetyMargin.Text, 50.0) : 50.0,
+        TrayWidth = TxtTrayWidth != null ? ReadDouble(TxtTrayWidth.Text, 600.0) : 600.0,
+        TrayHeight = TxtTrayHeight != null ? ReadDouble(TxtTrayHeight.Text, 100.0) : 100.0,
+        PipePitch = TxtPipePitch != null ? ReadDouble(TxtPipePitch.Text, 100.0) : 100.0,
+        PipeCount = Math.Max(1, TxtPipeCount != null ? ReadInt(TxtPipeCount.Text, 1) : 1),
+        BendRadiusFactor = TxtBendRadiusFactor != null ? ReadDouble(TxtBendRadiusFactor.Text, 3.0) : 3.0,
+        MaxVerticalBends = TxtMaxVerticalBends != null ? ReadInt(TxtMaxVerticalBends.Text, 5) : 5,
+        SnapTolerance = TxtSnapTolerance != null ? ReadDouble(TxtSnapTolerance.Text, 100.0) : 100.0,
+        EnableDebugLog = ChkEnableDebugLog != null ? ChkEnableDebugLog.IsChecked == true : true
     };
+
+    private async Task ReRouteCurrentAsync()
+    {
+        if (_lastRoutedTaskRows == null || _lastRoutedTaskRows.Count == 0) return;
+        await RouteRowsAsync(_lastRoutedTaskRows, _lastRoutedScope);
+    }
+
+    private void TriggerReRoute()
+    {
+        if (_lastRoutedTaskRows == null || _lastRoutedTaskRows.Count == 0) return;
+
+        if (_settingChangeTimer == null)
+        {
+            _settingChangeTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(400)
+            };
+            _settingChangeTimer.Tick += async (s, e) =>
+            {
+                _settingChangeTimer.Stop();
+                await ReRouteCurrentAsync();
+            };
+        }
+
+        _settingChangeTimer.Stop();
+        _settingChangeTimer.Start();
+    }
+
+    private void SettingTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        TriggerReRoute();
+    }
+
+    private async void SettingTextBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            _settingChangeTimer?.Stop();
+            await ReRouteCurrentAsync();
+        }
+    }
+
+    private async void SettingTextBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        _settingChangeTimer?.Stop();
+        await ReRouteCurrentAsync();
+    }
 
     private async Task RunBusyAsync(string status, Func<Task> action)
     {
@@ -1184,7 +1682,7 @@ public partial class MainWindow : Window
 
     private void LayerToggle_Changed(object sender, RoutedEventArgs e) => ApplyLayerVisibility();
 
-    private void ChkUseNativeEngine_Changed(object sender, RoutedEventArgs e)
+    private async void ChkUseNativeEngine_Changed(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded) return;
         if (ChkUseNativeEngine.IsChecked == true && !NativeRubberBandEngine.IsAvailable)
@@ -1194,6 +1692,7 @@ public partial class MainWindow : Window
             return;
         }
         TxtStatus.Text = ChkUseNativeEngine.IsChecked == true ? "네이티브 C++ 엔진을 사용합니다." : "관리형(C#) 엔진을 사용합니다.";
+        await ReRouteCurrentAsync();
     }
 
     private void ApplyLayerVisibility()
@@ -1248,20 +1747,40 @@ public partial class MainWindow : Window
     }
 
     // Runs off the UI thread during routing: true if the rounded display path stays clear of obstacles.
-    private static bool IsRoundedPathClear(IReadOnlyList<RouteSegment> segments, double diameter, IReadOnlyList<Aabb> obstacles, RubberBandOptions options)
+    private static bool IsRoundedPathClear(RubberBandResult result, double diameter, IReadOnlyList<Aabb> obstacles, RubberBandOptions options)
     {
-        var points = RouteSegmentsToPolyline(segments);
-        var rounded = BuildRoundedBendPolyline(points, BendRadius(diameter, options.BendRadiusFactor));
-        var h = options.TrayWidth / 2.0 + options.SafetyMargin;
-        var v = options.TrayHeight / 2.0 + options.SafetyMargin;
-        foreach (var obs in obstacles)
+        var h = diameter / 2.0 + options.SafetyMargin;
+        var v = diameter / 2.0 + options.SafetyMargin;
+        var radius = BendRadius(diameter, options.BendRadiusFactor);
+
+        if (result.PipePaths.Count > 0)
         {
-            if (obs.IsPenetration) continue;
-            var expanded = obs.Expand(h, v);
-            for (var i = 0; i < rounded.Count - 1; i++)
-                if (SegmentIntersectsBox(rounded[i], rounded[i + 1], expanded)) return false;
+            foreach (var pipePoints in result.PipePaths)
+            {
+                var rounded = BuildRoundedBendPolyline(pipePoints, radius);
+                foreach (var obs in obstacles)
+                {
+                    if (obs.IsPenetration) continue;
+                    var expanded = obs.Expand(h, v);
+                    for (var i = 0; i < rounded.Count - 1; i++)
+                        if (SegmentIntersectsBox(rounded[i], rounded[i + 1], expanded)) return false;
+                }
+            }
+            return true;
         }
-        return true;
+        else
+        {
+            var points = RouteSegmentsToPolyline(result.FinalSegments);
+            var rounded = BuildRoundedBendPolyline(points, radius);
+            foreach (var obs in obstacles)
+            {
+                if (obs.IsPenetration) continue;
+                var expanded = obs.Expand(h, v);
+                for (var i = 0; i < rounded.Count - 1; i++)
+                    if (SegmentIntersectsBox(rounded[i], rounded[i + 1], expanded)) return false;
+            }
+            return true;
+        }
     }
 
     private static bool SegmentIntersectsBox(Vec3 a, Vec3 b, Aabb box)
@@ -1482,6 +2001,7 @@ public partial class MainWindow : Window
     private static bool GroupMatches(TaskRow row, string group) => string.IsNullOrWhiteSpace(group) || string.Equals(row.Group, group, StringComparison.OrdinalIgnoreCase);
     private static string FormatVec(Vec3 p) => $"({p.X:N0},{p.Y:N0},{p.Z:N0})";
     private static int ReadInt(string text, int fallback) => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+    private static double ReadDouble(string text, double fallback) => double.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : fallback;
     private static Point3D ToPoint3D(Vec3 p) => new(p.X, p.Y, p.Z);
 
     private sealed record TaskRow(int Index, RouteTask Task)
@@ -1523,16 +2043,21 @@ public partial class MainWindow : Window
         List<List<Vec3>> PipePaths,
         double ElapsedMs,
         RouteTask Task,
-        ExistingRoutePath? MatchedExistingRoute)
+        ExistingRoutePath? MatchedExistingRoute,
+        List<Vec3> CollisionPoints,
+        List<RouteSegment> FallbackLegs,
+        List<Vec3> VerticalBendPoints)
     {
         public string LengthText => $"{LengthMm:N0}";
         public string ElapsedText => $"{ElapsedMs:N0}";
     }
 
     private sealed record AnalysisRow(string Name, string Value);
+    private sealed record ErrorDetailRow(int Index, string ErrorType, string Description, object GeometryData);
     // Carries which route a clicked feature-point marker belongs to, so a 3D click can show both
     // the feature's own properties and select/highlight its owning route.
     private sealed record FeaturePointInfo(RouteFeature Feature, ResultRow Route);
+    private sealed record TaskFeatureInfo(RouteFeature Feature, TaskRow Task);
     private sealed record StepDetailRow(int Index, string SegmentType, string Start, string End, string Direction, double LengthMm, string Reason)
     {
         public string LengthText => $"{LengthMm:N0}";

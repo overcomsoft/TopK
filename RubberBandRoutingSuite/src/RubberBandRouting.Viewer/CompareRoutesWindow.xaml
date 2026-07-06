@@ -23,7 +23,10 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Text="경로 목록 (선택하여 비교)" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+                <StackPanel Grid.Row="0" Margin="0,0,0,6">
+                    <TextBlock Text="경로 목록 (선택하여 비교)" Foreground="White" FontWeight="Bold" Margin="0,0,0,4"/>
+                    <CheckBox x:Name="ChkSyncCamera" Content="카메라 뷰포트 동기화" Foreground="#7CD4FF" IsChecked="True" VerticalAlignment="Center" Margin="0,4,0,4" Checked="ChkSyncCamera_Checked" Unchecked="ChkSyncCamera_Unchecked"/>
+                </StackPanel>
                 <DataGrid x:Name="GridEntries" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single"
                           SelectionChanged="GridEntries_SelectionChanged"
                           Background="#253349" Foreground="White" BorderBrush="#40516B" GridLinesVisibility="Horizontal"
@@ -69,7 +72,7 @@
                             <ColumnDefinition Width="5"/>
                             <ColumnDefinition Width="330" MinWidth="220"/>
                         </Grid.ColumnDefinitions>
-                        <helix:HelixViewport3D x:Name="ViewportExisting" Grid.Column="0" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False">
+                        <helix:HelixViewport3D x:Name="ViewportExisting" Grid.Column="0" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False" CameraChanged="ViewportExisting_CameraChanged">
                             <helix:HelixViewport3D.DefaultCamera>
                                 <PerspectiveCamera Position="8000,8000,6000" LookDirection="-8000,-8000,-6000" UpDirection="0,0,1" FieldOfView="45"/>
                             </helix:HelixViewport3D.DefaultCamera>
@@ -109,7 +112,7 @@
                             <ColumnDefinition Width="5"/>
                             <ColumnDefinition Width="330" MinWidth="220"/>
                         </Grid.ColumnDefinitions>
-                        <helix:HelixViewport3D x:Name="ViewportAuto" Grid.Column="0" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False">
+                        <helix:HelixViewport3D x:Name="ViewportAuto" Grid.Column="0" Background="#0B1020" ShowCoordinateSystem="True" ZoomExtentsWhenLoaded="False" CameraChanged="ViewportAuto_CameraChanged">
                             <helix:HelixViewport3D.DefaultCamera>
                                 <PerspectiveCamera Position="8000,8000,6000" LookDirection="-8000,-8000,-6000" UpDirection="0,0,1" FieldOfView="45"/>
                             </helix:HelixViewport3D.DefaultCamera>

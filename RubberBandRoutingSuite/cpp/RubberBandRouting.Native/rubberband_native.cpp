@@ -38,7 +38,7 @@ struct Engine {
     // pipe_count defaults to 1: no per-task data source indicates how many physical pipes a
     // given connection actually bundles, so forcing a multiplier here would just draw N
     // near-duplicate lines for every route. Callers with real bundling data set it explicitly.
-    RbConfig cfg{5, 50.0, 600.0, 100.0, 100.0, 1, 100.0};
+    RbConfig cfg{5, 50.0, 600.0, 100.0, 100.0, 1, 100.0, 50.0};
     std::vector<RbAabb> obstacles;
     std::vector<RbVec3> features;
     std::vector<int> featureRequired;
@@ -551,9 +551,40 @@ int count_vertical_bends(const std::vector<Segment>& segs) {
     return count;
 }
 
-bool has_residual_collision(const std::vector<Segment>& segs, const std::vector<RbAabb>& obstacles, const RbConfig& cfg) {
-    for (const auto& s : segs)
-        if (is_blocked(s, obstacles, cfg)) return true;
+bool segment_hits_pipe(const Segment& seg, const RbAabb& obs, double radius, double safety_margin) {
+    RbAabb e = expand_aabb(obs, radius + safety_margin, radius + safety_margin);
+    RbVec3 delta = sub(seg.b, seg.a);
+    double tMin = 0.0, tMax = 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        double start = coord(seg.a, axis);
+        double dir = coord(delta, axis);
+        double lo = aabb_min(e, axis), hi = aabb_max(e, axis);
+        if (std::abs(dir) <= kEpsilon) {
+            if (start < lo || start > hi) return false;
+            continue;
+        }
+        double inv = 1.0 / dir;
+        double t0 = (lo - start) * inv;
+        double t1 = (hi - start) * inv;
+        if (t0 > t1) std::swap(t0, t1);
+        tMin = std::max(tMin, t0);
+        tMax = std::min(tMax, t1);
+        if (tMin > tMax) return false;
+    }
+    return true;
+}
+
+bool has_residual_collision(const std::vector<std::vector<RbVec3>>& pipes, const std::vector<RbAabb>& obstacles, const RbConfig& cfg) {
+    double radius = cfg.pipe_diameter / 2.0;
+    for (const auto& pipe : pipes) {
+        for (size_t i = 0; i + 1 < pipe.size(); ++i) {
+            Segment s{pipe[i], pipe[i + 1]};
+            for (const auto& o : obstacles) {
+                if (o.is_penetration) continue;
+                if (segment_hits_pipe(s, o, radius, cfg.safety_margin)) return true;
+            }
+        }
+    }
     return false;
 }
 
@@ -659,7 +690,7 @@ extern "C" RB_API int rb_execute(RbEngineHandle engine, RbVec3 start, RbVec3 end
     distribute(*e);
 
     e->verticalBends = count_vertical_bends(e->segments);
-    bool residual = has_residual_collision(e->segments, e->obstacles, e->cfg);
+    bool residual = has_residual_collision(e->pipes, e->obstacles, e->cfg);
     e->valid = !residual && e->fallbackCount == 0 && e->verticalBends <= e->cfg.max_vertical_bends;
     e->segmentReasons = classify_segment_reasons(e->segments, e->features, e->obstacles, e->cfg);
     return 0;
