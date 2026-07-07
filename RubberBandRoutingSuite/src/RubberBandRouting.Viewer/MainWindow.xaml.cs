@@ -1084,8 +1084,8 @@ public partial class MainWindow : Window
             }
         }
 
-        // Highlight all vertical bend (Z direction change) elbow points in 3D using semi-transparent purple spheres
-        if (row.VerticalBendPoints != null && row.VerticalBendPoints.Count > 0)
+        // Highlight all vertical bend (Z direction change) elbow points in 3D using semi-transparent purple spheres when limit exceeded
+        if (row.VerticalBendPoints != null && row.VerticalBendPoints.Count > 0 && row.FailureReason.Contains("vertical_bends_exceeded"))
         {
             var bendBrush = new SolidColorBrush(Color.FromArgb(160, 255, 0, 255)); // semi-transparent magenta
             var bendRadius = Math.Max(row.RouteDiameter * 1.1, 220);
@@ -1144,7 +1144,11 @@ public partial class MainWindow : Window
         var rows = new List<ErrorDetailRow>();
         var index = 1;
 
-        if (row.CollisionPoints != null)
+        var hasCollision = row.FailureReason.Contains("residual_collision");
+        var hasFallback = row.FailureReason.Contains("astar_fallback_used");
+        var hasBendExceeded = row.FailureReason.Contains("vertical_bends_exceeded");
+
+        if (row.CollisionPoints != null && hasCollision)
         {
             foreach (var pt in row.CollisionPoints)
             {
@@ -1152,7 +1156,7 @@ public partial class MainWindow : Window
             }
         }
 
-        if (row.FallbackLegs != null)
+        if (row.FallbackLegs != null && hasFallback)
         {
             foreach (var leg in row.FallbackLegs)
             {
@@ -1160,7 +1164,7 @@ public partial class MainWindow : Window
             }
         }
 
-        if (row.VerticalBendPoints != null)
+        if (row.VerticalBendPoints != null && hasBendExceeded)
         {
             foreach (var pt in row.VerticalBendPoints)
             {
@@ -1578,8 +1582,8 @@ public partial class MainWindow : Window
         camera.Position = position;
         camera.LookDirection = target - position;
         camera.UpDirection = new Vector3D(0, 0, 1);
-        camera.NearPlaneDistance = Math.Max(1, distance - radius * 3.0);
-        camera.FarPlaneDistance = distance + radius * 5.0;
+        camera.NearPlaneDistance = 10.0;
+        camera.FarPlaneDistance = 10000000.0;
         Viewport.InvalidateVisual();
     }
 
@@ -1600,7 +1604,7 @@ public partial class MainWindow : Window
         PipePitch = TxtPipePitch != null ? ReadDouble(TxtPipePitch.Text, 100.0) : 100.0,
         PipeCount = Math.Max(1, TxtPipeCount != null ? ReadInt(TxtPipeCount.Text, 1) : 1),
         BendRadiusFactor = TxtBendRadiusFactor != null ? ReadDouble(TxtBendRadiusFactor.Text, 3.0) : 3.0,
-        MaxVerticalBends = TxtMaxVerticalBends != null ? ReadInt(TxtMaxVerticalBends.Text, 5) : 5,
+        MaxVerticalBends = TxtMaxVerticalBends != null ? ReadInt(TxtMaxVerticalBends.Text, 99) : 99,
         SnapTolerance = TxtSnapTolerance != null ? ReadDouble(TxtSnapTolerance.Text, 100.0) : 100.0,
         EnableDebugLog = ChkEnableDebugLog != null ? ChkEnableDebugLog.IsChecked == true : true
     };

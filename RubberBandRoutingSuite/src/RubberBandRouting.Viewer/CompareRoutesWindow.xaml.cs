@@ -220,8 +220,8 @@ public partial class CompareRoutesWindow : Window
         camera.Position = position;
         camera.LookDirection = center - position;
         camera.UpDirection = new Vector3D(0, 0, 1);
-        camera.NearPlaneDistance = Math.Max(1, distance - radius * 3.0);
-        camera.FarPlaneDistance = distance + radius * 5.0;
+        camera.NearPlaneDistance = 10.0;
+        camera.FarPlaneDistance = 10000000.0;
     }
 
     private void GridEntries_SelectionChanged(object sender, SelectionChangedEventArgs e)

@@ -39,7 +39,7 @@ public sealed record RouteSegment(Vec3 Start, Vec3 End)
 
 public sealed class RubberBandOptions
 {
-    public int MaxVerticalBends { get; init; } = 5;
+    public int MaxVerticalBends { get; init; } = 99;
     public double SafetyMargin { get; init; } = 50.0;
     public double TrayWidth { get; init; } = 600.0;
     public double TrayHeight { get; init; } = 100.0;

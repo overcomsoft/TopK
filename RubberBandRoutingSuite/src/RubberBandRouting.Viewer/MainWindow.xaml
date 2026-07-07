@@ -126,7 +126,7 @@
                                 <!-- Row 3 -->
                                 <StackPanel Grid.Row="3" Grid.Column="0" Margin="0,2">
                                     <TextBlock Text="최대 수직 꺾임" Foreground="#DDE7F5" FontSize="11" Margin="0,0,0,2"/>
-                                    <TextBox x:Name="TxtMaxVerticalBends" Text="5" Height="22" VerticalContentAlignment="Center" TextChanged="SettingTextBox_TextChanged" LostFocus="SettingTextBox_LostFocus" KeyDown="SettingTextBox_KeyDown"/>
+                                    <TextBox x:Name="TxtMaxVerticalBends" Text="99" Height="22" VerticalContentAlignment="Center" TextChanged="SettingTextBox_TextChanged" LostFocus="SettingTextBox_LostFocus" KeyDown="SettingTextBox_KeyDown"/>
                                 </StackPanel>
                                 <StackPanel Grid.Row="3" Grid.Column="2" Margin="0,2">
                                     <TextBlock Text="허용 오차(mm)" Foreground="#DDE7F5" FontSize="11" Margin="0,0,0,2"/>
@@ -247,6 +247,7 @@
                             <DataGridTextColumn Header="시작PoC" Binding="{Binding StartPoC}" Width="82"/>
                             <DataGridTextColumn Header="종단PoC" Binding="{Binding EndPoC}" Width="82"/>
                             <DataGridTextColumn Header="길이" Binding="{Binding LengthText}" Width="70"/>
+                            <DataGridTextColumn Header="꺽임수량" Binding="{Binding VerticalBends}" Width="70"/>
                             <DataGridTextColumn Header="라우팅시간(ms)" Binding="{Binding ElapsedText}" Width="96"/>
                         </DataGrid.Columns>
                     </DataGrid>

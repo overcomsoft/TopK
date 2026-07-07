@@ -431,4 +431,20 @@ dotnet build .\RubberBandRoutingSuite\RubberBandRoutingSuite.sln -c Debug --nolo
   - **데이터 추출 바인딩**: [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs)에 `ErrorDetailRow` 레코드를 추가하고, 선택된 배관 결과의 `CollisionPoints`, `FallbackLegs`, `VerticalBendPoints` 정보를 파싱하여 "장애물 충돌", "A* 탐색 실패", "수직 꺾임 초과" 행 데이터를 실시간 빌드해 바인딩합니다.
   - **클릭 피킹 카메라 줌 & 밝은 노란색 3D 하이라이트**: 그리드에서 임의의 오류 행을 선택 시 `GridErrorList_SelectionChanged` 이벤트가 트리거되어, 선택된 간섭 꼭짓점 또는 실패 구간 세그먼트를 3D 뷰포트 내에 **밝은 노란색(Yellow) 굵은 실선과 구체**로 하이라이트 렌더링하고, **카메라 시점(`pc.Position` 및 `pc.LookDirection`)을 해당 기하 구조체의 중심 좌표로 자동 부드럽게 줌인 포커싱**하여 사용성을 극대화했습니다.
 
+### 10.12 경로결과 그리드에 꺽임수량 열 추가 및 수직 꺽임 최대 수량 99개 기본값 상향
+
+- **개요**: 결과 경로 목록에서 각 배관의 수직 방향 꺾임 횟수를 빠르게 모니터링할 수 있도록 제공하고, 엔진 단에서 수직 꺾임 발생 시 과도한 차단 에러를 예방하기 위해 한도 기본값을 `99`개로 변경하였습니다.
+- **구현**:
+  - **꺽임수량 컬럼 추가**: [MainWindow.xaml](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml)의 우측 상단 결과 DataGrid(`GridResults`) 컬럼 구성에 `길이` 뒤에 `꺽임수량` 컬럼(`<DataGridTextColumn Header="꺽임수량" Binding="{Binding VerticalBends}" Width="70"/>`)을 신설 연동하였습니다.
+  - **최대 꺽임 한도 상향 (99개)**: [Models.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/Models.cs)의 `MaxVerticalBends` 기본 프로퍼티를 `5`에서 `99`로 수정하였습니다. 또한 사이드바의 설정 입력창(`TxtMaxVerticalBends`의 default `Text="99"`) 및 `MainWindow.xaml.cs`의 `ReadOptions()`의 대체용 기본 fallback 값 또한 `99`로 통일 상향 갱신하였습니다.
+
+### 10.13 카메라 배관 초정밀 근접 시 렌더링 누출 해결 (Near/Far clipping plane 조정)
+
+- **개요**: 사용자가 3D 뷰포트 상에서 특정 배관의 상세 관통 부위나 엘보 단면을 밀착하여(초근접) 살펴볼 때, 카메라의 전면/후면 자름 평면(Near/Far Clipping Planes) 설정 한계로 인해 배관 기하 구조가 구멍 뚫린 것처럼 잘려나가던(Clipping) 현상을 해결하였습니다.
+- **구현**:
+  - **안전 근접 거리 설정**: [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs) 및 [CompareRoutesWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/CompareRoutesWindow.xaml.cs)에서 카메라 자동 포커싱(Zoom-to-Fit) 연산 직후 주입되던 동적 NearPlane 값을 상수 스펙인 `NearPlaneDistance = 10.0` (10mm 이내만 잘림)으로 통일 수정하였습니다.
+  - **최대 가시 렌더 범위 확장**: FarPlane 값을 충분한 가시 깊이를 보장하는 `FarPlaneDistance = 10000000.0` (10km)으로 확장 지정하여, 렌더 타겟에 밀착하거나 뒤로 멀리 물러났을 때 어떠한 상황에서도 렌더링이 유실되지 않도록 가시 성능의 안정성을 완벽히 확보하였습니다.
+
+
+
 
