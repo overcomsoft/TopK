@@ -111,6 +111,47 @@ public sealed class ManagedRubberBandEngine : IRubberBandEngine
 
         if ((points[^1] - end).Length > tolerance) points.Add(end);
         else points[^1] = end;
+
+        // Coordinate alignment calibration pass to eliminate doglegs/staircases and enable straight vertical/horizontal connections
+        if (points.Count > 2)
+        {
+            double alignThresh = Math.Max(300.0, tolerance);
+
+            // Backward pass: snap intermediate points to align with the next point (including fixed end)
+            for (int i = points.Count - 2; i >= 1; i--)
+            {
+                var current = points[i];
+                var next = points[i + 1];
+
+                var x = current.X;
+                var y = current.Y;
+                var z = current.Z;
+
+                if (Math.Abs(x - next.X) < alignThresh) x = next.X;
+                if (Math.Abs(y - next.Y) < alignThresh) y = next.Y;
+                if (Math.Abs(z - next.Z) < alignThresh) z = next.Z;
+
+                points[i] = new Vec3(x, y, z);
+            }
+
+            // Forward pass: snap intermediate points to align with the previous point (including fixed start)
+            for (int i = 1; i <= points.Count - 2; i++)
+            {
+                var current = points[i];
+                var prev = points[i - 1];
+
+                var x = current.X;
+                var y = current.Y;
+                var z = current.Z;
+
+                if (Math.Abs(x - prev.X) < alignThresh) x = prev.X;
+                if (Math.Abs(y - prev.Y) < alignThresh) y = prev.Y;
+                if (Math.Abs(z - prev.Z) < alignThresh) z = prev.Z;
+
+                points[i] = new Vec3(x, y, z);
+            }
+        }
+
         return points;
     }
 

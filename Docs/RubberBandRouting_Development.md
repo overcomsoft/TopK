@@ -445,6 +445,16 @@ dotnet build .\RubberBandRoutingSuite\RubberBandRoutingSuite.sln -c Debug --nolo
   - **안전 근접 거리 설정**: [MainWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/MainWindow.xaml.cs) 및 [CompareRoutesWindow.xaml.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Viewer/CompareRoutesWindow.xaml.cs)에서 카메라 자동 포커싱(Zoom-to-Fit) 연산 직후 주입되던 동적 NearPlane 값을 상수 스펙인 `NearPlaneDistance = 10.0` (10mm 이내만 잘림)으로 통일 수정하였습니다.
   - **최대 가시 렌더 범위 확장**: FarPlane 값을 충분한 가시 깊이를 보장하는 `FarPlaneDistance = 10000000.0` (10km)으로 확장 지정하여, 렌더 타겟에 밀착하거나 뒤로 멀리 물러났을 때 어떠한 상황에서도 렌더링이 유실되지 않도록 가시 성능의 안정성을 완벽히 확보하였습니다.
 
+### 10.14 경유지 좌표 정렬 보정 (Two-Pass Coordinate Alignment) 적용으로 수직/수평 매끄러운 꺾임 구현
+
+- **개요**: 기존 설계의 경유 특징점 좌표들의 X, Y, Z 값이 미세하게 정렬되지 않아 라우팅 시 불필요한 잔꺾임(Doglegs) 및 사선 배관이 강제되던 문제를 해결하기 위해, 라우팅 이전 특징점들의 미세 오차 좌표들을 일직선상으로 정렬해 주는 양방향 좌표 보정 알고리즘을 장착하였습니다.
+- **구현**:
+  - **양방향 좌표 정렬 패스**: [ManagedRubberBandEngine.cs](file:///d:/DINNO/DEV/AI-AutoRouting/TopKGen/RubberBandRoutingSuite/src/RubberBandRouting.Engine/ManagedRubberBandEngine.cs)의 `BuildSnappedPointList` 내에 양방향 좌표 스냅 정렬 로직을 작성하였습니다.
+  - **역방향 패스 (Backward Pass)**: 고정 종단점(`end`)을 시작으로, 300mm 이내의 거리 오차(혹은 UI에서 수정한 오차범위 이내)를 가진 이전 경유지들의 X, Y, Z 좌표를 완벽하게 정렬하여 스냅합니다.
+  - **정방향 패스 (Forward Pass)**: 고정 시작점(`start`)을 기준으로 정순으로 정렬 정합을 맞춥니다.
+  - **효과**: 경유 특징점 뼈대들의 미세 오차가 수직/수평선상에 완전히 정합 스냅됨에 따라, 사선이나 자잘한 계단식 도그레그 현상 없이 **완벽하게 정렬된 수직/수평 직선과 부드러운 엘보만으로 깔끔하게 매끄러운 노선이 생성**되도록 보완하였습니다.
+
+
 
 
 
