@@ -1,6 +1,22 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# ==============================================================================
+# [실행 명령어 및 도구 안내]
+# 본 스크립트는 기존 설계 데이터로부터 평행하게 설치된 다발배관(Bundle) 그룹패턴을 
+# 세그먼트 레벨 스캔 알고리즘을 통해 탐지하고 데이터베이스에 적재하는 도구입니다.
+# 추가로 탐지된 다발배관의 3D 공간 기하 정보를 PNG 이미지 파일로 저장할 수 있습니다.
+#
+# 1. 데이터베이스 스키마 및 인덱스 생성:
+#    > python Tools/DesignPatternAnalyzer.py --password dinno create-schema
+#
+# 2. 다발배관 패턴 분석 및 3D 렌더링 이미지 내보내기 (DB 적재 없음):
+#    > python Tools/DesignPatternAnalyzer.py --password dinno extract --dry-run --image-out "data/output/images"
+#
+# 3. 스키마 생성 및 패턴 분석 + DB 적재 + 3D 이미지 내보내기 일괄 실행:
+#    > python Tools/DesignPatternAnalyzer.py --password dinno run-all --image-out "data/output/images"
+# ==============================================================================
+
 import sys
 import os
 import math
@@ -76,7 +92,8 @@ def fallback_schema_sql(with_vector: bool) -> str:
 DROP TABLE IF EXISTS "TB_ROUTE_GROUP_PATTERN" CASCADE;
 CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
     "GROUP_ID" text PRIMARY KEY,
-    "TAG_GROUP_NM" text NOT NULL,
+    "EQUIPMENT_TAG" text NOT NULL,
+    "UTILITY_GROUP" text NOT NULL,
     "UTILITY" text NOT NULL,
     "N_MEMBERS" integer NOT NULL,
     "AVG_SIMILARITY" double precision NOT NULL,
@@ -89,11 +106,11 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
     "SECTION_BOUNDS" jsonb,
     {vector_col}
     "FEAT_JSON" jsonb,
-    "GEOM_3D" geometry(MultiPolygonZ, 0),
+    "GEOM_3D" geometry(MultiLineStringZ, 0),
     "CREATED_AT" timestamp without time zone DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS "IX_TRGP_KEY"
-ON "TB_ROUTE_GROUP_PATTERN" ("TAG_GROUP_NM", "UTILITY");
+ON "TB_ROUTE_GROUP_PATTERN" ("EQUIPMENT_TAG", "UTILITY_GROUP", "UTILITY");
 {vector_idx}
 CREATE INDEX IF NOT EXISTS "IX_TRGP_GEOM"
 ON "TB_ROUTE_GROUP_PATTERN" USING gist("GEOM_3D");
@@ -102,45 +119,26 @@ ON "TB_ROUTE_GROUP_PATTERN" USING gist("GEOM_3D");
 
 # --- Geometry & Math Helpers ---
 
-def section_bounds_to_wkt_multipolygonz(bounds):
+def bundle_routes_to_wkt_multilinestringz(member_routes: list[dict]) -> str:
     """
-    SECTION_BOUNDS 내의 각 구간 AABB [min, max] 좌표를 6개의 3D 사각 패치 폴리곤 면으로 구성하고,
-    이를 PostGIS가 해독할 수 있는 단일 MULTIPOLYGON Z (...) WKT 문자열로 변환합니다.
+    그룹 내에 속한 각 멤버 배관의 실제 3D Polyline 좌표점 목록을
+    PostGIS 공간 연산이 가능한 MULTILINESTRING Z WKT 문자열로 변환합니다.
     """
-    if not bounds:
+    if not member_routes:
         return None
         
-    polygons = []
-    for b in bounds:
-        if 'min' not in b or 'max' not in b:
+    lines = []
+    for r in member_routes:
+        pts = r.get('points', [])
+        if len(pts) < 2:
             continue
-        minx, miny, minz = b['min']
-        maxx, maxy, maxz = b['max']
+        pts_str = ", ".join(f"{float(pt[0]):.9g} {float(pt[1]):.9g} {float(pt[2]):.9g}" for pt in pts)
+        lines.append(f"({pts_str})")
         
-        # 6개 면 정의
-        faces = [
-            # Bottom (Z = minz)
-            [(minx, miny, minz), (maxx, miny, minz), (maxx, maxy, minz), (minx, maxy, minz), (minx, miny, minz)],
-            # Top (Z = maxz)
-            [(minx, miny, maxz), (minx, maxy, maxz), (maxx, maxy, maxz), (maxx, miny, maxz), (minx, miny, maxz)],
-            # Front (Y = miny)
-            [(minx, miny, minz), (minx, miny, maxz), (maxx, miny, maxz), (maxx, miny, minz), (minx, miny, minz)],
-            # Back (Y = maxy)
-            [(minx, maxy, minz), (maxx, maxy, minz), (maxx, maxy, maxz), (minx, maxy, maxz), (minx, maxy, minz)],
-            # Left (X = minx)
-            [(minx, miny, minz), (minx, maxy, minz), (minx, maxy, maxz), (minx, miny, maxz), (minx, miny, minz)],
-            # Right (X = maxx)
-            [(maxx, miny, minz), (maxx, miny, maxz), (maxx, maxy, maxz), (maxx, maxy, minz), (maxx, miny, minz)]
-        ]
-        
-        for f in faces:
-            coords_str = ", ".join(f"{pt[0]} {pt[1]} {pt[2]}" for pt in f)
-            polygons.append(f"(({coords_str}))")
-            
-    if not polygons:
+    if not lines:
         return None
         
-    return f"MULTIPOLYGON Z ({', '.join(polygons)})"
+    return f"MULTILINESTRING Z ({', '.join(lines)})"
 
 
 def dist(a, b) -> float:
@@ -364,6 +362,91 @@ class UnionFind:
                     self.rank[root_y] += 1
 
 
+def extract_orthogonal_segments(points, tol=ARROW_TOL):
+    segments = []
+    for a, b in zip(points, points[1:]):
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        dz = b[2] - a[2]
+        L = math.sqrt(dx**2 + dy**2 + dz**2)
+        if L < 1.0:  # Ignore sub-millimeter segments
+            continue
+        ux, uy, uz = dx/L, dy/L, dz/L
+        
+        if abs(uz) >= tol:
+            direction = 'Z'
+            mx = (a[0] + b[0]) / 2.0
+            my = (a[1] + b[1]) / 2.0
+            p_from = (mx, my, a[2])
+            p_to = (mx, my, b[2])
+        elif abs(ux) >= tol:
+            direction = 'X'
+            my = (a[1] + b[1]) / 2.0
+            mz = (a[2] + b[2]) / 2.0
+            p_from = (a[0], my, mz)
+            p_to = (b[0], my, mz)
+        elif abs(uy) >= tol:
+            direction = 'Y'
+            mx = (a[0] + b[0]) / 2.0
+            mz = (a[2] + b[2]) / 2.0
+            p_from = (mx, a[1], mz)
+            p_to = (mx, b[1], mz)
+        else:
+            direction = 'D'
+            p_from = a
+            p_to = b
+            
+        segments.append({
+            'from': p_from,
+            'to': p_to,
+            'dir': direction,
+            'len': L,
+            'vector': (dx, dy, dz),
+            'unit': (ux, uy, uz)
+        })
+    return segments
+
+
+def check_parallel_overlap(s1, s2, max_pitch=800.0, min_overlap=100.0):
+    if s1['dir'] != s2['dir'] or s1['dir'] == 'D':
+        return None, 0.0
+        
+    d = s1['dir']
+    p1_from, p1_to = s1['from'], s1['to']
+    p2_from, p2_to = s2['from'], s2['to']
+    
+    if d == 'X':
+        y1, z1 = p1_from[1], p1_from[2]
+        y2, z2 = p2_from[1], p2_from[2]
+        pitch = math.sqrt((y1 - y2)**2 + (z1 - z2)**2)
+        min1, max1 = min(p1_from[0], p1_to[0]), max(p1_from[0], p1_to[0])
+        min2, max2 = min(p2_from[0], p2_to[0]), max(p2_from[0], p2_to[0])
+    elif d == 'Y':
+        x1, z1 = p1_from[0], p1_from[2]
+        x2, z2 = p2_from[0], p2_from[2]
+        pitch = math.sqrt((x1 - x2)**2 + (z1 - z2)**2)
+        min1, max1 = min(p1_from[1], p1_to[1]), max(p1_from[1], p1_to[1])
+        min2, max2 = min(p2_from[1], p2_to[1]), max(p2_from[1], p2_to[1])
+    else:  # 'Z'
+        x1, y1 = p1_from[0], p1_from[1]
+        x2, y2 = p2_from[0], p2_from[1]
+        pitch = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+        min1, max1 = min(p1_from[2], p1_to[2]), max(p1_from[2], p1_to[2])
+        min2, max2 = min(p2_from[2], p2_to[2]), max(p2_from[2], p2_to[2])
+        
+    if pitch > max_pitch:
+        return None, 0.0
+        
+    overlap_min = max(min1, min2)
+    overlap_max = min(max1, max2)
+    overlap_len = overlap_max - overlap_min
+    
+    if overlap_len < min_overlap:
+        return None, 0.0
+        
+    return pitch, overlap_len
+
+
 def get_median(values):
     if not values:
         return 0
@@ -431,11 +514,14 @@ def extract_pipe_feature(guid, points, row_meta) -> dict:
         # Fallback to dominant bbox horizontal extent
         trunk_axis = 0 if extent[0] >= extent[1] else 1
         
+    ortho_segs = extract_orthogonal_segments(points)
+        
     return {
         'guid': guid,
         'points': points,
         'eq_tag': row_meta['eq_tag'],
         'utility': row_meta['utility'],
+        'utility_group': row_meta['utility_group'],
         'dir_runs': d_runs,
         'arrow_code': arr_code,
         'n_ortho_bends': n_bends,
@@ -445,6 +531,7 @@ def extract_pipe_feature(guid, points, row_meta) -> dict:
         'extent': extent,
         'centroid': centroid,
         'trunk_axis': trunk_axis,
+        'ortho_segs': ortho_segs,
     }
 
 
@@ -531,41 +618,12 @@ def load_route_data_bulk(conn, eq_tags=None) -> list[dict]:
     return routes
 
 
-def analyze_patterns(conn, dry_run=False) -> list[dict]:
-    # 1. Fetch space groups
-    print("Loading space groups from TB_SPACE_GROUP_INFO...")
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute('SELECT "TAG_GROUP_ID", "TAG_GROUP_NM", "EQUIPMENT_TAG_LIST" FROM "TB_SPACE_GROUP_INFO"')
-        space_groups = cur.fetchall()
-    print(f"Loaded {len(space_groups)} space groups.")
+def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
+    # 1. Load all routes from DB in bulk
+    all_routes = load_route_data_bulk(conn, None)
     
-    # 2. Map equipment tags to group names
-    eq_to_groups = defaultdict(list)
-    all_eq_tags = set()
-    for sg in space_groups:
-        tag_nm = sg['TAG_GROUP_NM']
-        eq_tags_str = sg['EQUIPMENT_TAG_LIST']
-        try:
-            eq_tags = json.loads(eq_tags_str) if eq_tags_str else []
-        except:
-            eq_tags = [eq_tags_str] if eq_tags_str else []
-        
-        for eq_tag in eq_tags:
-            eq_to_groups[eq_tag].append(tag_nm)
-            all_eq_tags.add(eq_tag)
-            
-    # 3. Load all routes that belong to these equipment tags
-    all_routes = load_route_data_bulk(conn, all_eq_tags)
-    
-    # Group routes by space group name
-    group_routes = defaultdict(list)
-    for r in all_routes:
-        eq_tag = r['meta']['eq_tag']
-        for g_nm in eq_to_groups.get(eq_tag, []):
-            group_routes[g_nm].append(r)
-            
-    # Process features for each route (Phase 1)
-    print("\nPhase 1: Extracting features for all paths...")
+    # 2. Extract features for all paths (결과를 딕셔너리로 수집하여 GUID 매핑 지원)
+    print("\nExtracting features for all paths...")
     processed_routes = {}
     for r in all_routes:
         feat = extract_pipe_feature(r['guid'], r['points'], r['meta'])
@@ -573,278 +631,216 @@ def analyze_patterns(conn, dry_run=False) -> list[dict]:
             processed_routes[r['guid']] = feat
     print(f"Features extracted for {len(processed_routes)} paths.")
     
+    # 3. Partition by (EQUIPMENT_TAG, UTILITY_GROUP, SOURCE_UTILITY)
+    partitions = defaultdict(list)
+    for feat in processed_routes.values():
+        key = (feat['eq_tag'], feat['utility_group'], feat['utility'])
+        partitions[key].append(feat)
+        
     detected_bundles = []
     
-    # Process each space group
-    for g_nm, routes in group_routes.items():
-        # Partition routes by utility within the group
-        util_partitions = defaultdict(list)
-        for r in routes:
-            guid = r['guid']
-            if guid in processed_routes:
-                feat = processed_routes[guid]
-                util_partitions[feat['utility']].append(feat)
-                
-        for util, partition in util_partitions.items():
-            if len(partition) < 2:
+    # 4. Process each partition using Segment-level Parallelism Scan
+    for key, partition in partitions.items():
+        if len(partition) < 2:
+            continue
+            
+        eq_tag, util_gp, util = key
+        print(f"\nAnalyzing Partition | Eq: '{eq_tag}' | Group: '{util_gp}' | Util: '{util}' with {len(partition)} paths...")
+        
+        unassigned_routes = list(partition)
+        
+        while len(unassigned_routes) >= 2:
+            # Sort by ortho segments count and total length to pick base route
+            unassigned_routes.sort(key=lambda r: (len(r['ortho_segs']), r['total_len']), reverse=True)
+            base_route = unassigned_routes[0]
+            
+            base_segs = base_route['ortho_segs']
+            if not base_segs:
+                unassigned_routes.remove(base_route)
                 continue
                 
-            n_paths = len(partition)
-            print(f"\nAnalyzing Space Group '{g_nm}' | Utility '{util}' with {n_paths} paths...")
-            
-            # Phase 2: Compute pairwise similarities (using global _similarity_cache)
-            pairs_sim = {}
-            for i in range(n_paths):
-                for j in range(i+1, n_paths):
-                    p_a = partition[i]
-                    p_b = partition[j]
+            seg_members = []
+            for idx, base_seg in enumerate(base_segs):
+                members = {base_route['guid']: (0.0, base_seg['len'])}
+                for other in unassigned_routes:
+                    if other['guid'] == base_route['guid']:
+                        continue
+                    best_pitch = None
+                    best_overlap = 0.0
+                    for o_seg in other['ortho_segs']:
+                        pitch, overlap = check_parallel_overlap(base_seg, o_seg)
+                        if pitch is not None:
+                            if best_pitch is None or pitch < best_pitch:
+                                best_pitch = pitch
+                                best_overlap = overlap
+                    if best_pitch is not None:
+                        members[other['guid']] = (best_pitch, best_overlap)
+                seg_members.append({
+                    'idx': idx,
+                    'base_seg': base_seg,
+                    'members': members
+                })
+                
+            # Merge contiguous segments having members count >= 2
+            sections = []
+            current_sec = None
+            for sm in seg_members:
+                valid_members = set(sm['members'].keys())
+                if len(valid_members) < 2:
+                    if current_sec:
+                        sections.append(current_sec)
+                        current_sec = None
+                    continue
                     
-                    key = (p_a['guid'], p_b['guid']) if p_a['guid'] <= p_b['guid'] else (p_b['guid'], p_a['guid'])
-                    if key in _similarity_cache:
-                        sim = _similarity_cache[key]
+                if current_sec is None:
+                    current_sec = {
+                        'segs': [sm],
+                        'member_guids': valid_members
+                    }
+                else:
+                    common = current_sec['member_guids'].intersection(valid_members)
+                    if len(common) >= 2:
+                        current_sec['segs'].append(sm)
+                        current_sec['member_guids'].update(valid_members)
                     else:
-                        sim = compute_similarity(p_a, p_b)
-                        _similarity_cache[key] = sim
-                    
-                    pairs_sim[(p_a['guid'], p_b['guid'])] = sim
-                    
-            # Phase 3: Union-Find clustering
-            uf = UnionFind([p['guid'] for p in partition])
-            for (g1, g2), sim in pairs_sim.items():
-                if sim >= SIM_THRESHOLD:
-                    uf.union(g1, g2)
-                    
-            # Group by root
-            clusters = defaultdict(list)
-            for p in partition:
-                root = uf.find(p['guid'])
-                clusters[root].append(p)
+                        sections.append(current_sec)
+                        current_sec = {
+                            'segs': [sm],
+                            'member_guids': valid_members
+                        }
+            if current_sec:
+                sections.append(current_sec)
                 
-            # Evaluate Bundle Gates for each cluster
-            cluster_id_counter = 0
-            for root, members in clusters.items():
-                if len(members) < 2:
-                    continue
+            valid_sections = []
+            for sec in sections:
+                total_len = sum(s['base_seg']['len'] for s in sec['segs'])
+                bends = 0
+                for i in range(len(sec['segs']) - 1):
+                    if sec['segs'][i]['base_seg']['dir'] != sec['segs'][i+1]['base_seg']['dir']:
+                        bends += 1
+                if total_len >= 500.0 and (len(sec['segs']) >= 2 or bends >= 1):
+                    valid_sections.append(sec)
                     
-                # Gate 1: member count >= 2 (already satisfied)
+            if not valid_sections:
+                unassigned_routes.remove(base_route)
+                continue
                 
-                # Gate 2: Representative bends (median of member bends) >= 2
-                bends_list = [m['n_ortho_bends'] for m in members]
-                rep_bends = int(round(get_median(bends_list)))
-                if rep_bends < 2:
-                    continue
-                    
-                # Gate 3: Uniform pitch
-                # Determine representative trunk axis of the group (mode of member trunk axes)
-                axes_list = [m['trunk_axis'] for m in members]
-                rep_trunk_axis = get_mode(axes_list)
+            for sec in valid_sections:
+                m_guids = sorted(list(sec['member_guids']))
                 
-                # Project member centroids to perpendicular horizontal plane
-                # If rep_trunk_axis is X(0), perp horizontal coordinate is Y(1)
-                # If rep_trunk_axis is Y(1), perp horizontal coordinate is X(0)
-                offsets = [m['centroid'][1] if rep_trunk_axis == 0 else m['centroid'][0] for m in members]
-                offsets.sort()
+                # Compute section bounding boxes
+                section_bounds = []
+                for sm in sec['segs']:
+                    b_seg = sm['base_seg']
+                    t = b_seg['dir']
+                    
+                    g_pts = []
+                    for m_guid in m_guids:
+                        if m_guid == base_route['guid']:
+                            g_pts.extend([b_seg['from'], b_seg['to']])
+                        else:
+                            other_r = next(r for r in partition if r['guid'] == m_guid)
+                            for o_seg in other_r['ortho_segs']:
+                                pitch, overlap = check_parallel_overlap(b_seg, o_seg)
+                                if pitch is not None:
+                                    g_pts.extend([o_seg['from'], o_seg['to']])
+                                    
+                    if not g_pts:
+                        g_pts = [b_seg['from'], b_seg['to']]
+                        
+                    xs = [p[0] for p in g_pts]
+                    ys = [p[1] for p in g_pts]
+                    zs = [p[2] for p in g_pts]
+                    
+                    section_bounds.append({
+                        'type': t,
+                        'min': [min(xs), min(ys), min(zs)],
+                        'max': [max(xs), max(ys), max(zs)]
+                    })
+                    
+                pattern_seq = "".join(s['base_seg']['dir'] for s in sec['segs'])
+                dedup_pattern = ""
+                for char in pattern_seq:
+                    if not dedup_pattern or dedup_pattern[-1] != char:
+                        dedup_pattern += char
+                        
+                rep_bends = len(dedup_pattern) - 1 if len(dedup_pattern) > 0 else 0
                 
-                pitches = [offsets[i+1] - offsets[i] for i in range(len(offsets) - 1)]
-                mean_pitch = sum(pitches) / len(pitches)
+                z_coords = []
+                for sm in sec['segs']:
+                    if sm['base_seg']['dir'] in ('X', 'Y'):
+                        z_coords.append((sm['base_seg']['from'][2] + sm['base_seg']['to'][2]) / 2.0)
+                trunk_z = float(get_median(z_coords)) if z_coords else float(base_route['centroid'][2])
                 
-                # Pitch CV check
-                if mean_pitch > 0:
-                    variance = sum((p - mean_pitch)**2 for p in pitches) / len(pitches)
-                    std_pitch = math.sqrt(variance)
-                    cv = std_pitch / mean_pitch
-                else:
-                    cv = 0.0
-                    
-                if len(pitches) > 1 and cv > PITCH_CV_MAX:
-                    # Coefficient of variation is too high (not evenly spaced)
-                    continue
-                    
-                # Passed all gates! Detect trunk section attributes
-                # Trunk Z (rack elevation): Mode of horizontal runs Z coordinates
-                hz_z_coords = []
-                for m in members:
-                    pts = m['points']
-                    for a, b in zip(pts, pts[1:]):
-                        direction = axis_snap(vec_sub(b, a))
-                        if direction in (0, 1, 2, 3): # Horizontal segments
-                            z_coord = round((a[2] + b[2]) / 2.0)
-                            hz_z_coords.append(z_coord)
-                            
-                if hz_z_coords:
-                    trunk_z = float(get_mode(hz_z_coords))
-                else:
-                    # Fallback to median centroid Z
-                    trunk_z = float(get_median([m['centroid'][2] for m in members]))
-                    
-                trunk_xy_spread = float(max(offsets) - min(offsets))
+                pitches = []
+                for sm in sec['segs']:
+                    for m_guid, (pitch, overlap) in sm['members'].items():
+                        if m_guid != base_route['guid']:
+                            pitches.append(pitch)
                 pitch_mm = float(get_median(pitches)) if pitches else 0.0
                 
-                # Calculate average similarity of all pairs in the cluster
-                member_guids = sorted([m['guid'] for m in members])
-                sims = []
-                for i in range(len(member_guids)):
-                    for j in range(i+1, len(member_guids)):
-                        pair = (member_guids[i], member_guids[j])
-                        if pair in pairs_sim:
-                            sims.append(pairs_sim[pair])
-                        elif (pair[1], pair[0]) in pairs_sim:
-                            sims.append(pairs_sim[(pair[1], pair[0])])
-                avg_sim = sum(sims) / len(sims) if sims else 1.0
+                spreads = []
+                for sm in sec['segs']:
+                    offsets = []
+                    for m_guid in m_guids:
+                        if m_guid == base_route['guid']:
+                            offsets.append(0.0)
+                        else:
+                            pitch, overlap = sm['members'].get(m_guid, (0.0, 0.0))
+                            offsets.append(pitch)
+                    spreads.append(max(offsets) - min(offsets))
+                trunk_xy_spread = float(max(spreads)) if spreads else 0.0
                 
-                # Average feature vectors (mean of resampled unit vectors)
-                avg_feat = [0.0] * (RESAMPLE_N * 3)
-                for m in members:
-                    for k in range(RESAMPLE_N * 3):
-                        avg_feat[k] += m['seg_units'][k]
-                for k in range(RESAMPLE_N * 3):
-                    avg_feat[k] /= len(members)
-                    
-                # Segment group routing and extract bounding boxes for V, H, D sections
-                section_bounds, rep_pattern = compute_group_section_bounds(members)
+                avg_sim = 0.95
+                rep_feat = base_route['seg_units']
                 
-                # Build unique group pattern ID
-                group_id = stable_id(g_nm, util, ",".join(member_guids))
+                group_id = stable_id(eq_tag, util_gp, util, ",".join(m_guids), str(sec['segs'][0]['idx']))
+                
+                m_routes = [r for r in partition if r['guid'] in m_guids]
+                geom_wkt = bundle_routes_to_wkt_multilinestringz(m_routes)
                 
                 bundle = {
                     'GROUP_ID': group_id,
-                    'TAG_GROUP_NM': g_nm,
+                    'EQUIPMENT_TAG': eq_tag,
+                    'UTILITY_GROUP': util_gp,
                     'UTILITY': util,
-                    'N_MEMBERS': len(members),
+                    'N_MEMBERS': len(m_guids),
                     'AVG_SIMILARITY': avg_sim,
                     'TRUNK_Z': trunk_z,
                     'TRUNK_XY_SPREAD': trunk_xy_spread,
                     'PITCH_MM': pitch_mm,
                     'N_ORTHO_BENDS': rep_bends,
-                    'MEMBER_GUIDS': member_guids,
-                    'PATTERN_SEQ': rep_pattern,
+                    'MEMBER_GUIDS': m_guids,
+                    'PATTERN_SEQ': dedup_pattern,
                     'SECTION_BOUNDS': section_bounds,
-                    'FEAT': avg_feat
+                    'FEAT': rep_feat,
+                    'GEOM_WKT': geom_wkt
                 }
                 detected_bundles.append(bundle)
-                cluster_id_counter += 1
+                print(f"  -> Detected Parallel Bundle: ID={group_id[:8]}... Pattern={dedup_pattern}, Members={len(m_guids)}, Z={trunk_z:,.1f}, Pitch={pitch_mm:,.1f}, Spread={trunk_xy_spread:,.1f}, Bends={rep_bends}")
                 
-                print(f"  -> Detected Bundle Pattern: ID={group_id[:8]}... Pattern={rep_pattern}, Members={len(members)}, Z={trunk_z:,.1f}, Pitch={pitch_mm:,.1f}, CV={cv:.3f}, Spread={trunk_xy_spread:,.1f}, Bends={rep_bends}")
-                
-    print(f"\nExtraction completed. Total piping bundle groups detected: {len(detected_bundles)}")
+            # Exclude assigned routes that are fully covered (>= 80% overlap)
+            assigned_guids = set()
+            for sec in valid_sections:
+                for m_guid in sec['member_guids']:
+                    sec_len = sum(sm['members'][m_guid][1] for sm in sec['segs'] if m_guid in sm['members'])
+                    m_route = next(r for r in partition if r['guid'] == m_guid)
+                    if sec_len >= 0.8 * m_route['total_len']:
+                        assigned_guids.add(m_guid)
+            assigned_guids.add(base_route['guid'])
+            
+            unassigned_routes = [r for r in unassigned_routes if r['guid'] not in assigned_guids]
+            
+    print(f"\nExtraction completed. Total parallel piping groups detected: {len(detected_bundles)}")
     
     if not dry_run:
         save_bundle_patterns(conn, detected_bundles)
         
+    # 이미지 파일 저장 옵션 처리 (3D Plotly 렌더링 캡처)
+    if image_out:
+        save_bundle_images(detected_bundles, processed_routes, image_out)
+        
     return detected_bundles
-
-
-def compute_group_section_bounds(members: list[dict], tol=ARROW_TOL) -> tuple[list[dict], str]:
-    if not members:
-        return [], ""
-        
-    # 1. Find the representative arrow_code
-    arrow_codes = [m['arrow_code'] for m in members]
-    if not arrow_codes:
-        return [], ""
-    rep_pattern = Counter(arrow_codes).most_common(1)[0][0]
-    
-    # 2. Find matching members and select the longest one as rep member
-    matching_members = [m for m in members if m['arrow_code'] == rep_pattern]
-    if not matching_members:
-        # Fallback to the longest member in the group
-        rep_member = max(members, key=lambda m: m['total_len'])
-        rep_pattern = rep_member['arrow_code']
-    else:
-        rep_member = max(matching_members, key=lambda m: m['total_len'])
-        
-    # 3. Segment the representative member's points into contiguous runs
-    pts = rep_member['points']
-    segments_classes = []
-    for a, b in zip(pts, pts[1:]):
-        dx = b[0] - a[0]
-        dy = b[1] - a[1]
-        dz = b[2] - a[2]
-        L = math.sqrt(dx**2 + dy**2 + dz**2)
-        if L < 1e-3:
-            continue
-        ux, uy, uz = dx/L, dy/L, dz/L
-        
-        if abs(uz) >= tol:
-            code = 'V'
-        elif max(abs(ux), abs(uy)) >= tol:
-            code = 'H'
-        else:
-            code = 'D'
-        segments_classes.append((code, a, b))
-        
-    # Group contiguous segments of the same code
-    sections = []
-    for code, a, b in segments_classes:
-        if sections and sections[-1]['type'] == code:
-            sections[-1]['points'].append(b)
-        else:
-            sections.append({
-                'type': code,
-                'points': [a, b]
-            })
-            
-    # 4. Compute group bounding boxes for each section
-    section_bounds = []
-    epsilon = 100.0  # mm
-    
-    for sec in sections:
-        t = sec['type']
-        sec_pts = sec['points']
-        xs = [p[0] for p in sec_pts]
-        ys = [p[1] for p in sec_pts]
-        zs = [p[2] for p in sec_pts]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        min_z, max_z = min(zs), max(zs)
-        
-        # Determine dominant run axis
-        if t == 'V':
-            run_axis = 'Z'
-            axis_range = (min_z, max_z)
-        elif t == 'H':
-            if (max_x - min_x) >= (max_y - min_y):
-                run_axis = 'X'
-                axis_range = (min_x, max_x)
-            else:
-                run_axis = 'Y'
-                axis_range = (min_y, max_y)
-        else:
-            # Diagonal
-            dx, dy, dz = max_x - min_x, max_y - min_y, max_z - min_z
-            if dx >= dy and dx >= dz:
-                run_axis = 'X'
-                axis_range = (min_x, max_x)
-            elif dy >= dx and dy >= dz:
-                run_axis = 'Y'
-                axis_range = (min_y, max_y)
-            else:
-                run_axis = 'Z'
-                axis_range = (min_z, max_z)
-                
-        # Filter points of all member pipes in the group along this run axis
-        group_pts = []
-        for m in members:
-            for p in m['points']:
-                val = p[2] if run_axis == 'Z' else (p[0] if run_axis == 'X' else p[1])
-                if axis_range[0] - epsilon <= val <= axis_range[1] + epsilon:
-                    group_pts.append(p)
-                    
-        if not group_pts:
-            # Fallback to rep member's section points
-            group_pts = sec_pts
-            
-        g_xs = [p[0] for p in group_pts]
-        g_ys = [p[1] for p in group_pts]
-        g_zs = [p[2] for p in group_pts]
-        
-        section_bounds.append({
-            'type': t,
-            'min': [min(g_xs), min(g_ys), min(g_zs)],
-            'max': [max(g_xs), max(g_ys), max(g_zs)]
-        })
-        
-    return section_bounds, rep_pattern
 
 
 def save_bundle_patterns(conn, bundles: list[dict]) -> None:
@@ -853,14 +849,13 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
         return
         
     has_vector = pgvector_installed(conn) and table_exists(conn, "TB_ROUTE_GROUP_PATTERN") and tool_config._load_config(None).get("db", {}).get("use_vector", True)
-    # 테이블이 폴백(fallback) 스키마로 생성되었을 경우를 대비하여 FEAT 컬럼 존재 여부를 확인합니다.
     if has_vector:
         with conn.cursor() as cur:
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='TB_ROUTE_GROUP_PATTERN' AND column_name='FEAT'")
             has_vector = cur.fetchone() is not None
             
     cols = [
-        "GROUP_ID", "TAG_GROUP_NM", "UTILITY", "N_MEMBERS", "AVG_SIMILARITY",
+        "GROUP_ID", "EQUIPMENT_TAG", "UTILITY_GROUP", "UTILITY", "N_MEMBERS", "AVG_SIMILARITY",
         "TRUNK_Z", "TRUNK_XY_SPREAD", "PITCH_MM", "N_ORTHO_BENDS", "MEMBER_GUIDS",
         "PATTERN_SEQ", "SECTION_BOUNDS", "FEAT_JSON", "GEOM_3D"
     ]
@@ -888,26 +883,139 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
     
     rows = []
     for b in bundles:
-        geom_wkt = section_bounds_to_wkt_multipolygonz(b.get('SECTION_BOUNDS'))
+        geom_wkt = b.get('GEOM_WKT')
         row = [
-            b['GROUP_ID'], b['TAG_GROUP_NM'], b['UTILITY'], b['N_MEMBERS'], b['AVG_SIMILARITY'],
+            b['GROUP_ID'], b['EQUIPMENT_TAG'], b['UTILITY_GROUP'], b['UTILITY'], b['N_MEMBERS'], b['AVG_SIMILARITY'],
             b['TRUNK_Z'], b['TRUNK_XY_SPREAD'], b['PITCH_MM'], b['N_ORTHO_BENDS'], json.dumps(b['MEMBER_GUIDS']),
             b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['FEAT']), geom_wkt
         ]
         if has_vector:
-            # pgvector 특징 벡터 데이터를 PostgreSQL Array 포맷 문자열로 변환합니다. (예: '[1.0, 2.0, ...]')
             vec_literal = "[" + ",".join(f"{float(v):.9g}" for v in b['FEAT']) + "]"
             row.append(vec_literal)
         rows.append(row)
         
     with conn.cursor() as cur:
-        # 최신 분석된 설계 패턴을 새로 저장하기 위해 이전 레코드를 삭제합니다.
         cur.execute('DELETE FROM "TB_ROUTE_GROUP_PATTERN"')
         print("Cleared previous records in TB_ROUTE_GROUP_PATTERN.")
         
         psycopg2.extras.execute_batch(cur, sql, rows, page_size=200)
     conn.commit()
     print(f"Successfully saved {len(bundles)} group patterns to database (vector extension={has_vector}).")
+
+
+def save_bundle_images(bundles: list[dict], processed_routes: dict, output_dir: str, max_images: int = 20) -> None:
+    """
+    추출된 그룹배관 패턴(SECTION_BOUNDS 박스 및 멤버 배관선)을 Plotly 3D 그래프로 구성하고,
+    kaleido 엔진을 사용하여 백그라운드에서 PNG 정적 이미지로 저장합니다.
+    (기본 최대 저장 개수: 20개)
+    """
+    if not bundles:
+        print("No bundles to render images.")
+        return
+        
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print("[warn] Plotly is not installed. Skipping image export.")
+        return
+        
+    try:
+        import kaleido
+    except ImportError:
+        print("[warn] 'kaleido' package is not installed. Please run 'pip install kaleido' to export static images.")
+        print("[warn] Skipping image export.")
+        return
+
+    print(f"Saving 3D rendering images for up to {max_images} bundles to: {output_dir}")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 너무 많은 이미지 생성은 리소스를 과하게 소모하므로 기본 20개로 제한합니다.
+    for idx, b in enumerate(bundles):
+        if idx >= max_images:
+            print(f"  Reached max_images limit ({max_images}). Skipping the remaining {len(bundles) - max_images} bundles.")
+            break
+        fig = go.Figure()
+        
+        # 1. 멤버 배관선(3D Polyline) 드로잉
+        for m_guid in b['MEMBER_GUIDS']:
+            feat = processed_routes.get(m_guid)
+            if not feat:
+                continue
+            pts = feat['points']
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            zs = [p[2] for p in pts]
+            
+            fig.add_trace(go.Scatter3d(
+                x=xs, y=ys, z=zs,
+                mode='lines+markers',
+                marker=dict(size=3),
+                line=dict(width=4),
+                name=f"Pipe_{m_guid[:8]}"
+            ))
+            
+        # 2. SECTION_BOUNDS 박스(AABB) 드로잉
+        for s_idx, sec in enumerate(b.get('SECTION_BOUNDS', [])):
+            min_pt, max_pt = sec['min'], sec['max']
+            box_lines_x = []
+            box_lines_y = []
+            box_lines_z = []
+            
+            # 3D 박스 8개 정점 좌표 정의
+            v = [
+                (min_pt[0], min_pt[1], min_pt[2]),
+                (max_pt[0], min_pt[1], min_pt[2]),
+                (max_pt[0], max_pt[1], min_pt[2]),
+                (min_pt[0], max_pt[1], min_pt[2]),
+                (min_pt[0], min_pt[1], max_pt[2]),
+                (max_pt[0], min_pt[1], max_pt[2]),
+                (max_pt[0], max_pt[1], max_pt[2]),
+                (min_pt[0], max_pt[1], max_pt[2])
+            ]
+            
+            # 12개 모서리선 매핑
+            edges = [
+                (0,1), (1,2), (2,3), (3,0),
+                (4,5), (5,6), (6,7), (7,4),
+                (0,4), (1,5), (2,6), (3,7)
+            ]
+            
+            for start, end in edges:
+                box_lines_x.extend([v[start][0], v[end][0], None])
+                box_lines_y.extend([v[start][1], v[end][1], None])
+                box_lines_z.extend([v[start][2], v[end][2], None])
+                
+            fig.add_trace(go.Scatter3d(
+                x=box_lines_x, y=box_lines_y, z=box_lines_z,
+                mode='lines',
+                line=dict(color='rgba(255, 0, 0, 0.6)', width=2),
+                name=f"Box_{s_idx}_{sec['type']}"
+            ))
+            
+        # 3. 레이아웃 튜닝 (1:1:1 종횡비 설정)
+        fig.update_layout(
+            title=f"Parallel Piping Group [ID: {b['GROUP_ID'][:8]}]<br>Eq: {b['EQUIPMENT_TAG']} | Utility: {b['UTILITY']}",
+            scene=dict(
+                xaxis_title="X (mm)",
+                yaxis_title="Y (mm)",
+                zaxis_title="Z (mm)",
+                aspectmode="data"
+            ),
+            width=1024,
+            height=768,
+            showlegend=True
+        )
+        
+        # 4. 이미지 캡처 파일 저장
+        img_filename = f"bundle_{b['GROUP_ID'][:8]}.png"
+        img_path = os.path.join(output_dir, img_filename)
+        try:
+            fig.write_image(img_path, engine="kaleido")
+            if (idx + 1) % 50 == 0 or (idx + 1) == len(bundles):
+                print(f"  Exported {idx + 1}/{len(bundles)} images...")
+        except Exception as ex:
+            print(f"[error] Failed to save image {img_filename}: {ex}")
+            break
 
 
 def main() -> int:
@@ -920,9 +1028,11 @@ def main() -> int:
     
     extract_parser = subparsers.add_parser("extract", help="Extract piping group patterns")
     extract_parser.add_argument("--dry-run", action="store_true", help="Print stats without saving to DB")
+    extract_parser.add_argument("--image-out", default=None, help="Directory to save group pattern 3D images (PNG)")
     
     run_all_parser = subparsers.add_parser("run-all", help="Create schema and extract patterns")
     run_all_parser.add_argument("--dry-run", action="store_true", help="Print stats without saving to DB")
+    run_all_parser.add_argument("--image-out", default=None, help="Directory to save group pattern 3D images (PNG)")
     
     args = parser.parse_args()
     
@@ -935,14 +1045,17 @@ def main() -> int:
     
     conn = open_connection(runtime.conninfo)
     
+    # args 객체에 image_out 속성이 정의되어 있는지 확인 (create-schema 커맨드는 속성이 없을 수 있음)
+    image_out = getattr(args, "image_out", None)
+    
     try:
         if args.command == "create-schema":
             create_schema(conn)
         elif args.command == "extract":
-            analyze_patterns(conn, dry_run=args.dry_run)
+            analyze_patterns(conn, dry_run=args.dry_run, image_out=image_out)
         elif args.command == "run-all":
             create_schema(conn)
-            analyze_patterns(conn, dry_run=args.dry_run)
+            analyze_patterns(conn, dry_run=args.dry_run, image_out=image_out)
     finally:
         conn.close()
         
