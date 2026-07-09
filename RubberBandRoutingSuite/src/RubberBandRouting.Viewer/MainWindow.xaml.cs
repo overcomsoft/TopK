@@ -28,6 +28,8 @@ public partial class MainWindow : Window
     private readonly List<Visual3D> _selectedStepVisuals = new();
     private readonly List<Visual3D> _featureVisuals = new();
     private readonly List<Visual3D> _existingRouteVisuals = new();
+    private readonly List<Visual3D> _groupPatternVisuals = new();
+    private readonly List<GroupPatternRow> _loadedGroupPatterns = new();
     private readonly PostgresRoutingDataLoader _loader = new();
     private readonly List<ResultRow> _resultRows = new();
     private List<TaskRow>? _lastRoutedTaskRows;
@@ -1712,6 +1714,7 @@ public partial class MainWindow : Window
         SetLayerVisible(_selectedStepVisuals, TglRoutes.IsChecked == true);
         SetLayerVisible(_featureVisuals, TglFeaturePoints.IsChecked == true);
         SetLayerVisible(_existingRouteVisuals, TglExistingRoutes.IsChecked == true);
+        SetLayerVisible(_groupPatternVisuals, TglGroupPatterns.IsChecked == true);
         UpdateVisibleObjectText();
     }
 
@@ -1733,6 +1736,7 @@ public partial class MainWindow : Window
         ClearVisuals(_ductVisuals);
         ClearVisuals(_pocVisuals);
         ClearVisuals(_selectedEndpointVisuals);
+        ClearVisuals(_groupPatternVisuals);
         UpdateVisibleObjectText();
     }
 
@@ -1967,6 +1971,7 @@ public partial class MainWindow : Window
         if (ReferenceEquals(bucket, _selectedStepVisuals)) return TglRoutes.IsChecked == true;
         if (ReferenceEquals(bucket, _featureVisuals)) return TglFeaturePoints.IsChecked == true;
         if (ReferenceEquals(bucket, _existingRouteVisuals)) return TglExistingRoutes.IsChecked == true;
+        if (ReferenceEquals(bucket, _groupPatternVisuals)) return TglGroupPatterns.IsChecked == true;
         return true;
     }
 
@@ -2069,6 +2074,424 @@ public partial class MainWindow : Window
     private sealed record SegmentDetailRow(int Index, string Start, string End, double LengthMm)
     {
         public string LengthText => $"{LengthMm:N0}";
+    }
+
+    private async void BtnShowGroupPatterns_Click(object sender, RoutedEventArgs e) => await ShowGroupPatternsAsync();
+
+    private async Task ShowGroupPatternsAsync()
+    {
+        if (_scene == null)
+        {
+            TxtStatus.Text = "기본설계 씬이 로드되지 않았습니다.";
+            return;
+        }
+
+        var rawTags = _scene.Equipment.Select(e => e.Name ?? "").Where(n => !string.IsNullOrEmpty(n)).ToList();
+        var eqTags = new List<string>();
+        foreach (var tag in rawTags)
+        {
+            eqTags.Add(tag);
+            var trimmed = tag.TrimEnd('_').Trim();
+            if (trimmed != tag) eqTags.Add(trimmed);
+        }
+        eqTags = eqTags.Distinct().ToList();
+
+        if (eqTags.Count == 0)
+        {
+            TxtStatus.Text = "현재 씬에 장비 정보가 없습니다.";
+            return;
+        }
+
+        var selectedGroup = SelectedGroup();
+        var selectedUtil = SelectedUtility();
+
+        ClearVisuals(_groupPatternVisuals);
+        _groupBrushes.Clear();
+        _loadedGroupPatterns.Clear();
+        
+        var options = ReadDbOptions();
+        var connStr = options.ConnectionString;
+        
+        var bundlesCount = 0;
+        var totalTrunkLength = 0.0;
+        
+        await RunBusyAsync("PostgreSQL에서 그룹배관 패턴 데이터를 읽고 3D 뷰에 표출하는 중...", async () =>
+        {
+            try
+            {
+                using var conn = new Npgsql.NpgsqlConnection(connStr);
+                await conn.OpenAsync();
+                
+                var sql = @"
+                    SELECT ""GROUP_ID"", ""EQUIPMENT_TAG"", ""UTILITY_GROUP"", ""UTILITY"", ""N_MEMBERS"", 
+                           ""TRUNK_Z"", ""TRUNK_XY_SPREAD"", ""PITCH_MM"", ""PATTERN_SEQ"", ""SECTION_BOUNDS"", ""TRUNK_LEN"",
+                           ST_AsText(""GEOM_3D"") AS ""GEOM_3D_WKT"",
+                           ST_AsText(""TRUNK_GEOM_3D"") AS ""TRUNK_GEOM_3D_WKT""
+                    FROM ""TB_ROUTE_GROUP_PATTERN""
+                    WHERE ""EQUIPMENT_TAG"" = ANY(@eqTags)";
+
+                if (!string.IsNullOrEmpty(selectedGroup))
+                {
+                    sql += " AND TRIM(UPPER(\"UTILITY_GROUP\")) = TRIM(UPPER(@utilGroup))";
+                }
+                if (!string.IsNullOrEmpty(selectedUtil))
+                {
+                    sql += " AND TRIM(UPPER(\"UTILITY\")) = TRIM(UPPER(@util))";
+                }
+                
+                sql += " ORDER BY \"EQUIPMENT_TAG\", \"UTILITY_GROUP\", \"UTILITY\"";
+                    
+                using var cmd = new Npgsql.NpgsqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("eqTags", eqTags);
+                if (!string.IsNullOrEmpty(selectedGroup))
+                {
+                    cmd.Parameters.AddWithValue("utilGroup", selectedGroup);
+                }
+                if (!string.IsNullOrEmpty(selectedUtil))
+                {
+                    cmd.Parameters.AddWithValue("util", selectedUtil);
+                }
+
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    bundlesCount++;
+                    var groupId = reader.GetString(0);
+                    var eqTag = reader.GetString(1);
+                    var utilGroup = reader.GetString(2);
+                    var util = reader.GetString(3);
+                    var nMembers = reader.GetInt32(4);
+                    var trunkZ = reader.GetDouble(5);
+                    var spread = reader.GetDouble(6);
+                    var pitch = reader.GetDouble(7);
+                    var patternSeq = reader.IsDBNull(8) ? "" : reader.GetString(8);
+                    var boundsJson = reader.IsDBNull(9) ? "" : reader.GetString(9);
+                    var trunkLen = reader.IsDBNull(10) ? 0.0 : reader.GetDouble(10);
+                    var geomWkt = reader.IsDBNull(11) ? "" : reader.GetString(11);
+                    var trunkWkt = reader.IsDBNull(12) ? "" : reader.GetString(12);
+
+                    totalTrunkLength += trunkLen;
+                    
+                    // 그룹별 전용 다채로운 브러시 획득
+                    var brushes = GetGroupBrush(groupId, bundlesCount - 1);
+
+                    var memberLines = new List<List<Vec3>>();
+                    if (!string.IsNullOrEmpty(geomWkt))
+                    {
+                        memberLines = ParseWktMultiLineStringZ(geomWkt);
+                    }
+
+                    var trunkLines = new List<List<Vec3>>();
+                    if (!string.IsNullOrEmpty(trunkWkt))
+                    {
+                        trunkLines = ParseWktMultiLineStringZ(trunkWkt);
+                    }
+                    
+                    // 목록 바인딩 데이터 적재
+                    _loadedGroupPatterns.Add(new GroupPatternRow(groupId, nMembers, trunkZ, trunkLen, brushes.SolidBrush, memberLines, trunkLines));
+                }
+                
+                // 가시성 활성화 및 레이어 갱신
+                TglGroupPatterns.IsChecked = true;
+                
+                // 데이터그리드 바인딩 주입
+                GridGroupPatterns.ItemsSource = null;
+                GridGroupPatterns.ItemsSource = _loadedGroupPatterns;
+                
+                if (_loadedGroupPatterns.Count > 0)
+                {
+                    GridGroupPatterns.SelectedIndex = 0; // 자동으로 SelectionChanged가 발화되어 RedrawGroupPatterns(row) 실행됨
+                }
+                else
+                {
+                    RedrawGroupPatterns(null);
+                }
+                
+                // 정보 요약 리포팅
+                GridAnalysis.ItemsSource = new[]
+                {
+                    new AnalysisRow("그룹배관 다발", $"{bundlesCount:N0} 개 패턴 로드 완료"),
+                    new AnalysisRow("총 연장 길이", $"{totalTrunkLength:N0} mm"),
+                    new AnalysisRow("하이라이트 피복", "기존 관경 1.10배 밀착 오버레이"),
+                    new AnalysisRow("대표 중심선 두께", "기본 40 mm (선택 시 75 mm 확장)"),
+                    new AnalysisRow("선택 다발 강조", "선택 다발 진한 불투명 하이라이트 + 비선택 다발 90% 페이드아웃"),
+                    new AnalysisRow("DB 출처", "TB_ROUTE_GROUP_PATTERN")
+                };
+                
+                TxtStatus.Text = $"그룹배관 패턴 {bundlesCount:N0}개 로딩 및 3D 뷰 연동 성공! (총 연장: {totalTrunkLength:N0} mm)";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"그룹배관 패턴 로드 중 오류가 발생했습니다:\n{ex.Message}", "데이터베이스 오류", MessageBoxButton.OK, MessageBoxImage.Error);
+                TxtStatus.Text = "그룹배관 패턴 로드 실패.";
+            }
+        });
+    }
+
+    private static List<List<Vec3>> ParseWktMultiLineStringZ(string wkt)
+    {
+        var result = new List<List<Vec3>>();
+        if (string.IsNullOrEmpty(wkt)) return result;
+        
+        var cleanWkt = wkt.Trim();
+        if (!cleanWkt.StartsWith("MULTILINESTRING Z", StringComparison.OrdinalIgnoreCase) && 
+            !cleanWkt.StartsWith("MULTILINESTRINGZ", StringComparison.OrdinalIgnoreCase))
+        {
+            return result;
+        }
+
+        var firstParen = cleanWkt.IndexOf('(');
+        var lastParen = cleanWkt.LastIndexOf(')');
+        if (firstParen == -1 || lastParen == -1 || lastParen <= firstParen) return result;
+
+        var inner = cleanWkt.Substring(firstParen + 1, lastParen - firstParen - 1).Trim();
+        
+        var depth = 0;
+        var currentPart = new System.Text.StringBuilder();
+        var parts = new List<string>();
+
+        foreach (var ch in inner)
+        {
+            if (ch == '(')
+            {
+                depth++;
+                if (depth == 1) continue;
+            }
+            else if (ch == ')')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    parts.Add(currentPart.ToString());
+                    currentPart.Clear();
+                    continue;
+                }
+            }
+
+            if (depth > 0)
+            {
+                currentPart.Append(ch);
+            }
+        }
+
+        foreach (var part in parts)
+        {
+            var pts = new List<Vec3>();
+            var pointsSplit = part.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var pStr in pointsSplit)
+            {
+                var coords = pStr.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (coords.Length >= 3 &&
+                    double.TryParse(coords[0], CultureInfo.InvariantCulture, out var x) &&
+                    double.TryParse(coords[1], CultureInfo.InvariantCulture, out var y) &&
+                    double.TryParse(coords[2], CultureInfo.InvariantCulture, out var z))
+                {
+                    pts.Add(new Vec3(x, y, z));
+                }
+            }
+            if (pts.Count > 0)
+            {
+                result.Add(pts);
+            }
+        }
+
+        return result;
+    }
+
+    public class SectionBoundJson
+    {
+        public string? type { get; set; }
+        public double[]? min { get; set; }
+        public double[]? max { get; set; }
+    }
+
+    private readonly Dictionary<string, BrushColorPair> _groupBrushes = new();
+
+    public record BrushColorPair(SolidColorBrush TransparentBrush, SolidColorBrush SolidBrush);
+
+    private BrushColorPair GetGroupBrush(string groupId, int index)
+    {
+        if (_groupBrushes.TryGetValue(groupId, out var pair))
+            return pair;
+
+        var colors = new[]
+        {
+            Color.FromRgb(34, 197, 94),   // Lime Green
+            Color.FromRgb(0, 191, 255),   // Cyan Blue
+            Color.FromRgb(186, 85, 211),  // Violet Orchid
+            Color.FromRgb(255, 165, 0),   // Gold Orange
+            Color.FromRgb(255, 99, 71)    // Coral Red
+        };
+
+        var baseColor = colors[index % colors.Length];
+        
+        var transBrush = new SolidColorBrush(Color.FromArgb(110, baseColor.R, baseColor.G, baseColor.B));
+        transBrush.Freeze();
+        
+        var solidBrush = new SolidColorBrush(baseColor);
+        solidBrush.Freeze();
+
+        var newPair = new BrushColorPair(transBrush, solidBrush);
+        _groupBrushes[groupId] = newPair;
+        return newPair;
+    }
+
+    private sealed record GroupPatternRow(
+        string GroupId, 
+        int NMembers, 
+        double TrunkZ, 
+        double TrunkLen, 
+        SolidColorBrush ColorBrush,
+        List<List<Vec3>> Geom3DPaths,
+        List<List<Vec3>> TrunkPaths)
+    {
+        public string TrunkZText => $"{TrunkZ:N0}";
+        public string TrunkLenText => $"{TrunkLen:N0}";
+    }
+
+    private void GridGroupPatterns_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (GridGroupPatterns.SelectedItem is not GroupPatternRow row)
+        {
+            RedrawGroupPatterns(null);
+            return;
+        }
+
+        // 선택된 다발 3D 하이라이트/디밍 업데이트
+        RedrawGroupPatterns(row);
+
+        var allPoints = row.Geom3DPaths.SelectMany(x => x).ToList();
+        if (allPoints.Count > 0)
+        {
+            FitCameraToPoints(allPoints);
+        }
+    }
+
+    private void RedrawGroupPatterns(GroupPatternRow? selectedRow)
+    {
+        ClearVisuals(_groupPatternVisuals);
+        
+        var selectedUtil = SelectedUtility();
+        
+        // 씬에서 현재 유틸리티 기존 배관들의 기준 관경(baseDiameter) 구하기
+        var matchingPipes = _scene?.ExistingRoutePaths
+            .Where(p => string.Equals(p.Utility, selectedUtil, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        
+        double baseDiameter = 180.0; // 기본 관경 fallback
+        if (matchingPipes != null && matchingPipes.Count > 0)
+        {
+            var validDiameters = matchingPipes.Select(p => p.DiameterMm).Where(d => d > 0).ToList();
+            if (validDiameters.Count > 0)
+            {
+                baseDiameter = validDiameters.Average();
+            }
+        }
+
+        for (int i = 0; i < _loadedGroupPatterns.Count; i++)
+        {
+            var row = _loadedGroupPatterns[i];
+            
+            // 그룹 고유 색상 브러시 획득
+            var brushes = GetGroupBrush(row.GroupId, i);
+            
+            bool isSelected = (selectedRow != null && selectedRow.GroupId == row.GroupId);
+            bool hasSelection = (selectedRow != null);
+            
+            // 1. 피복 슬리브 두께 및 색상 매핑
+            double sleeveDiameter;
+            SolidColorBrush sleeveBrush;
+            
+            if (isSelected)
+            {
+                // 선택됨: 1.3배 두께, 알파값 220으로 아주 선명하게 강조
+                sleeveDiameter = baseDiameter * 1.30;
+                sleeveBrush = new SolidColorBrush(Color.FromArgb(220, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
+            }
+            else if (hasSelection)
+            {
+                // 디밍 상태 (다른 행이 선택됨): 1.10배 두께, 알파값 30으로 투명화 유지
+                sleeveDiameter = baseDiameter * 1.10;
+                sleeveBrush = new SolidColorBrush(Color.FromArgb(30, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
+            }
+            else
+            {
+                // 기본 상태: 1.10배 두께, 알파값 110으로 선명한 투명 형태 제공
+                sleeveDiameter = baseDiameter * 1.10;
+                sleeveBrush = new SolidColorBrush(Color.FromArgb(110, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
+            }
+            
+            // 2. 대표 중심선 두께 및 색상 매핑
+            double trunkDiameter;
+            SolidColorBrush trunkBrush;
+            
+            if (isSelected)
+            {
+                trunkDiameter = 75.0; // 굵게 강조
+                trunkBrush = brushes.SolidBrush;
+            }
+            else if (hasSelection)
+            {
+                trunkDiameter = 16.0; // 가늘게 디밍
+                trunkBrush = new SolidColorBrush(Color.FromArgb(30, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
+            }
+            else
+            {
+                trunkDiameter = 40.0; // 기본 두께
+                trunkBrush = brushes.SolidBrush;
+            }
+
+            // A. 멤버 배관 피복 그리기 (기존 관경 대비 정밀 비율 매칭)
+            if (row.Geom3DPaths != null)
+            {
+                foreach (var line in row.Geom3DPaths)
+                {
+                    DrawPath(line, sleeveBrush, sleeveDiameter, _groupPatternVisuals);
+                }
+            }
+
+            // B. 대표 중심선 그리기
+            if (row.TrunkPaths != null)
+            {
+                foreach (var line in row.TrunkPaths)
+                {
+                    DrawPath(line, trunkBrush, trunkDiameter, _groupPatternVisuals);
+                }
+            }
+        }
+
+        ApplyLayerVisibility();
+    }
+
+    private void FitCameraToPoints(IReadOnlyList<Vec3> points)
+    {
+        if (points.Count == 0 || Viewport.Camera is not PerspectiveCamera camera)
+        {
+            Viewport.ZoomExtents(200);
+            return;
+        }
+
+        var minX = points.Min(p => p.X); var maxX = points.Max(p => p.X);
+        var minY = points.Min(p => p.Y); var maxY = points.Max(p => p.Y);
+        var minZ = points.Min(p => p.Z); var maxZ = points.Max(p => p.Z);
+        var center = new Point3D((minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0);
+        var sx = Math.Max(1, maxX - minX);
+        var sy = Math.Max(1, maxY - minY);
+        var sz = Math.Max(1, maxZ - minZ);
+        var radius = Math.Max(200, Math.Sqrt(sx * sx + sy * sy + sz * sz) * 0.5);
+
+        var direction = new Vector3D(1.35, -1.55, 0.85);
+        direction.Normalize();
+        var fovRadians = Math.Max(10, camera.FieldOfView) * Math.PI / 180.0;
+        var distance = Math.Max(radius / Math.Tan(fovRadians * 0.5) * 1.35, radius * 2.4);
+        var position = center + direction * distance;
+        camera.Position = position;
+        camera.LookDirection = center - position;
+        camera.UpDirection = new Vector3D(0, 0, 1);
+        camera.NearPlaneDistance = 10.0;
+        camera.FarPlaneDistance = 10000000.0;
+        Viewport.InvalidateVisual();
     }
 }
 

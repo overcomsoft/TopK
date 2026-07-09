@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
     {vector_col}
     "FEAT_JSON" jsonb,
     "GEOM_3D" geometry(MultiLineStringZ, 0),
+    "TRUNK_GEOM_3D" geometry(MultiLineStringZ, 0),
+    "TRUNK_LEN" double precision NOT NULL DEFAULT 0.0,
     "CREATED_AT" timestamp without time zone DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS "IX_TRGP_KEY"
@@ -114,6 +116,8 @@ ON "TB_ROUTE_GROUP_PATTERN" ("EQUIPMENT_TAG", "UTILITY_GROUP", "UTILITY");
 {vector_idx}
 CREATE INDEX IF NOT EXISTS "IX_TRGP_GEOM"
 ON "TB_ROUTE_GROUP_PATTERN" USING gist("GEOM_3D");
+CREATE INDEX IF NOT EXISTS "IX_TRGP_TRUNK_GEOM"
+ON "TB_ROUTE_GROUP_PATTERN" USING gist("TRUNK_GEOM_3D");
 """
 
 
@@ -134,6 +138,47 @@ def bundle_routes_to_wkt_multilinestringz(member_routes: list[dict]) -> str:
             continue
         pts_str = ", ".join(f"{float(pt[0]):.9g} {float(pt[1]):.9g} {float(pt[2]):.9g}" for pt in pts)
         lines.append(f"({pts_str})")
+        
+    if not lines:
+        return None
+        
+    return f"MULTILINESTRING Z ({', '.join(lines)})"
+
+
+def generate_trunk_centerline_wkt(section_bounds: list[dict]) -> str:
+    """
+    각 다발 구간의 바운딩 박스(SECTION_BOUNDS)를 관통하는
+    3D 대표 중심선 경로를 계산하여 MULTILINESTRING Z WKT 문자열로 반환합니다.
+    """
+    if not section_bounds:
+        return None
+        
+    lines = []
+    for sec in section_bounds:
+        min_pt = sec.get('min')
+        max_pt = sec.get('max')
+        t = sec.get('type')
+        if not min_pt or not max_pt or not t:
+            continue
+            
+        cx = (min_pt[0] + max_pt[0]) / 2.0
+        cy = (min_pt[1] + max_pt[1]) / 2.0
+        cz = (min_pt[2] + max_pt[2]) / 2.0
+        
+        if t == 'X':
+            start = (min_pt[0], cy, cz)
+            end = (max_pt[0], cy, cz)
+        elif t == 'Y':
+            start = (cx, min_pt[1], cz)
+            end = (cx, max_pt[1], cz)
+        elif t == 'Z':
+            start = (cx, cy, min_pt[2])
+            end = (cx, cy, max_pt[2])
+        else:
+            start = min_pt
+            end = max_pt
+            
+        lines.append(f"({start[0]:.9g} {start[1]:.9g} {start[2]:.9g}, {end[0]:.9g} {end[1]:.9g} {end[2]:.9g})")
         
     if not lines:
         return None
@@ -407,7 +452,7 @@ def extract_orthogonal_segments(points, tol=ARROW_TOL):
     return segments
 
 
-def check_parallel_overlap(s1, s2, max_pitch=800.0, min_overlap=100.0):
+def check_parallel_overlap(s1, s2, max_pitch=1500.0, min_overlap=100.0):
     if s1['dir'] != s2['dir'] or s1['dir'] == 'D':
         return None, 0.0
         
@@ -647,41 +692,58 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
         eq_tag, util_gp, util = key
         print(f"\nAnalyzing Partition | Eq: '{eq_tag}' | Group: '{util_gp}' | Util: '{util}' with {len(partition)} paths...")
         
-        unassigned_routes = list(partition)
-        
-        while len(unassigned_routes) >= 2:
-            # Sort by ortho segments count and total length to pick base route
-            unassigned_routes.sort(key=lambda r: (len(r['ortho_segs']), r['total_len']), reverse=True)
-            base_route = unassigned_routes[0]
+        # 모든 배관의 개별 ortho 세그먼트에 assigned 초기상태 할당
+        for r in partition:
+            for s in r['ortho_segs']:
+                s['assigned'] = False
+                
+        def get_unassigned_len(route):
+            return sum(s['len'] for s in route['ortho_segs'] if not s.get('assigned', False))
             
-            base_segs = base_route['ortho_segs']
+        while True:
+            # 아직 미할당 세그먼트가 남아있는 배관 목록 필터링
+            active_routes = [r for r in partition if get_unassigned_len(r) > 0]
+            if len(active_routes) < 2:
+                break
+                
+            # 정렬: 미할당 세그먼트 총 길이가 가장 길고, 꺾임이 적은 것 우선 (Base Route 지정)
+            active_routes.sort(key=lambda r: (get_unassigned_len(r), -len(r['ortho_segs'])), reverse=True)
+            base_route = active_routes[0]
+            
+            # Base Route의 미할당 세그먼트만 스캔 대상
+            base_segs = [s for s in base_route['ortho_segs'] if not s.get('assigned', False)]
             if not base_segs:
-                unassigned_routes.remove(base_route)
+                # 루프 방어선: 세그먼트가 남지 않았다면 제외 마크 후 건너뜀
+                for s in base_route['ortho_segs']:
+                    s['assigned'] = True
                 continue
                 
             seg_members = []
             for idx, base_seg in enumerate(base_segs):
                 members = {base_route['guid']: (0.0, base_seg['len'])}
-                for other in unassigned_routes:
+                for other in active_routes:
                     if other['guid'] == base_route['guid']:
                         continue
                     best_pitch = None
-                    best_overlap = 0.0
+                    total_overlap = 0.0
                     for o_seg in other['ortho_segs']:
+                        if o_seg.get('assigned', False):
+                            continue
                         pitch, overlap = check_parallel_overlap(base_seg, o_seg)
                         if pitch is not None:
+                            total_overlap += overlap
                             if best_pitch is None or pitch < best_pitch:
                                 best_pitch = pitch
-                                best_overlap = overlap
+                                
                     if best_pitch is not None:
-                        members[other['guid']] = (best_pitch, best_overlap)
+                        members[other['guid']] = (best_pitch, total_overlap)
                 seg_members.append({
                     'idx': idx,
                     'base_seg': base_seg,
                     'members': members
                 })
                 
-            # Merge contiguous segments having members count >= 2
+            # Merge contiguous segments having members count >= 2 (엄격한 교집합 적용)
             sections = []
             current_sec = None
             for sm in seg_members:
@@ -701,7 +763,7 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                     common = current_sec['member_guids'].intersection(valid_members)
                     if len(common) >= 2:
                         current_sec['segs'].append(sm)
-                        current_sec['member_guids'].update(valid_members)
+                        current_sec['member_guids'] = common # 교집합 기반 갱신
                     else:
                         sections.append(current_sec)
                         current_sec = {
@@ -714,15 +776,13 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
             valid_sections = []
             for sec in sections:
                 total_len = sum(s['base_seg']['len'] for s in sec['segs'])
-                bends = 0
-                for i in range(len(sec['segs']) - 1):
-                    if sec['segs'][i]['base_seg']['dir'] != sec['segs'][i+1]['base_seg']['dir']:
-                        bends += 1
-                if total_len >= 500.0 and (len(sec['segs']) >= 2 or bends >= 1):
+                if total_len >= 500.0:
                     valid_sections.append(sec)
                     
             if not valid_sections:
-                unassigned_routes.remove(base_route)
+                # 유효 구간이 없으면 루프 탈출을 방기하기 위해 base_segs를 assigned 처리
+                for base_seg in base_segs:
+                    base_seg['assigned'] = True
                 continue
                 
             for sec in valid_sections:
@@ -775,7 +835,7 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                 pitches = []
                 for sm in sec['segs']:
                     for m_guid, (pitch, overlap) in sm['members'].items():
-                        if m_guid != base_route['guid']:
+                        if m_guid != base_route['guid'] and m_guid in m_guids:
                             pitches.append(pitch)
                 pitch_mm = float(get_median(pitches)) if pitches else 0.0
                 
@@ -798,6 +858,12 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                 
                 m_routes = [r for r in partition if r['guid'] in m_guids]
                 geom_wkt = bundle_routes_to_wkt_multilinestringz(m_routes)
+                trunk_wkt = generate_trunk_centerline_wkt(section_bounds)
+                trunk_len = float(sum(
+                    (sec['max'][0] - sec['min'][0]) if sec['type'] == 'X' else (
+                        (sec['max'][1] - sec['min'][1]) if sec['type'] == 'Y' else (sec['max'][2] - sec['min'][2])
+                    ) for sec in section_bounds
+                ))
                 
                 bundle = {
                     'GROUP_ID': group_id,
@@ -814,22 +880,29 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                     'PATTERN_SEQ': dedup_pattern,
                     'SECTION_BOUNDS': section_bounds,
                     'FEAT': rep_feat,
-                    'GEOM_WKT': geom_wkt
+                    'GEOM_WKT': geom_wkt,
+                    'TRUNK_WKT': trunk_wkt,
+                    'TRUNK_LEN': trunk_len
                 }
                 detected_bundles.append(bundle)
                 print(f"  -> Detected Parallel Bundle: ID={group_id[:8]}... Pattern={dedup_pattern}, Members={len(m_guids)}, Z={trunk_z:,.1f}, Pitch={pitch_mm:,.1f}, Spread={trunk_xy_spread:,.1f}, Bends={rep_bends}")
                 
-            # Exclude assigned routes that are fully covered (>= 80% overlap)
-            assigned_guids = set()
+            # 유효 번들로 사용된 세그먼트들 assigned 처리하여 소거
             for sec in valid_sections:
-                for m_guid in sec['member_guids']:
-                    sec_len = sum(sm['members'][m_guid][1] for sm in sec['segs'] if m_guid in sm['members'])
-                    m_route = next(r for r in partition if r['guid'] == m_guid)
-                    if sec_len >= 0.8 * m_route['total_len']:
-                        assigned_guids.add(m_guid)
-            assigned_guids.add(base_route['guid'])
-            
-            unassigned_routes = [r for r in unassigned_routes if r['guid'] not in assigned_guids]
+                for sm in sec['segs']:
+                    sm['base_seg']['assigned'] = True
+                    b_seg = sm['base_seg']
+                    
+                    for m_guid in sec['member_guids']:
+                        if m_guid == base_route['guid']:
+                            continue
+                        other_r = next(r for r in partition if r['guid'] == m_guid)
+                        for o_seg in other_r['ortho_segs']:
+                            if o_seg.get('assigned', False):
+                                continue
+                            pitch, overlap = check_parallel_overlap(b_seg, o_seg)
+                            if pitch is not None:
+                                o_seg['assigned'] = True
             
     print(f"\nExtraction completed. Total parallel piping groups detected: {len(detected_bundles)}")
     
@@ -857,7 +930,7 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
     cols = [
         "GROUP_ID", "EQUIPMENT_TAG", "UTILITY_GROUP", "UTILITY", "N_MEMBERS", "AVG_SIMILARITY",
         "TRUNK_Z", "TRUNK_XY_SPREAD", "PITCH_MM", "N_ORTHO_BENDS", "MEMBER_GUIDS",
-        "PATTERN_SEQ", "SECTION_BOUNDS", "FEAT_JSON", "GEOM_3D"
+        "PATTERN_SEQ", "SECTION_BOUNDS", "FEAT_JSON", "GEOM_3D", "TRUNK_GEOM_3D", "TRUNK_LEN"
     ]
     if has_vector:
         cols.append("FEAT")
@@ -868,7 +941,7 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
             placeholders.append("%s::jsonb")
         elif c == "FEAT":
             placeholders.append("%s::vector")
-        elif c == "GEOM_3D":
+        elif c in ("GEOM_3D", "TRUNK_GEOM_3D"):
             placeholders.append("ST_GeomFromText(%s, 0)")
         else:
             placeholders.append("%s")
@@ -884,10 +957,12 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
     rows = []
     for b in bundles:
         geom_wkt = b.get('GEOM_WKT')
+        trunk_wkt = b.get('TRUNK_WKT')
         row = [
             b['GROUP_ID'], b['EQUIPMENT_TAG'], b['UTILITY_GROUP'], b['UTILITY'], b['N_MEMBERS'], b['AVG_SIMILARITY'],
             b['TRUNK_Z'], b['TRUNK_XY_SPREAD'], b['PITCH_MM'], b['N_ORTHO_BENDS'], json.dumps(b['MEMBER_GUIDS']),
-            b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['FEAT']), geom_wkt
+            b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['FEAT']), geom_wkt, trunk_wkt,
+            b['TRUNK_LEN']
         ]
         if has_vector:
             vec_literal = "[" + ",".join(f"{float(v):.9g}" for v in b['FEAT']) + "]"

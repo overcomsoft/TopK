@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
     "FEAT" vector(60),
     "FEAT_JSON" jsonb,
     "GEOM_3D" geometry(MultiLineStringZ, 0),
+    "TRUNK_GEOM_3D" geometry(MultiLineStringZ, 0),
+    "TRUNK_LEN" double precision NOT NULL DEFAULT 0.0,
     "CREATED_AT" timestamp without time zone DEFAULT now()
 );
 
@@ -30,4 +32,7 @@ ON "TB_ROUTE_GROUP_PATTERN" USING hnsw ("FEAT" vector_l2_ops);
 
 CREATE INDEX IF NOT EXISTS "IX_TRGP_GEOM"
 ON "TB_ROUTE_GROUP_PATTERN" USING gist("GEOM_3D");
+
+CREATE INDEX IF NOT EXISTS "IX_TRGP_TRUNK_GEOM"
+ON "TB_ROUTE_GROUP_PATTERN" USING gist("TRUNK_GEOM_3D");
 

@@ -58,26 +58,29 @@
 배관 다발 식별은 개별 배관 전체 경로를 비교하는 대신, **세그먼트 단위 공간 스캔 및 평행성 추적 알고리즘**을 통해 평행하게 달리는 연속적인 구간들을 정밀하게 추출한다.
 
 ### 4.1 Phase 1 — 파티셔닝 및 특징 추출
+
 1. **파티션 분할**: DB 내 모든 배관 데이터를 `(EQUIPMENT_TAG, UTILITY_GROUP, SOURCE_UTILITY)` 기준으로 파티셔닝하여 독립적으로 분석한다.
-2. **세그먼트 직교 분해 및 스냅**: 
+2. **세그먼트 직교 분해 및 스냅**:
    - 각 배관 폴리라인의 연속된 점 $(p_i, p_{i+1})$에 대해 변위 벡터 $\vec{v} = (\Delta x, \Delta y, \Delta z)$와 단위 벡터 $\hat{u} = (u_x, u_y, u_z)$를 구한다.
    - Z 성분 절대값 $|u_z| \ge \text{ARROW\_TOL}(0.9)$이면 수직(`Z`), X 성분 절대값 $|u_x| \ge \text{ARROW\_TOL}(0.9)$이면 수평 X(`X`), Y 성분 절대값 $|u_y| \ge \text{ARROW\_TOL}(0.9)$이면 수평 Y(`Y`) 축으로 스냅하여 분류한다.
    - 이때 모서리 정렬 오차를 상쇄하기 위해 수직 평면 좌표를 두 끝점의 평균값으로 고정하는 축 정렬(Orthogonal Alignment)을 수행한다.
 
 ### 4.2 Phase 2 — 세그먼트 평행 오버랩 검사 (Parallel Overlap Check)
+
 동일 파티션 내의 임의의 두 세그먼트 $S_1$, $S_2$가 나란히 달리는지 다음 기하학적 기준을 충족해야 한다.
 
 1. **동일 진행 축**: $S_1.\text{dir} == S_2.\text{dir}$ 이면서 사선(D)이 아니어야 한다.
 2. **수직 이격거리(Pitch) 판별**:
    - $S_1$과 $S_2$ 사이의 수직 단면에서의 최단 거리 $d_{\text{perp}}$를 아래와 같이 구하며, 이 값이 최대 피치 임계값($d_{\text{perp}} \le 800\text{mm}$) 이내여야 한다.
-     * 진행 축이 `X`인 경우: $d_{\text{perp}} = \sqrt{(y_1 - y_2)^2 + (z_1 - z_2)^2}$
-     * 진행 축이 `Y`인 경우: $d_{\text{perp}} = \sqrt{(x_1 - x_2)^2 + (z_1 - z_2)^2}$
-     * 진행 축이 `Z`인 경우: $d_{\text{perp}} = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}$
+     - 진행 축이 `X`인 경우: $d_{\text{perp}} = \sqrt{(y_1 - y_2)^2 + (z_1 - z_2)^2}$
+     - 진행 축이 `Y`인 경우: $d_{\text{perp}} = \sqrt{(x_1 - x_2)^2 + (z_1 - z_2)^2}$
+     - 진행 축이 `Z`인 경우: $d_{\text{perp}} = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}$
 3. **진행 구간 오버랩(Overlap) 판별**:
    - 진행 축 좌표계 상으로 투영하여 두 세그먼트의 구간 $[\min(v_{\text{from}}, v_{\text{to}}), \max(v_{\text{from}}, v_{\text{to}})]$을 구한다.
    - 두 구간의 겹치는 구간 길이 $L_{\text{overlap}} = \min(\max_1, \max_2) - \max(\min_1, \min_2)$가 최소 오버랩 길이 임계값($L_{\text{overlap}} \ge 100\text{mm}$) 이상이어야 한다.
 
 ### 4.3 Phase 3 — 반복적 스캔 및 구간 추출 (Iterative Scan with Exclusion)
+
 파티션 내에 분기되는 여러 랙 다발이 혼재해 있을 때 오탐 없이 독립적인 다발로 분리 추출하기 위해 **점진적 배제 스캔** 기법을 적용합니다.
 
 ```mermaid
@@ -101,6 +104,7 @@ graph TD
    - 이후 남은 배관 중 가장 긴 배관을 다음 $P_{base}$로 선정하여 반복 수집한다.
 
 ### 4.4 Phase 4 — 대표 정보 및 3D 공간 기하 정보 산출
+
 1. **Bounding Box 산출**: 각 세부 구간에 대해 병합된 멤버 세그먼트들의 3D 영역 경계 좌표를 구하여 `SECTION_BOUNDS`를 산출한다.
 2. **PostGIS MultiLineStringZ 생성**: 그룹 내 멤버 배관들의 3D Polyline 좌표점 배열을 PostGIS 공간 연산 및 가시화가 가능하도록 WKT `MULTILINESTRING Z ((x1 y1 z1, x2 y2 z2, ...), ...)` 문자열로 변환하여 `GEOM_3D` 컬럼에 매핑한다.
 3. **트렁크 정보 감지**: 구간 내 수평 세그먼트들의 Z 고도 최빈값(`TRUNK_Z`), 멤버 간 수직 오버랩 벌어짐 폭(`TRUNK_XY_SPREAD`), pitch 중앙값(`PITCH_MM`) 등을 계산하여 최종 적재한다.
@@ -110,18 +114,23 @@ graph TD
 ## 5. 실행 명령어 예시
 
 ### 5.1 데이터베이스 스키마 생성
+
 ```powershell
 python Tools/DesignPatternAnalyzer.py --password dinno create-schema
 ```
 
 ### 5.2 드라이런 테스트 (DB 저장 생략)
+
 실제 적재하기 전에 추출 및 매핑이 원활한지 로그로 사전 확인한다.
+
 ```powershell
 python Tools/DesignPatternAnalyzer.py --password dinno extract --dry-run
 ```
 
 ### 5.3 배관 패턴 추출 및 데이터베이스 적재
+
 데이터를 전량 분석하여 `TB_ROUTE_GROUP_PATTERN`에 덮어쓰기 방식으로 저장한다.
+
 ```powershell
 python Tools/DesignPatternAnalyzer.py --password dinno extract
 ```

@@ -67,6 +67,7 @@
                                 <RowDefinition Height="34"/>
                                 <RowDefinition Height="34"/>
                                 <RowDefinition Height="34"/>
+                                <RowDefinition Height="34"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="② 유틸리티" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
                             <ListBox x:Name="ListUtilities" Grid.Row="1" Height="100" SelectionChanged="ListUtilities_SelectionChanged" Background="#2E3C53" Foreground="White" BorderBrush="#4B5F7B"/>
@@ -74,6 +75,7 @@
                             <Button x:Name="BtnClearRoutes" Grid.Row="3" Content="♜ 자동설계 경로 삭제" Margin="0,6,0,0" Click="BtnClearRoutes_Click"/>
                             <Button x:Name="BtnShowExistingRoutes" Grid.Row="4" Content="◎ PostgresDB 기존경로 표시" Margin="0,6,0,0" Background="#5B6478" Foreground="White" Click="BtnShowExistingRoutes_Click"/>
                             <Button x:Name="BtnCompareRoutes" Grid.Row="5" Content="⇄ 기존경로와 비교" Margin="0,6,0,0" Background="#3B7A9E" Foreground="White" Click="BtnCompareRoutes_Click"/>
+                            <Button x:Name="BtnShowGroupPatterns" Grid.Row="6" Content="◎ 그룹배관 패턴 3D 표시" Margin="0,6,0,0" Background="#FFA500" Foreground="Black" FontWeight="SemiBold" Click="BtnShowGroupPatterns_Click"/>
                         </Grid>
                     </Border>
 
@@ -262,6 +264,25 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                         </TabItem>
+                        <TabItem Header="그룹배관패턴">
+                            <Grid>
+                                <DataGrid x:Name="GridGroupPatterns" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionChanged="GridGroupPatterns_SelectionChanged" Background="#253349" Foreground="White" BorderBrush="#40516B" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
+                                    <DataGrid.Columns>
+                                        <DataGridTemplateColumn Header="색상" Width="55">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <Rectangle Width="20" Height="10" Fill="{Binding ColorBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                        <DataGridTextColumn Header="그룹 ID" Binding="{Binding GroupId}" Width="120"/>
+                                        <DataGridTextColumn Header="멤버 수" Binding="{Binding NMembers}" Width="65"/>
+                                        <DataGridTextColumn Header="Z 높이" Binding="{Binding TrunkZText}" Width="75"/>
+                                        <DataGridTextColumn Header="총 연장" Binding="{Binding TrunkLenText}" Width="*"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </Grid>
+                        </TabItem>
                         <TabItem Header="단계별 경로">
                             <DataGrid x:Name="GridStepDetails" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionChanged="GridStepDetails_SelectionChanged" Background="#253349" Foreground="White" BorderBrush="#40516B" RowBackground="#253349" AlternatingRowBackground="#2B3B54">
                                 <DataGrid.Columns>
@@ -316,6 +337,7 @@
                     <CheckBox x:Name="TglRoutes" Content="자동경로" IsChecked="True" Foreground="White" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglFeaturePoints" Content="특징점" IsChecked="True" Foreground="#FF4DFF" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglExistingRoutes" Content="기존경로" IsChecked="True" Foreground="#FFB347" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglGroupPatterns" Content="그룹배관패턴" IsChecked="True" Foreground="#FFA500" Margin="8,0,0,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <Separator Margin="6,0" Width="1"/>
                     <CheckBox x:Name="ChkUseNativeEngine" Content="네이티브 C++ 엔진" Foreground="#7CD4FF" Margin="10,0,0,0"
                               Checked="ChkUseNativeEngine_Changed" Unchecked="ChkUseNativeEngine_Changed"
