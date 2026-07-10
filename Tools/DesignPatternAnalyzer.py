@@ -145,6 +145,43 @@ def bundle_routes_to_wkt_multilinestringz(member_routes: list[dict]) -> str:
     return f"MULTILINESTRING Z ({', '.join(lines)})"
 
 
+def bundle_parallel_segments_to_wkt(sec: dict, base_route: dict, partition: list[dict], m_guids: list[str]) -> str:
+    """
+    그룹 내 멤버들의 전체 배관 경로 대신, 실제로 평행하게 겹치는 
+    그룹배관 구간(Parallel Segments)의 좌표 정보만 추출하여 MULTILINESTRING Z WKT로 반환합니다.
+    """
+    lines = []
+    for m_guid in m_guids:
+        member_points = []
+        for sm in sec['segs']:
+            b_seg = sm['base_seg']
+            if m_guid == base_route['guid']:
+                member_points.append(b_seg['from'])
+                member_points.append(b_seg['to'])
+            else:
+                other_r = next((r for r in partition if r['guid'] == m_guid), None)
+                if not other_r:
+                    continue
+                for o_seg in other_r['ortho_segs']:
+                    pitch, overlap = check_parallel_overlap(b_seg, o_seg)
+                    if pitch is not None:
+                        member_points.append(o_seg['from'])
+                        member_points.append(o_seg['to'])
+                        break
+                        
+        if len(member_points) >= 2:
+            for i in range(0, len(member_points), 2):
+                if i + 1 < len(member_points):
+                    p1 = member_points[i]
+                    p2 = member_points[i+1]
+                    pts_str = f"{p1[0]:.9g} {p1[1]:.9g} {p1[2]:.9g}, {p2[0]:.9g} {p2[1]:.9g} {p2[2]:.9g}"
+                    lines.append(f"({pts_str})")
+                    
+    if not lines:
+        return None
+    return f"MULTILINESTRING Z ({', '.join(lines)})"
+
+
 def generate_trunk_centerline_wkt(section_bounds: list[dict]) -> str:
     """
     각 다발 구간의 바운딩 박스(SECTION_BOUNDS)를 관통하는
@@ -582,10 +619,9 @@ def extract_pipe_feature(guid, points, row_meta) -> dict:
 
 def load_route_data_bulk(conn, eq_tags=None) -> list[dict]:
     """
-    Loads all routing paths, segments and details in a single query
-    to optimize database round-trip times.
+    Loads all routing paths and their pre-segmented Middle Trunk geometries from DB.
     """
-    print("Fetching route path geometries and attributes from DB in bulk...")
+    print("Fetching route path middle trunk geometries and attributes from DB...")
     
     where_clause = ""
     params = []
@@ -601,65 +637,46 @@ def load_route_data_bulk(conn, eq_tags=None) -> list[dict]:
             rp."SOURCE_UTILITY",
             rp."UTILITY_GROUP",
             rp."SOURCE_SIZE",
-            sd."FROM_POSX", sd."FROM_POSY", sd."FROM_POSZ",
-            sd."TO_POSX", sd."TO_POSY", sd."TO_POSZ",
-            rs."ORDER" AS seg_order,
-            sd."ORDER" AS detail_order
+            ST_AsText(ps."MIDDLE_TRUNK_GEOM") AS "TRUNK_WKT"
         FROM "TB_ROUTE_PATH" rp
-        JOIN "TB_ROUTE_SEGMENTS" rs ON rp."ROUTE_PATH_GUID" = rs."ROUTE_PATH_GUID"
-        JOIN "TB_ROUTE_SEGMENT_DETAIL" sd ON rs."SEGMENT_GUID" = sd."SEGMENT_GUID"
+        JOIN "TB_ROUTE_PATH_SEGMENTATION" ps ON rp."ROUTE_PATH_GUID" = ps."ROUTE_PATH_GUID"
         {where_clause}
-        ORDER BY rp."ROUTE_PATH_GUID", rs."ORDER", sd."ORDER"
+        ORDER BY rp."ROUTE_PATH_GUID"
     """
     
-    raw_details = defaultdict(list)
-    route_meta = {}
-    
+    def parse_wkt_linestring_z(wkt: str) -> list[tuple[float, float, float]]:
+        if not wkt or not wkt.upper().startswith("LINESTRING"):
+            return []
+        cleaned = wkt.replace("LINESTRING", "").replace("Z", "").replace("z", "").strip().strip("()").strip()
+        points = []
+        for pt_str in cleaned.split(","):
+            coords = pt_str.strip().split()
+            if len(coords) >= 3:
+                points.append((float(coords[0]), float(coords[1]), float(coords[2])))
+        return points
+
+    routes = []
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
-        print(f"Total segment detail records fetched: {len(rows)}")
+        print(f"Total middle trunk records fetched: {len(rows)}")
         for r in rows:
             guid = r['ROUTE_PATH_GUID'].strip()
-            raw_details[guid].append(r)
-            route_meta[guid] = {
-                'eq_tag': r['EQUIPMENT_TAG'],
-                'utility': r['SOURCE_UTILITY'],
-                'utility_group': r['UTILITY_GROUP'],
-                'size': r['SOURCE_SIZE']
-            }
+            pts = parse_wkt_linestring_z(r.get('TRUNK_WKT', ''))
             
-    # Reconstruct polylines in memory
-    routes = []
-    for guid, details in raw_details.items():
-        pts = []
-        for d in details:
-            fx, fy, fz = d['FROM_POSX'], d['FROM_POSY'], d['FROM_POSZ']
-            tx, ty, tz = d['TO_POSX'], d['TO_POSY'], d['TO_POSZ']
+            if len(pts) >= 2:
+                routes.append({
+                    'guid': guid,
+                    'points': pts,
+                    'meta': {
+                        'eq_tag': r['EQUIPMENT_TAG'],
+                        'utility': r['SOURCE_UTILITY'],
+                        'utility_group': r['UTILITY_GROUP'],
+                        'size': r['SOURCE_SIZE']
+                    }
+                })
             
-            # Check for Null values
-            if None in (fx, fy, fz, tx, ty, tz):
-                continue
-                
-            pt_from = (float(fx), float(fy), float(fz))
-            pt_to = (float(tx), float(ty), float(tz))
-            
-            if not pts:
-                pts.append(pt_from)
-            elif dist(pts[-1], pt_from) > 1e-3:
-                pts.append(pt_from)
-                
-            if dist(pts[-1], pt_to) > 1e-3:
-                pts.append(pt_to)
-                
-        if len(pts) >= 2:
-            routes.append({
-                'guid': guid,
-                'points': pts,
-                'meta': route_meta[guid]
-            })
-            
-    print(f"Reconstructed {len(routes)} valid route polylines.")
+    print(f"Loaded {len(routes)} valid route middle trunk polylines.")
     return routes
 
 
@@ -856,8 +873,7 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                 
                 group_id = stable_id(eq_tag, util_gp, util, ",".join(m_guids), str(sec['segs'][0]['idx']))
                 
-                m_routes = [r for r in partition if r['guid'] in m_guids]
-                geom_wkt = bundle_routes_to_wkt_multilinestringz(m_routes)
+                geom_wkt = bundle_parallel_segments_to_wkt(sec, base_route, partition, m_guids)
                 trunk_wkt = generate_trunk_centerline_wkt(section_bounds)
                 trunk_len = float(sum(
                     (sec['max'][0] - sec['min'][0]) if sec['type'] == 'X' else (

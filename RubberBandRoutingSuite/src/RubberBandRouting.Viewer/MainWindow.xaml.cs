@@ -355,6 +355,8 @@ public partial class MainWindow : Window
             // so we don't rely only on the window's Closing event.
             SaveConnectionSettings();
         });
+
+        await ShowGroupPatternsAsync();
     }
 
     private void BuildTaskRows(RoutingScene scene)
@@ -618,11 +620,34 @@ public partial class MainWindow : Window
     {
         if (_scene == null) return 0;
         ClearVisuals(_existingRouteVisuals);
+        
         var paths = FilterExistingRoutes(_scene.ExistingRoutePaths).Take(250).ToList();
         for (var i = 0; i < paths.Count; i++)
         {
-            var diameter = ExistingRouteDiameter(paths[i]);
-            DrawPath(paths[i].Points, ExistingRouteBrush(paths[i].Group), diameter, _existingRouteVisuals, paths[i]);
+            var p = paths[i];
+            var diameter = ExistingRouteDiameter(p);
+            
+            // 1. Start Stub (보라색 계열)
+            if (TglExistingStart.IsChecked == true && p.StartStubPoints != null && p.StartStubPoints.Count >= 2)
+            {
+                var startBrush = new SolidColorBrush(Color.FromRgb(167, 139, 250));
+                startBrush.Freeze();
+                DrawPath(p.StartStubPoints, startBrush, diameter, _existingRouteVisuals, p);
+            }
+            
+            // 2. Middle Trunk (유틸리티/그룹별 고유 색상)
+            if (TglExistingTrunk.IsChecked == true && p.MiddleTrunkPoints != null && p.MiddleTrunkPoints.Count >= 2)
+            {
+                DrawPath(p.MiddleTrunkPoints, ExistingRouteBrush(p.Group), diameter, _existingRouteVisuals, p);
+            }
+            
+            // 3. End Stub (하늘색 계열)
+            if (TglExistingEnd.IsChecked == true && p.EndStubPoints != null && p.EndStubPoints.Count >= 2)
+            {
+                var endBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248));
+                endBrush.Freeze();
+                DrawPath(p.EndStubPoints, endBrush, diameter, _existingRouteVisuals, p);
+            }
         }
         UpdateVisibleObjectText();
         return paths.Count;
@@ -656,7 +681,7 @@ public partial class MainWindow : Window
 
     private void RefreshExistingRoutesForCurrentGroup()
     {
-        if (_scene == null || TglExistingRoutes.IsChecked != true) return;
+        if (_scene == null || (TglExistingStart.IsChecked != true && TglExistingTrunk.IsChecked != true && TglExistingEnd.IsChecked != true)) return;
         var count = DrawExistingRoutePaths();
         TxtStatus.Text = $"그룹 '{SelectedGroup()}' 기준으로 기존경로 필터링: {count}/{_scene.ExistingRoutePaths.Count}.";
     }
@@ -1704,6 +1729,9 @@ public partial class MainWindow : Window
     private void ApplyLayerVisibility()
     {
         if (!IsLoaded) return;
+        
+        DrawExistingRoutePaths();
+
         SetLayerVisible(_areaVisuals, TglArea.IsChecked == true);
         SetLayerVisible(_obstacleVisuals, TglObstacles.IsChecked == true);
         SetLayerVisible(_equipmentVisuals, TglEquipment.IsChecked == true);
@@ -1713,7 +1741,7 @@ public partial class MainWindow : Window
         SetLayerVisible(_routeVisuals, TglRoutes.IsChecked == true);
         SetLayerVisible(_selectedStepVisuals, TglRoutes.IsChecked == true);
         SetLayerVisible(_featureVisuals, TglFeaturePoints.IsChecked == true);
-        SetLayerVisible(_existingRouteVisuals, TglExistingRoutes.IsChecked == true);
+        SetLayerVisible(_existingRouteVisuals, TglExistingStart.IsChecked == true || TglExistingTrunk.IsChecked == true || TglExistingEnd.IsChecked == true);
         SetLayerVisible(_groupPatternVisuals, TglGroupPatterns.IsChecked == true);
         UpdateVisibleObjectText();
     }
@@ -1970,7 +1998,7 @@ public partial class MainWindow : Window
         if (ReferenceEquals(bucket, _routeVisuals)) return TglRoutes.IsChecked == true;
         if (ReferenceEquals(bucket, _selectedStepVisuals)) return TglRoutes.IsChecked == true;
         if (ReferenceEquals(bucket, _featureVisuals)) return TglFeaturePoints.IsChecked == true;
-        if (ReferenceEquals(bucket, _existingRouteVisuals)) return TglExistingRoutes.IsChecked == true;
+        if (ReferenceEquals(bucket, _existingRouteVisuals)) return TglExistingStart.IsChecked == true || TglExistingTrunk.IsChecked == true || TglExistingEnd.IsChecked == true;
         if (ReferenceEquals(bucket, _groupPatternVisuals)) return TglGroupPatterns.IsChecked == true;
         return true;
     }
@@ -2405,9 +2433,9 @@ public partial class MainWindow : Window
             
             if (isSelected)
             {
-                // 선택됨: 1.3배 두께, 알파값 220으로 아주 선명하게 강조
+                // 선택됨: 1.3배 두께, 알파값 255로 아주 선명하게 강조 (완전 불투명)
                 sleeveDiameter = baseDiameter * 1.30;
-                sleeveBrush = new SolidColorBrush(Color.FromArgb(220, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
+                sleeveBrush = new SolidColorBrush(Color.FromArgb(255, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
             }
             else if (hasSelection)
             {

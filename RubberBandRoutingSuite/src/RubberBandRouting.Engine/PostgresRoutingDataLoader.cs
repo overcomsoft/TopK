@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -91,7 +91,10 @@ public sealed record ExistingRoutePath(
     string? SourceName,
     string? TargetName,
     double DiameterMm,
-    List<Vec3> Points);
+    List<Vec3> Points,
+    List<Vec3> StartStubPoints,
+    List<Vec3> MiddleTrunkPoints,
+    List<Vec3> EndStubPoints);
 
 public sealed class RoutingScene
 {
@@ -274,59 +277,80 @@ public sealed class PostgresRoutingDataLoader
 
     private static async Task LoadExistingRoutePathsAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
     {
-        const string sql = @"SELECT s.""ROUTE_PATH_GUID"", rp.""UTILITY_GROUP"", rp.""SOURCE_UTILITY"",
+        const string sql = @"SELECT rp.""ROUTE_PATH_GUID"", rp.""UTILITY_GROUP"", rp.""SOURCE_UTILITY"",
                                    rp.""SOURCE_SIZE"", rp.""EQUIPMENT_NAME"", rp.""TARGET_OWNER_NAME"",
-                                   sd.""FROM_POSX"", sd.""FROM_POSY"", sd.""FROM_POSZ"",
-                                   sd.""TO_POSX"",   sd.""TO_POSY"",   sd.""TO_POSZ""
-                            FROM ""TB_ROUTE_SEGMENT_DETAIL"" sd
-                            JOIN ""TB_ROUTE_SEGMENTS"" s ON s.""SEGMENT_GUID"" = sd.""SEGMENT_GUID""
-                            JOIN ""TB_ROUTE_PATH"" rp    ON rp.""ROUTE_PATH_GUID"" = s.""ROUTE_PATH_GUID""
-                            WHERE rp.""SOURCE_POSX"" BETWEEN @minx AND @maxx
-                              AND rp.""SOURCE_POSY"" BETWEEN @miny AND @maxy
-                            ORDER BY s.""ROUTE_PATH_GUID"", s.""ORDER"", sd.""ORDER""";
+                                   ST_AsText(ps.""START_STUB_GEOM"") AS start_wkt,
+                                   ST_AsText(ps.""MIDDLE_TRUNK_GEOM"") AS trunk_wkt,
+                                   ST_AsText(ps.""END_STUB_GEOM"") AS end_wkt
+                             FROM ""TB_ROUTE_PATH"" rp
+                             LEFT JOIN ""TB_ROUTE_PATH_SEGMENTATION"" ps ON rp.""ROUTE_PATH_GUID"" = ps.""ROUTE_PATH_GUID""
+                             WHERE rp.""SOURCE_POSX"" BETWEEN @minx AND @maxx
+                               AND rp.""SOURCE_POSY"" BETWEEN @miny AND @maxy
+                             ORDER BY rp.""ROUTE_PATH_GUID""";
         await using var cmd = new NpgsqlCommand(sql, conn);
         AddXy(cmd, minx, miny, maxx, maxy);
         await using var r = await cmd.ExecuteReaderAsync(ct);
 
-        string? currentGuid = null;
-        string? group = null;
-        string? utility = null;
-        string? sourceName = null;
-        string? targetName = null;
-                double diameterMm = 0;
-        var points = new List<Vec3>();
-
-        void Flush()
-        {
-            if (string.IsNullOrWhiteSpace(currentGuid) || points.Count < 2) return;
-            scene.ExistingRoutePaths.Add(new ExistingRoutePath(currentGuid, utility, group, sourceName, targetName, diameterMm, new List<Vec3>(points)));
-        }
-
-        void AddPoint(Vec3 point)
-        {
-            if (points.Count == 0 || (points[^1] - point).Length > 1.0) points.Add(point);
-        }
-
         while (await r.ReadAsync(ct))
         {
             var guid = Str(r, 0);
-            if (!string.Equals(currentGuid, guid, StringComparison.Ordinal))
+            var group = NullStr(r, 1);
+            var utility = NullStr(r, 2);
+            var diameterMm = ParsePipeSizeMm(NullStr(r, 3));
+            var sourceName = NullStr(r, 4);
+            var targetName = NullStr(r, 5);
+            var startWkt = r.IsDBNull(6) ? null : r.GetString(6);
+            var trunkWkt = r.IsDBNull(7) ? null : r.GetString(7);
+            var endWkt = r.IsDBNull(8) ? null : r.GetString(8);
+
+            var startStub = ParseLineStringZ(startWkt);
+            var middleTrunk = ParseLineStringZ(trunkWkt);
+            var endStub = ParseLineStringZ(endWkt);
+
+            var points = new List<Vec3>(startStub);
+            foreach (var pt in middleTrunk)
             {
-                Flush();
-                currentGuid = guid;
-                group = NullStr(r, 1);
-                utility = NullStr(r, 2);
-                diameterMm = ParsePipeSizeMm(NullStr(r, 3));
-                sourceName = NullStr(r, 4);
-                targetName = NullStr(r, 5);
-                points.Clear();
+                if (points.Count == 0 || (points[^1] - pt).Length > 1.0) points.Add(pt);
+            }
+            foreach (var pt in endStub)
+            {
+                if (points.Count == 0 || (points[^1] - pt).Length > 1.0) points.Add(pt);
             }
 
-            if (!(r.IsDBNull(6) || r.IsDBNull(7) || r.IsDBNull(8))) AddPoint(new Vec3(Dbl(r, 6), Dbl(r, 7), Dbl(r, 8)));
-            if (!(r.IsDBNull(9) || r.IsDBNull(10) || r.IsDBNull(11))) AddPoint(new Vec3(Dbl(r, 9), Dbl(r, 10), Dbl(r, 11)));
+            if (points.Count >= 2)
+            {
+                scene.ExistingRoutePaths.Add(new ExistingRoutePath(
+                    guid, utility, group, sourceName, targetName, diameterMm, 
+                    points, startStub, middleTrunk, endStub));
+            }
         }
-        Flush();
     }
+
+    private static List<Vec3> ParseLineStringZ(string? wkt)
+    {
+        var list = new List<Vec3>();
+        if (string.IsNullOrWhiteSpace(wkt)) return list;
+        
+        var firstParen = wkt.IndexOf('(');
+        var lastParen = wkt.LastIndexOf(')');
+        if (firstParen == -1 || lastParen == -1 || lastParen <= firstParen) return list;
+        
+        var coordsStr = wkt.Substring(firstParen + 1, lastParen - firstParen - 1);
+        var parts = coordsStr.Split(',');
+        foreach (var p in parts)
+        {
+            var xyz = p.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (xyz.Length >= 3 &&
+                double.TryParse(xyz[0], out var x) &&
+                double.TryParse(xyz[1], out var y) &&
+                double.TryParse(xyz[2], out var z))
+            {
+                list.Add(new Vec3(x, y, z));
+            }
+        }
+        return list;
+    }
+
     private static async Task LoadRouteTasksAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
     {
         const string sql = @"SELECT ""ROUTE_PATH_GUID"",""UTILITY_GROUP"",""SOURCE_UTILITY"",""SOURCE_SIZE"",

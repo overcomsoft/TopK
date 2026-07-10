@@ -336,7 +336,9 @@
                     <CheckBox x:Name="TglPocs" Content="PoC 마커" IsChecked="True" Foreground="#FF6767" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglRoutes" Content="자동경로" IsChecked="True" Foreground="White" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglFeaturePoints" Content="특징점" IsChecked="True" Foreground="#FF4DFF" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
-                    <CheckBox x:Name="TglExistingRoutes" Content="기존경로" IsChecked="True" Foreground="#FFB347" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglExistingStart" Content="기존경로(Start)" IsChecked="True" Foreground="#A78BFA" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglExistingTrunk" Content="기존경로(Trunk)" IsChecked="True" Foreground="#FFB347" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
+                    <CheckBox x:Name="TglExistingEnd" Content="기존경로(End)" IsChecked="True" Foreground="#38BDF8" Margin="0,0,8,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <CheckBox x:Name="TglGroupPatterns" Content="그룹배관패턴" IsChecked="True" Foreground="#FFA500" Margin="8,0,0,0" Checked="LayerToggle_Changed" Unchecked="LayerToggle_Changed"/>
                     <Separator Margin="6,0" Width="1"/>
                     <CheckBox x:Name="ChkUseNativeEngine" Content="네이티브 C++ 엔진" Foreground="#7CD4FF" Margin="10,0,0,0"

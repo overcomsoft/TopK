@@ -698,7 +698,7 @@ def make_sample(route: RouteRecord, stub_kind: str, anchor: Anchor) -> StubSampl
     if not source or not target:
         return None
     oriented = orient_points(route.points, source if stub_kind == "START" else target)
-    walk = walk_stub(oriented)
+    walk = walk_stub(oriented, stub_kind)
     if not walk:
         return None
     stub_points, dir_ids = walk
@@ -748,36 +748,85 @@ def orient_points(points: list[tuple[float, float, float]], front: tuple[float, 
     return list(reversed(points)) if dist(points[-1], front) < dist(points[0], front) else list(points)
 
 
-def walk_stub(seg: list[tuple[float, float, float]]) -> tuple[list[tuple[float, float, float]], list[int]] | None:
-    """폴리라인 앞쪽에서 Stub 구간을 잘라낸다.
-
-    핵심 규칙:
-    - 첫 방향 run의 축을 수직/진출축으로 본다. z축만 수직이라고 가정하지 않는다.
-    - 축이 달라지는 첫 run을 엘보로 보고, 그 run은 최대 STUB_LEADIN_MM만 포함한다.
-    - 엘보가 없으면 STUB_MAX_MM까지 보수적으로 자른다.
-    - 반환값은 잘라낸 stub 점열과 6축 방향 인덱스 목록이다.
+def walk_stub(seg: list[tuple[float, float, float]], stub_kind: str) -> tuple[list[tuple[float, float, float]], list[int]] | None:
+    """폴리라인 앞쪽에서 현업 컷팅 룰에 맞게 Stub 구간을 잘라낸다.
+    (50mm 미만의 미세 지터 세그먼트는 방향 분류에서 제외하여 오작동 방지)
     """
-    runs = merge_short_runs(dir_runs(seg))
-    if not runs:
+    if len(seg) < 2:
         return None
-    first_axis = runs[0][0] // 2
-    total = 0.0
-    dir_ids: list[int] = []
-    bends = 0
-    for direction, length in runs:
-        axis = direction // 2
+
+    if stub_kind == "START":
+        first_axis = -1
+        for i in range(len(seg) - 1):
+            a, b = seg[i], seg[i+1]
+            if dist(a, b) >= 50.0:
+                first_axis = axis_snap(vec_sub(b, a)) // 2
+                break
+                
+        cut_idx = 1
+        if first_axis != -1:
+            first_run_len = 0.0
+            end_idx = 0
+            for i in range(len(seg) - 1):
+                a, b = seg[i], seg[i+1]
+                L = dist(a, b)
+                if L < 50.0:
+                    end_idx = i + 1
+                    continue
+                axis = axis_snap(vec_sub(b, a)) // 2
+                if axis == first_axis:
+                    first_run_len += L
+                    end_idx = i + 1
+                else:
+                    break
+                    
+            is_vertical = (first_axis == 2)
+            if is_vertical:
+                cut_idx = end_idx
+            else:
+                cut_idx = 1
+        else:
+            cut_idx = 1
+            
+        stub_pts = seg[:cut_idx + 1]
+    else:
+        last_axis = -1
+        for i in range(len(seg) - 1):
+            a, b = seg[i], seg[i+1]
+            if dist(a, b) >= 50.0:
+                last_axis = axis_snap(vec_sub(b, a)) // 2
+                break
+                
+        cut_idx = len(seg) - 1
+        if last_axis != -1:
+            for i in range(len(seg) - 1):
+                a, b = seg[i], seg[i+1]
+                L = dist(a, b)
+                if L < 50.0:
+                    cut_idx = i + 1
+                    continue
+                curr_axis = axis_snap(vec_sub(b, a)) // 2
+                if curr_axis != last_axis:
+                    cut_idx = i
+                    break
+                else:
+                    cut_idx = i + 1
+                    
+        if cut_idx >= len(seg):
+            cut_idx = len(seg) - 1
+        elif cut_idx < 1:
+            cut_idx = 1
+            
+        stub_pts = seg[:cut_idx + 1]
+
+    # dir_ids 계산
+    dir_ids = []
+    for a, b in zip(stub_pts, stub_pts[1:]):
+        direction = axis_snap(vec_sub(b, a))
         if direction not in dir_ids:
             dir_ids.append(direction)
-        if axis == first_axis:
-            total += length
-            continue
-        bends += 1
-        total += min(length, STUB_LEADIN_MM)
-        break
-    if bends == 0:
-        total = min(sum(length for _, length in runs), STUB_MAX_MM)
-    total = min(total, STUB_MAX_MM)
-    return points_until(seg, total), dir_ids[: STUB_MAX_BENDS + 1]
+            
+    return stub_pts, dir_ids[:4]
 
 
 def dir_runs(seg: list[tuple[float, float, float]]) -> list[list[float]]:
