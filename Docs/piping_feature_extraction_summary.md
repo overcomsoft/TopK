@@ -11,7 +11,7 @@
 | **`learn_design_features.py`** | **기존 설계 특징점 학습 통합 파이프라인**<br>• 개별 배관 복원 및 정규화 (스냅 보정)<br>• 시점/종점 PoC 접속 방향 Voting 분산 분석<br>• 선호 Z축 고도층 (Rack Levels) 통계 추출<br>• scikit-learn DBSCAN 기반 공용 척추선(Spine) 도출<br>• 배관 세그먼트-장애물 간 정밀 최단 거리 분석<br>• Top-K 유사 설계 검색용 30차원 코사인 특징 벡터 빌드 | • `TB_ROUTE_FEATURE_PATH` (개별 경로)<br>• `TB_ROUTE_FEATURE_ANCHOR` (접속 앵커)<br>• `TB_ROUTE_FEATURE_BUNDLE_TEMPLATE` (번들)<br>• `TB_ROUTE_FEATURE_OBSTACLE_RELATION` (장애물)<br>• `TB_ROUTE_FEATURE_VECTOR` (30D 벡터)<br>• `TB_ROUTE_FEATURE_GROUP_PROFILE` (그룹 프로필) | • `LineStringZ` (배관 궤적 및 척추선)<br>• `PointZ` (접속 PoC 좌표)<br>• `LineStringZ` (앵커 진입 Stub)<br>• `LineStringZ` (배관-장애물 최단 레이더선) |
 | **`ExtractStubPatterns.py`** | **장비/덕트 주변 초기 진입/탈출 Stub 형상 학습**<br>• 시점/종점 PoC 기준 꺾임(Elbow) 전까지의 대표 형상 군집화<br>• 장비명, 유틸리티, 파이프 구경별 표준 Stub 템플릿(Rise, Offset, 평균 길이) 선출 및 특징 모델 생성 | • `TB_ROUTE_STUB_TEMPLATE`<br>• `TB_ROUTE_FEATURE_STUB_TEMPLATE` (미러링) | • `LineStringZ` (대표 Stub 꺾임 궤적) |
 | **`ExtractVerticalGroup.py`** | **수직 다발 배관 (입상/입하 그룹) 분석**<br>• `TB_SPACE_INFO` 영역 정보를 참조하여 격자보 하단 등 CSF 상단 높이 기반의 수직 다발배관 그룹 탐지<br>• 동일 영역 수직 이동 배관 수, 배치 간격, AABB 영역 산출<br>• 다발배관이 수평으로 꺾여 나가는 전이 정보 추정 | • `TB_ROUTE_VERTICAL_GROUP_FEATURE` | • `MultiLineStringZ` (수직 다발 라인 형상) |
-| **`DesignPatternAnalyzer.py`** | **복도 구간 주행 패턴 및 그룹 번들 군집화**<br>• 스페이스 그룹 내 동일 유틸리티 배관들을 통계적/기하적으로 묶어 공용 주행 복도(Corridor) 영역 정의<br>• 주행 복도 세부 구간의 Box AABB 경계 구역 산출<br>• 복도 주행 대표 패턴 시퀀스(예: H-V-H) 및 번들 규격 추출 | • `TB_ROUTE_GROUP_PATTERN` | • `MultiPolygonZ` (주행 복도 Bounding Box 다면체) |
+| **`ExportGroupPattern.py`** (구 `DesignPatternAnalyzer.py`) | **그룹배관(다발) 패턴 세그먼트 스캔 및 등간격/수평·수직 분류**<br>• 장비+유틸리티그룹 파티션 내에서 세그먼트 단위 평행 스캔으로 다발배관 구간 탐지<br>• 각 구간의 Box AABB 경계 구역(`SECTION_BOUNDS`) 산출<br>• 대표 진행축 시퀀스(`PATTERN_SEQ`, 예: `"XYZ"`) 및 인접 배관 간격의 등간격(CV) 여부, 수평/수직 오프셋축 분류 | • `TB_ROUTE_GROUP_PATTERN` | • `MultiLineStringZ` (다발 멤버 배관선 및 대표 중심선) |
 
 ---
 
@@ -41,5 +41,6 @@
 - 건물 슬래브 또는 격자보 하단 높이 등의 공간 영역 스키마(`TB_SPACE_INFO`, `TB_SPACE_GROUP_INFO`)를 연계하여, 해당 영역을 수직으로 지나가는 다발 관로를 탐색합니다.
 - 이를 통해 수직 이동 통로 상의 배관 개수, 배열 간격, 바운딩 박스 기하정보를 도출합니다.
 
-### ⑦ 복도 주행 Box 다면체화 (`DesignPatternAnalyzer.py` -> `section_bounds_to_wkt_multipolygonz()`)
-- 군집화된 배관 복도 영역(Corridor)의 3D 공간 정보를 표현하기 위해, 각 구간 Bounding Box의 Min/Max 좌표를 기반으로 6개의 외부 면(각 5개의 정점으로 닫힌 사각형 루프)을 구성하여 PostGIS가 해석할 수 있는 `MULTIPOLYGON Z` WKT 포맷으로 변환해 적재합니다.
+### ⑦ 그룹배관 대표 중심선 산출 (`ExportGroupPattern.py` -> `generate_trunk_centerline_wkt()`)
+- 탐지된 그룹배관 다발 영역의 3D 공간 정보를 표현하기 위해, 각 구간 Bounding Box의 Min/Max 좌표를 기반으로 진행축을 관통하는 대표 중심선을 계산하여 PostGIS가 해석할 수 있는 `MULTILINESTRING Z` WKT 포맷으로 변환해 `TRUNK_GEOM_3D` 컬럼에 적재합니다.
+  (※ 이전 버전 문서는 `MULTIPOLYGON Z` 다면체 생성 함수로 기술되어 있었으나, 실제 코드는 다면체가 아닌 중심선(`LineStringZ`)을 생성합니다 — 문서 오기 정정.)

@@ -6,8 +6,8 @@ from collections import Counter, defaultdict
 import psycopg2
 import psycopg2.extras
 
-# 기존 DesignPatternAnalyzer 모듈에서 핵심 함수 및 상수 임포트
-from DesignPatternAnalyzer import (
+# 기존 ExportGroupPattern 모듈에서 핵심 함수 및 상수 임포트
+from ExportGroupPattern import (
     extract_pipe_feature,
     compute_similarity,
     get_median,

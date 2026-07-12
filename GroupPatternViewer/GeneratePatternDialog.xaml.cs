@@ -49,18 +49,18 @@ namespace GroupPatternViewer
             try
             {
                 string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-                string scriptPath = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", "..", "Tools", "DesignPatternAnalyzer.py"));
+                string scriptPath = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", "..", "Tools", "ExportGroupPattern.py"));
                 
                 if (!File.Exists(scriptPath))
                 {
                     // Fallback just in case
-                    scriptPath = Path.GetFullPath(Path.Combine(exeDir, "..", "Tools", "DesignPatternAnalyzer.py"));
+                    scriptPath = Path.GetFullPath(Path.Combine(exeDir, "..", "Tools", "ExportGroupPattern.py"));
                 }
 
                 if (!File.Exists(scriptPath))
                 {
                     // If still not found, try using direct path based on project structure
-                    scriptPath = @"d:\DINNO\DEV\AI-AutoRouting\TopKGen\Tools\DesignPatternAnalyzer.py";
+                    scriptPath = @"d:\DINNO\DEV\AI-AutoRouting\TopKGen\Tools\ExportGroupPattern.py";
                 }
 
                 if (!File.Exists(scriptPath))
@@ -76,7 +76,7 @@ namespace GroupPatternViewer
                     args += " --dry-run";
                 }
 
-                AppendLog($"> python DesignPatternAnalyzer.py --host {host} --port {port} --db {dbname} ... {command}\n");
+                AppendLog($"> python ExportGroupPattern.py --host {host} --port {port} --db {dbname} ... {command}\n");
 
                 _pythonProcess = new Process
                 {
