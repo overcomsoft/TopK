@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_PATH_SEGMENTATION" (
     "END_STUB_GEOM" geometry(LineStringZ, 0),
     "START_FREE_POINT" geometry(PointZ, 0),
     "END_FREE_POINT" geometry(PointZ, 0),
+    "END_ENTRY_DIR_X" double precision,
+    "END_ENTRY_DIR_Y" double precision,
+    "END_ENTRY_DIR_Z" double precision,
     "CREATED_AT" timestamp without time zone DEFAULT now()
 );
 

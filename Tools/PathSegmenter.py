@@ -38,6 +38,7 @@
 - first_axis: 시작부의 첫 유의미한 세그먼트 진행 방향 축 인덱스
 - start_idx: Start Stub의 분할 종료 기준 정점 인덱스
 - last_axis: 종단부 역방향 탐색 시의 최초 진행 방향 축 인덱스
+- entry_direction: End Stub이 종단 PoC로 진입하는 축정렬 단위벡터 (예: (0,0,-1)), 미확정 시 None
 - end_idx: End Stub의 분할 시작 기준 정점 인덱스
 - start_stub_pts / middle_trunk_pts / end_stub_pts: 분할된 각 세그먼트의 3D 좌표 점열 리스트
 - start_free_point / end_free_point: 각 Stub과 Trunk 사이의 연결점(접속 자유점) 좌표
@@ -58,6 +59,7 @@ import psycopg2.extras
 
 # 6축 방향 인덱스 규약: 0:+x, 1:-x, 2:+y, 3:-y, 4:+z, 5:-z
 AXIS_NAMES = ["+x", "-x", "+y", "-y", "+z", "-z"]
+AXIS_VECTORS = [(1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, -1.0)]
 
 def dist(a, b) -> float:
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
@@ -110,13 +112,17 @@ def get_first_run(points: list[tuple[float, float, float]]) -> tuple[float, int,
     is_vertical = (first_axis == 2) # Z축은 2
     return total_len, end_idx, is_vertical
 
-def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list, list, tuple, tuple]:
+def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list, list, tuple, tuple, tuple]:
     """
     한 배관 경로를 현업 기준에 맞게 Start Stub, Middle Trunk, End Stub으로 분할합니다.
     (50mm 미만의 미세 지터 세그먼트는 방향 분류에서 제외하여 오작동 방지)
+
+    반환값의 마지막 요소(entry_direction)는 End Stub이 종단 PoC로 진입하는 방향의
+    축정렬 단위벡터(예: (0,0,-1))이며, 역방향 스캔에서 찾은 최초 유의미(50mm 이상)
+    세그먼트의 실제 진행 방향입니다. 해당 세그먼트를 찾지 못하면 None입니다.
     """
     if len(points) < 2:
-        return [], [], [], None, None
+        return [], [], [], None, None, None
         
     # --- 1. START_STUB 분할 ---
     # Start Stub: 장비 PoC부터 → A/F구역 수평 이동 → 격자보 관통 수직 하강 → CSF구역 진입 직전까지
@@ -176,15 +182,21 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
     # --- 2. END_STUB 분할 (종단 덕트/레터럴 역방향 스캔) ---
     # 종단 PoC(points[-1])에서 시작하여 처음으로 방향이 바뀌는 첫 엘보 정점까지 포함
     end_idx = len(points) - 1
+    entry_direction = None
     if len(points) - 1 > start_idx:
         # 역방향 기준 첫 번째 유의미한(50mm 이상) 세그먼트 방향 찾기
         last_axis = -1
+        last_axis_full = -1
         for i in range(len(points) - 2, start_idx - 1, -1):
             a, b = points[i], points[i+1]
             if dist(a, b) >= 50.0:
-                last_axis = axis_snap(vec_sub(b, a)) // 2
+                last_axis_full = axis_snap(vec_sub(b, a))
+                last_axis = last_axis_full // 2
                 break
-                
+
+        if last_axis_full != -1:
+            entry_direction = AXIS_VECTORS[last_axis_full]
+
         if last_axis != -1:
             for i in range(len(points) - 2, start_idx - 1, -1):
                 a, b = points[i], points[i+1]
@@ -214,8 +226,8 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
     middle_trunk_pts = points[start_idx : end_idx + 1]
     if len(middle_trunk_pts) < 2:
         middle_trunk_pts = [start_free_point, end_free_point]
-        
-    return start_stub_pts, middle_trunk_pts, end_stub_pts, start_free_point, end_free_point
+
+    return start_stub_pts, middle_trunk_pts, end_stub_pts, start_free_point, end_free_point, entry_direction
 
 def open_connection(conninfo: str):
     try:
@@ -301,20 +313,24 @@ def run_segmentation(conn) -> None:
         
     insert_sql = """
         INSERT INTO "TB_ROUTE_PATH_SEGMENTATION" (
-            "ROUTE_PATH_GUID", 
-            "START_STUB_GEOM", 
-            "MIDDLE_TRUNK_GEOM", 
-            "END_STUB_GEOM", 
-            "START_FREE_POINT", 
-            "END_FREE_POINT"
+            "ROUTE_PATH_GUID",
+            "START_STUB_GEOM",
+            "MIDDLE_TRUNK_GEOM",
+            "END_STUB_GEOM",
+            "START_FREE_POINT",
+            "END_FREE_POINT",
+            "END_ENTRY_DIR_X",
+            "END_ENTRY_DIR_Y",
+            "END_ENTRY_DIR_Z"
         )
         VALUES (
-            %s, 
-            ST_GeomFromText(%s, 0), 
-            ST_GeomFromText(%s, 0), 
-            ST_GeomFromText(%s, 0), 
-            ST_GeomFromText(%s, 0), 
-            ST_GeomFromText(%s, 0)
+            %s,
+            ST_GeomFromText(%s, 0),
+            ST_GeomFromText(%s, 0),
+            ST_GeomFromText(%s, 0),
+            ST_GeomFromText(%s, 0),
+            ST_GeomFromText(%s, 0),
+            %s, %s, %s
         )
         ON CONFLICT ("ROUTE_PATH_GUID") DO UPDATE SET
             "START_STUB_GEOM" = EXCLUDED."START_STUB_GEOM",
@@ -322,21 +338,25 @@ def run_segmentation(conn) -> None:
             "END_STUB_GEOM" = EXCLUDED."END_STUB_GEOM",
             "START_FREE_POINT" = EXCLUDED."START_FREE_POINT",
             "END_FREE_POINT" = EXCLUDED."END_FREE_POINT",
+            "END_ENTRY_DIR_X" = EXCLUDED."END_ENTRY_DIR_X",
+            "END_ENTRY_DIR_Y" = EXCLUDED."END_ENTRY_DIR_Y",
+            "END_ENTRY_DIR_Z" = EXCLUDED."END_ENTRY_DIR_Z",
             "CREATED_AT" = now()
     """
-    
+
     rows = []
     for r in routes:
         guid = r['guid']
-        start_pts, middle_pts, end_pts, start_fp, end_fp = segment_route(r['points'])
-        
+        start_pts, middle_pts, end_pts, start_fp, end_fp, entry_dir = segment_route(r['points'])
+
         start_wkt = points_to_wkt_linestringz(start_pts)
         middle_wkt = points_to_wkt_linestringz(middle_pts)
         end_wkt = points_to_wkt_linestringz(end_pts)
         start_fp_wkt = point_to_wkt_pointz(start_fp)
         end_fp_wkt = point_to_wkt_pointz(end_fp)
-        
-        rows.append((guid, start_wkt, middle_wkt, end_wkt, start_fp_wkt, end_fp_wkt))
+        edx, edy, edz = entry_dir if entry_dir is not None else (None, None, None)
+
+        rows.append((guid, start_wkt, middle_wkt, end_wkt, start_fp_wkt, end_fp_wkt, edx, edy, edz))
         
     with conn.cursor() as cur:
         cur.execute('DELETE FROM "TB_ROUTE_PATH_SEGMENTATION"')
