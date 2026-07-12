@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:helix="http://helix-toolkit.org/wpf"
         Title="RubberBand Routing 3D Viewer - PostgreSQL PoC Auto Routing" Width="1500" Height="900"
+        Icon="app_icon.ico"
         WindowStartupLocation="CenterScreen" Background="#172033">
     <Window.Resources>
         <Style TargetType="{x:Type DataGridColumnHeader}">
@@ -69,6 +70,7 @@
                                 <RowDefinition Height="34"/>
                                 <RowDefinition Height="34"/>
                                 <RowDefinition Height="34"/>
+                                <RowDefinition Height="34"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="② 유틸리티" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
                             <ListBox x:Name="ListUtilities" Grid.Row="1" Height="100" SelectionChanged="ListUtilities_SelectionChanged" Background="#2E3C53" Foreground="White" BorderBrush="#4B5F7B"/>
@@ -78,6 +80,7 @@
                             <Button x:Name="BtnCompareRoutes" Grid.Row="5" Content="⇄ 기존경로와 비교" Margin="0,6,0,0" Background="#3B7A9E" Foreground="White" Click="BtnCompareRoutes_Click"/>
                             <Button x:Name="BtnShowGroupPatterns" Grid.Row="6" Content="◎ 그룹배관 패턴 3D 표시" Margin="0,6,0,0" Background="#FFA500" Foreground="Black" FontWeight="SemiBold" Click="BtnShowGroupPatterns_Click"/>
                             <Button x:Name="BtnShowSegmentViewer" Grid.Row="7" Content="◎ 삼분할(Stub/Trunk) 3D 표시" Margin="0,6,0,0" Background="#9E418C" Foreground="White" FontWeight="SemiBold" Click="BtnShowSegmentViewer_Click"/>
+                            <Button x:Name="BtnShowGroupPatternDialog" Grid.Row="8" Content="◎ 그룹배관 다이얼로그 (수평/수직)" Margin="0,6,0,0" Background="#B45309" Foreground="White" FontWeight="SemiBold" Click="BtnShowGroupPatternDialog_Click"/>
                         </Grid>
                     </Border>
 

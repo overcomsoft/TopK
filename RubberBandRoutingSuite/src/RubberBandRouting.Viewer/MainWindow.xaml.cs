@@ -284,14 +284,18 @@ public partial class MainWindow : Window
 
     private async Task LoadProjectsAsync()
     {
+        // Preserve whatever the user currently has picked in the dropdown (even if its scene
+        // hasn't been loaded yet) instead of always snapping back to the last *loaded* project —
+        // otherwise re-fetching the list here silently discards the user's pending selection.
+        var pendingSelectionName = (CmbProjects.SelectedItem as RoutingProject)?.DisplayName ?? _lastProjectDisplayName;
         RoutingProject? selectedProject = null;
 
         await RunBusyAsync("프로젝트 목록을 불러오는 중...", async () =>
         {
             var projects = await _loader.ListProjectsAsync(ReadDbOptions());
             CmbProjects.ItemsSource = projects;
-            var remembered = _lastProjectDisplayName != null
-                ? projects.FirstOrDefault(p => p.DisplayName == _lastProjectDisplayName)
+            var remembered = pendingSelectionName != null
+                ? projects.FirstOrDefault(p => p.DisplayName == pendingSelectionName)
                 : null;
             if (remembered != null)
             {
@@ -310,7 +314,11 @@ public partial class MainWindow : Window
             if (projects.Count > 0) SaveConnectionSettings();
         });
 
-        if (!_loadedInitialScene && selectedProject != null)
+        // Load the scene if we've never loaded one yet, or if the resolved selection points at a
+        // different project than the one currently on screen (user switched projects then hit 로드).
+        var sceneUpToDate = _loadedInitialScene && selectedProject != null
+            && string.Equals(selectedProject.DisplayName, _scene?.Project.DisplayName, StringComparison.Ordinal);
+        if (selectedProject != null && !sceneUpToDate)
         {
             _loadedInitialScene = true;
             if ((CmbProjects.SelectedItem as RoutingProject) != selectedProject)
@@ -2151,7 +2159,20 @@ public partial class MainWindow : Window
             return;
         }
 
-        var window = new SegmentViewerWindow(_scene.ExistingRoutePaths, _scene.SpatialZones) { Owner = this };
+        var window = new SegmentViewerWindow(_scene.ExistingRoutePaths, _scene.SpatialZones, _scene.Equipment, _scene.DuctLaterals) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void BtnShowGroupPatternDialog_Click(object sender, RoutedEventArgs e)
+    {
+        if (_scene == null || _scene.ExistingRoutePaths.Count == 0)
+        {
+            TxtStatus.Text = "기본설계 씬이 로드되지 않았거나 기존경로가 없습니다.";
+            return;
+        }
+
+        var window = new GroupPatternViewerWindow(_scene.ExistingRoutePaths, _scene.SpatialZones, ReadDbOptions(),
+            _scene.Equipment, _scene.DuctLaterals) { Owner = this };
         window.ShowDialog();
     }
 
@@ -2163,15 +2184,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        var rawTags = _scene.Equipment.Select(e => e.Name ?? "").Where(n => !string.IsNullOrEmpty(n)).ToList();
-        var eqTags = new List<string>();
-        foreach (var tag in rawTags)
-        {
-            eqTags.Add(tag);
-            var trimmed = tag.TrimEnd('_').Trim();
-            if (trimmed != tag) eqTags.Add(trimmed);
-        }
-        eqTags = eqTags.Distinct().ToList();
+        // _scene.Equipment.Name(INSTANCE_NAME)은 "Mechanical Equipment//Autodesk.Revit.DB.FamilyInstance//kscta01//kscta01//"
+        // 형태의 원본 Revit 합성 문자열이며, TB_ROUTE_GROUP_PATTERN.EQUIPMENT_TAG(예: "KSCTA01")와는 다른 컬럼이라
+        // 단순 문자열 가공으로는 매칭되지 않는다. 실제 배관 레코드(TB_ROUTE_PATH.EQUIPMENT_TAG)에서 읽어온 값을 사용한다.
+        var eqTags = _scene.ExistingRoutePaths
+            .Where(p => !string.IsNullOrWhiteSpace(p.EquipmentTag))
+            .Select(p => p.EquipmentTag!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         if (eqTags.Count == 0)
         {

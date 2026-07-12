@@ -18,7 +18,12 @@
     <!-- RubberBandRouting.Native.dll is built as x64 (cpp/RubberBandRouting.Native/build_msvc.bat via
          vcvars64.bat); the process bitness must match for P/Invoke to load it. -->
     <PlatformTarget>x64</PlatformTarget>
+    <ApplicationIcon>app_icon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="app_icon.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- Optional: only present after running cpp/RubberBandRouting.Native/build_msvc.bat.

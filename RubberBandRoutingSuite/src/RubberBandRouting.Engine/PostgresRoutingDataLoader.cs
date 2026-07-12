@@ -94,7 +94,8 @@ public sealed record ExistingRoutePath(
     List<Vec3> Points,
     List<Vec3> StartStubPoints,
     List<Vec3> MiddleTrunkPoints,
-    List<Vec3> EndStubPoints);
+    List<Vec3> EndStubPoints,
+    string? EquipmentTag = null);
 
 public sealed record SpatialZone(
     string Name,
@@ -335,7 +336,8 @@ public sealed class PostgresRoutingDataLoader
                                    rp.""SOURCE_SIZE"", rp.""EQUIPMENT_NAME"", rp.""TARGET_OWNER_NAME"",
                                    ST_AsText(ps.""START_STUB_GEOM"") AS start_wkt,
                                    ST_AsText(ps.""MIDDLE_TRUNK_GEOM"") AS trunk_wkt,
-                                   ST_AsText(ps.""END_STUB_GEOM"") AS end_wkt
+                                   ST_AsText(ps.""END_STUB_GEOM"") AS end_wkt,
+                                   rp.""EQUIPMENT_TAG""
                              FROM ""TB_ROUTE_PATH"" rp
                              LEFT JOIN ""TB_ROUTE_PATH_SEGMENTATION"" ps ON rp.""ROUTE_PATH_GUID"" = ps.""ROUTE_PATH_GUID""
                              WHERE rp.""SOURCE_POSX"" BETWEEN @minx AND @maxx
@@ -356,6 +358,7 @@ public sealed class PostgresRoutingDataLoader
             var startWkt = r.IsDBNull(6) ? null : r.GetString(6);
             var trunkWkt = r.IsDBNull(7) ? null : r.GetString(7);
             var endWkt = r.IsDBNull(8) ? null : r.GetString(8);
+            var equipmentTag = NullStr(r, 9);
 
             var startStub = ParseLineStringZ(startWkt);
             var middleTrunk = ParseLineStringZ(trunkWkt);
@@ -374,8 +377,8 @@ public sealed class PostgresRoutingDataLoader
             if (points.Count >= 2)
             {
                 scene.ExistingRoutePaths.Add(new ExistingRoutePath(
-                    guid, utility, group, sourceName, targetName, diameterMm, 
-                    points, startStub, middleTrunk, endStub));
+                    guid, utility, group, sourceName, targetName, diameterMm,
+                    points, startStub, middleTrunk, endStub, equipmentTag));
             }
         }
     }

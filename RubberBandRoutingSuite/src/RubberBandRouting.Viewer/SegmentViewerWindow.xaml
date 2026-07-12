@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:helix="http://helix-toolkit.org/wpf"
         Title="기존설계경로 삼분할(Start/Trunk/End) 3D 뷰어" Width="1200" Height="750" MinWidth="800" MinHeight="500"
+        Icon="app_icon.ico"
         WindowStartupLocation="CenterOwner" Background="#172033">
     <Grid>
         <Grid.ColumnDefinitions>

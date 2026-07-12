@@ -14,6 +14,8 @@ public partial class SegmentViewerWindow : Window
 {
     private readonly List<ExistingRoutePath> _allPaths;
     private readonly List<SpatialZone> _spatialZones;
+    private readonly Dictionary<string, SceneObject> _equipmentByName;
+    private readonly Dictionary<string, SceneObject> _ductLateralsByName;
     private readonly List<Visual3D> _visuals3D = new();
     private readonly List<Visual3D> _visualsXY = new();
     private readonly List<Visual3D> _visualsZ = new();
@@ -36,14 +38,25 @@ public partial class SegmentViewerWindow : Window
         }
     }
 
-    public SegmentViewerWindow(List<ExistingRoutePath> paths, List<SpatialZone> spatialZones)
+    public SegmentViewerWindow(List<ExistingRoutePath> paths, List<SpatialZone> spatialZones, List<SceneObject>? equipment = null, List<SceneObject>? ductLaterals = null)
     {
         InitializeComponent();
         _allPaths = paths ?? new List<ExistingRoutePath>();
         _spatialZones = spatialZones ?? new List<SpatialZone>();
-        
+        _equipmentByName = BuildNameLookup(equipment);
+        _ductLateralsByName = BuildNameLookup(ductLaterals);
+
         PopulateFilterComboBoxes();
         ApplyFilters();
+    }
+
+    private static Dictionary<string, SceneObject> BuildNameLookup(List<SceneObject>? items)
+    {
+        if (items == null || items.Count == 0) return new Dictionary<string, SceneObject>(StringComparer.OrdinalIgnoreCase);
+        return items
+            .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+            .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
     }
 
     private void PopulateFilterComboBoxes()
@@ -212,7 +225,46 @@ public partial class SegmentViewerWindow : Window
             BuildAndDrawDetailedSection(path.EndStubPoints, Colors.Cyan, 100, "종단 도출부 (End Stub)", path);
         }
 
+        DrawEndpointOwners(path);
+
         FitCameraToCurrentPath(path.Points);
+    }
+
+    // 시작 PoC의 소유 장비, 종단 PoC의 소유 덕트/레터럴을 반투명(30%) 박스로 표시.
+    // 색상은 MainWindow의 기본설계 씬 표시(장비=amber, 덕트=green, 레터럴=teal)와 동일하게 맞춤.
+    private void DrawEndpointOwners(ExistingRoutePath path)
+    {
+        if (!string.IsNullOrWhiteSpace(path.SourceName) && _equipmentByName.TryGetValue(path.SourceName, out var equipment))
+        {
+            var color = Color.FromArgb(77, 245, 158, 11);
+            AddSolidBox(equipment.Bounds, color, _visuals3D, Viewport3D);
+            AddSolidBox(equipment.Bounds, color, _visualsXY, ViewportXY);
+            AddSolidBox(equipment.Bounds, color, _visualsZ, ViewportZ);
+        }
+
+        if (!string.IsNullOrWhiteSpace(path.TargetName) && _ductLateralsByName.TryGetValue(path.TargetName, out var ductLateral))
+        {
+            var color = string.Equals(ductLateral.Category, "LATERAL", StringComparison.OrdinalIgnoreCase)
+                ? Color.FromArgb(77, 45, 212, 191)
+                : Color.FromArgb(77, 34, 197, 94);
+            AddSolidBox(ductLateral.Bounds, color, _visuals3D, Viewport3D);
+            AddSolidBox(ductLateral.Bounds, color, _visualsXY, ViewportXY);
+            AddSolidBox(ductLateral.Bounds, color, _visualsZ, ViewportZ);
+        }
+    }
+
+    private void AddSolidBox(Aabb box, Color color, List<Visual3D> bucket, HelixViewport3D viewport)
+    {
+        var visual = new BoxVisual3D
+        {
+            Center = new Point3D(box.Center.X, box.Center.Y, box.Center.Z),
+            Length = box.Max.X - box.Min.X,
+            Width = box.Max.Y - box.Min.Y,
+            Height = box.Max.Z - box.Min.Z,
+            Fill = new SolidColorBrush(color)
+        };
+        bucket.Add(visual);
+        viewport.Children.Add(visual);
     }
 
     private void BuildAndDrawDetailedSection(List<Vec3> points, Color color, double diameter, string sectionName, ExistingRoutePath path)
@@ -373,17 +425,12 @@ public partial class SegmentViewerWindow : Window
         }
 
         // 2. Orthographic camera fits for 2D views
+        // 수평(XY)/수직(Z) 단면도는 선택된 경로가 아니라 공간영역(CR/A-F/CSF/...) 전체를 기준으로 전체보기 함.
         double minX2 = double.MaxValue, maxX2 = double.MinValue;
         double minY2 = double.MaxValue, maxY2 = double.MinValue;
         double minZ2 = double.MaxValue, maxZ2 = double.MinValue;
 
-        if (points.Count > 0)
-        {
-            minX2 = points.Min(p => p.X); maxX2 = points.Max(p => p.X);
-            minY2 = points.Min(p => p.Y); maxY2 = points.Max(p => p.Y);
-            minZ2 = points.Min(p => p.Z); maxZ2 = points.Max(p => p.Z);
-        }
-        else if (_spatialZones.Count > 0)
+        if (_spatialZones.Count > 0)
         {
             foreach (var zone in _spatialZones)
             {
@@ -394,6 +441,12 @@ public partial class SegmentViewerWindow : Window
                 minZ2 = Math.Min(minZ2, zone.Bounds.Min.Z);
                 maxZ2 = Math.Max(maxZ2, zone.Bounds.Max.Z);
             }
+        }
+        else if (points.Count > 0)
+        {
+            minX2 = points.Min(p => p.X); maxX2 = points.Max(p => p.X);
+            minY2 = points.Min(p => p.Y); maxY2 = points.Max(p => p.Y);
+            minZ2 = points.Min(p => p.Z); maxZ2 = points.Max(p => p.Z);
         }
         else
         {
@@ -406,10 +459,15 @@ public partial class SegmentViewerWindow : Window
         var centerY = (minY2 + maxY2) / 2.0;
         var centerZ = (minZ2 + maxZ2) / 2.0;
 
-        // 패딩을 20% 추가하여 경로 양 끝이 잘리지 않도록 함
+        // 패딩을 20% 추가하여 공간영역 전체가 잘리지 않도록 함
         var sizeX = Math.Max(500, (maxX2 - minX2) * 1.2);
         var sizeY = Math.Max(500, (maxY2 - minY2) * 1.2);
         var sizeZ = Math.Max(500, (maxZ2 - minZ2) * 1.2);
+
+        // 수직 단면 뷰의 관찰 방향(X축/Y축 중 어디서 볼지)은 확대범위와 별개로,
+        // 선택된 경로 자체의 주 수평 이동 방향을 기준으로 판단함.
+        var pathSizeX = points.Count > 0 ? points.Max(p => p.X) - points.Min(p => p.X) : 0.0;
+        var pathSizeY = points.Count > 0 ? points.Max(p => p.Y) - points.Min(p => p.Y) : 0.0;
 
         // HelixViewport3D 렌더링 완료 후에 카메라를 적용해야 반영됨
         // DispatcherPriority.Loaded: 레이아웃+렌더 완료 후 → ActualWidth/ActualHeight 확정된 시점
@@ -451,7 +509,7 @@ public partial class SegmentViewerWindow : Window
                 ViewportZ.Camera = camZ;
             }
 
-            bool yDominant = sizeY >= sizeX;
+            bool yDominant = pathSizeY >= pathSizeX;
             double domHoriz = yDominant ? sizeY : sizeX;
 
             // Width(수평) >= domHoriz  AND  Width/aspect(수직) >= sizeZ
