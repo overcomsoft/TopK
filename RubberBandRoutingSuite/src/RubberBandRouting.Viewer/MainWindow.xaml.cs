@@ -19,6 +19,7 @@ namespace RubberBandRouting.Viewer;
 public partial class MainWindow : Window
 {
     private readonly List<Visual3D> _areaVisuals = new();
+    private readonly List<Visual3D> _spatialZoneVisuals = new();
     private readonly List<Visual3D> _obstacleVisuals = new();
     private readonly List<Visual3D> _equipmentVisuals = new();
     private readonly List<Visual3D> _ductVisuals = new();
@@ -128,7 +129,7 @@ public partial class MainWindow : Window
             TxtStatus.Text = "비교할 자동설계 경로가 없습니다. 먼저 라우팅을 실행하세요.";
             return;
         }
-        var window = new CompareRoutesWindow(BuildCompareEntries()) { Owner = this };
+        var window = new CompareRoutesWindow(BuildCompareEntries(), _scene?.SpatialZones) { Owner = this };
         window.Show();
     }
 
@@ -1048,6 +1049,12 @@ public partial class MainWindow : Window
     private void DrawScene(RoutingScene scene)
     {
         AddWireBox(scene.Project.Bounds, Brushes.LimeGreen, 28, _areaVisuals);
+        foreach (var zone in scene.SpatialZones)
+        {
+            var brush = GetSpatialZoneBrush(zone.Name);
+            AddWireBox(zone.Bounds, brush, 20.0, _spatialZoneVisuals);
+            AddTextLabel(zone.Name, zone.Bounds.Center, _spatialZoneVisuals);
+        }
         foreach (var item in scene.Obstacles) AddBox(item.Bounds, item.IsPassThrough ? Color.FromArgb(30, 148, 163, 184) : Color.FromArgb(72, 156, 163, 175), _obstacleVisuals);
         foreach (var item in scene.Equipment) AddBox(item.Bounds, Color.FromArgb(77, 245, 158, 11), _equipmentVisuals);
         foreach (var item in scene.DuctLaterals)
@@ -1733,6 +1740,7 @@ public partial class MainWindow : Window
         DrawExistingRoutePaths();
 
         SetLayerVisible(_areaVisuals, TglArea.IsChecked == true);
+        SetLayerVisible(_spatialZoneVisuals, TglArea.IsChecked == true);
         SetLayerVisible(_obstacleVisuals, TglObstacles.IsChecked == true);
         SetLayerVisible(_equipmentVisuals, TglEquipment.IsChecked == true);
         SetLayerVisible(_ductVisuals, TglDucts.IsChecked == true);
@@ -1759,6 +1767,7 @@ public partial class MainWindow : Window
     private void ClearSceneVisuals()
     {
         ClearVisuals(_areaVisuals);
+        ClearVisuals(_spatialZoneVisuals);
         ClearVisuals(_obstacleVisuals);
         ClearVisuals(_equipmentVisuals);
         ClearVisuals(_ductVisuals);
@@ -1987,9 +1996,27 @@ public partial class MainWindow : Window
         if (ShouldShowBucket(bucket)) Viewport.Children.Add(visual);
     }
 
+    private void AddTextLabel(string text, Vec3 position, List<Visual3D> bucket)
+    {
+        var visual = new BillboardTextVisual3D
+        {
+            Position = ToPoint3D(position),
+            Text = text,
+            Foreground = Brushes.White,
+            Background = new SolidColorBrush(Color.FromArgb(180, 15, 23, 42)),
+            FontSize = 13,
+            Padding = new Thickness(5, 3, 5, 3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        bucket.Add(visual);
+        if (ShouldShowBucket(bucket)) Viewport.Children.Add(visual);
+    }
+
     private bool ShouldShowBucket(List<Visual3D> bucket)
     {
         if (ReferenceEquals(bucket, _areaVisuals)) return TglArea.IsChecked == true;
+        if (ReferenceEquals(bucket, _spatialZoneVisuals)) return TglArea.IsChecked == true;
         if (ReferenceEquals(bucket, _obstacleVisuals)) return TglObstacles.IsChecked == true;
         if (ReferenceEquals(bucket, _equipmentVisuals)) return TglEquipment.IsChecked == true;
         if (ReferenceEquals(bucket, _ductVisuals)) return TglDucts.IsChecked == true;
@@ -2040,6 +2067,16 @@ public partial class MainWindow : Window
     private static int ReadInt(string text, int fallback) => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
     private static double ReadDouble(string text, double fallback) => double.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : fallback;
     private static Point3D ToPoint3D(Vec3 p) => new(p.X, p.Y, p.Z);
+
+    private static Brush GetSpatialZoneBrush(string name)
+    {
+        var upper = name.ToUpperInvariant();
+        if (upper.Contains("CR")) return Brushes.Yellow;
+        if (upper.Contains("A/F") || upper.Contains("AF")) return Brushes.Cyan;
+        if (upper.Contains("CSF")) return Brushes.Magenta;
+        if (upper.Contains("FSF")) return Brushes.Orange;
+        return Brushes.LightGray;
+    }
 
     private sealed record TaskRow(int Index, RouteTask Task)
     {
@@ -2105,6 +2142,18 @@ public partial class MainWindow : Window
     }
 
     private async void BtnShowGroupPatterns_Click(object sender, RoutedEventArgs e) => await ShowGroupPatternsAsync();
+
+    private void BtnShowSegmentViewer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_scene == null || _scene.ExistingRoutePaths.Count == 0)
+        {
+            TxtStatus.Text = "기본설계 씬이 로드되지 않았거나 기존경로가 없습니다.";
+            return;
+        }
+
+        var window = new SegmentViewerWindow(_scene.ExistingRoutePaths, _scene.SpatialZones) { Owner = this };
+        window.ShowDialog();
+    }
 
     private async Task ShowGroupPatternsAsync()
     {

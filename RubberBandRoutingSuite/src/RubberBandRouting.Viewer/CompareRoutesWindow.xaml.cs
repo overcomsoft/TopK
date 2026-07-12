@@ -92,15 +92,17 @@ public partial class CompareRoutesWindow : Window
 
     private readonly List<Visual3D> _existingVisuals = new();
     private readonly List<Visual3D> _autoVisuals = new();
+    private readonly List<SpatialZone> _spatialZones;
     private RouteCompareEntry? _currentEntry;
     private int? _existingHighlightIndex;
     private int? _autoHighlightIndex;
     private bool _initialFitDone;
     private bool _isSyncingCameras;
 
-    internal CompareRoutesWindow(IReadOnlyList<RouteCompareEntry> entries)
+    internal CompareRoutesWindow(IReadOnlyList<RouteCompareEntry> entries, List<SpatialZone>? spatialZones)
     {
         InitializeComponent();
+        _spatialZones = spatialZones ?? new List<SpatialZone>();
         GridEntries.ItemsSource = entries;
         if (entries.Count > 0) GridEntries.SelectedIndex = 0;
         // The very first fit can land on a still-unmeasured viewport (0-size layout) if triggered
@@ -261,6 +263,7 @@ public partial class CompareRoutesWindow : Window
     {
         if (_currentEntry == null) return;
         DrawPolyline(_currentEntry.ExistingPoints, _existingVisuals, ViewportExisting, _existingHighlightIndex, fitCamera);
+        DrawSpatialZones(_existingVisuals, ViewportExisting);
         // The feature waypoints the auto-router pulled from the matched existing design are shown
         // on both sides — they're real 3D positions sampled from the existing polyline itself, so
         // seeing them against the existing route too makes it clear where each one came from.
@@ -271,7 +274,82 @@ public partial class CompareRoutesWindow : Window
     {
         if (_currentEntry == null) return;
         DrawPolyline(_currentEntry.AutoPoints, _autoVisuals, ViewportAuto, _autoHighlightIndex, fitCamera);
+        DrawSpatialZones(_autoVisuals, ViewportAuto);
         DrawFeatureMarkers(_currentEntry.FeatureWaypoints, _autoVisuals, ViewportAuto);
+    }
+
+    private void DrawSpatialZones(List<Visual3D> bucket, HelixViewport3D viewport)
+    {
+        if (_spatialZones == null) return;
+        foreach (var zone in _spatialZones)
+        {
+            var brush = GetSpatialZoneBrush(zone.Name);
+            AddWireBox(zone.Bounds, brush, 20.0, bucket, viewport);
+            AddTextLabel(zone.Name, zone.Bounds.Center, bucket, viewport);
+        }
+    }
+
+    private static Brush GetSpatialZoneBrush(string name)
+    {
+        var upper = name.ToUpperInvariant();
+        if (upper.Contains("CR")) return Brushes.Yellow;
+        if (upper.Contains("A/F") || upper.Contains("AF")) return Brushes.Cyan;
+        if (upper.Contains("CSF")) return Brushes.Magenta;
+        if (upper.Contains("FSF")) return Brushes.Orange;
+        return Brushes.LightGray;
+    }
+
+    private static void AddWireBox(Aabb box, Brush brush, double diameter, List<Visual3D> bucket, HelixViewport3D viewport)
+    {
+        var min = box.Min;
+        var max = box.Max;
+        var p000 = new Vec3(min.X, min.Y, min.Z);
+        var p100 = new Vec3(max.X, min.Y, min.Z);
+        var p010 = new Vec3(min.X, max.Y, min.Z);
+        var p110 = new Vec3(max.X, max.Y, min.Z);
+        var p001 = new Vec3(min.X, min.Y, max.Z);
+        var p101 = new Vec3(max.X, min.Y, max.Z);
+        var p011 = new Vec3(min.X, max.Y, max.Z);
+        var p111 = new Vec3(max.X, max.Y, max.Z);
+
+        DrawWireLine(new[] { p000, p100 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p010, p110 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p001, p101 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p011, p111 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p000, p010 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p100, p110 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p001, p011 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p101, p111 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p000, p001 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p100, p101 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p010, p011 }, brush, diameter, bucket, viewport);
+        DrawWireLine(new[] { p110, p111 }, brush, diameter, bucket, viewport);
+    }
+
+    private static void DrawWireLine(IEnumerable<Vec3> points, Brush brush, double diameter, List<Visual3D> bucket, HelixViewport3D viewport)
+    {
+        var collection = new Point3DCollection(points.Select(ToPoint3D));
+        if (collection.Count < 2) return;
+        var tube = new TubeVisual3D { Path = collection, Diameter = diameter, Fill = brush, IsPathClosed = false };
+        bucket.Add(tube);
+        viewport.Children.Add(tube);
+    }
+
+    private static void AddTextLabel(string text, Vec3 position, List<Visual3D> bucket, HelixViewport3D viewport)
+    {
+        var visual = new BillboardTextVisual3D
+        {
+            Position = ToPoint3D(position),
+            Text = text,
+            Foreground = Brushes.White,
+            Background = new SolidColorBrush(Color.FromArgb(180, 15, 23, 42)),
+            FontSize = 13,
+            Padding = new Thickness(5, 3, 5, 3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        bucket.Add(visual);
+        viewport.Children.Add(visual);
     }
 
     private static readonly Dictionary<RouteFeatureRole, Color> FeatureRoleColors = new()

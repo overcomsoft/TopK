@@ -1,9 +1,46 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# ==============================================================================
+# [실행명령어 예시]
+#   1) 테이블 스키마 DDL 생성 및 적용:
+#      > python Tools/PathSegmenter.py create-schema --password dinno
+#   2) 배관 경로 삼분할(Segmentation) 연산 수행 및 데이터베이스 저장:
+#      > python Tools/PathSegmenter.py run-all --password dinno
+# ==============================================================================
+
 """
-경로 삼분할(Start Stub, Middle Trunk, End Stub)을 실행하고 
-결과를 TB_ROUTE_PATH_SEGMENTATION 테이블에 저장하는 모듈.
+[전체적인 코드내의 흐름도]
+1. main() 실행 -> argparse를 통해 명령행 인자 (create-schema, run-all) 수신 및 DB 런타임 설정 로드
+2. open_connection() -> PostgreSQL 데이터베이스 서버 연결 수립
+3. create_schema() -> 'Tools/sql/create_path_segmentation_table.sql' 스키마 DDL을 실행하여 테이블 생성
+4. run_segmentation() 호출:
+   a. load_route_data_bulk() -> TB_ROUTE_PATH 및 관련 세그먼트 상세 정보를 쿼리하여 각 배관 경로의 3D 좌표 폴리라인 복원
+   b. segment_route() 호출 (각 배관 경로 루프) -> Start Stub, Middle Trunk, End Stub 분할 연산 수행
+   c. points_to_wkt_linestringz() / point_to_wkt_pointz() -> 분할된 3D 점열 및 분기점을 PostGIS 호환 WKT (LINESTRING Z, POINT Z) 포맷으로 변환
+   d. DB 기존 데이터를 초기화(DELETE)한 뒤 execute_batch()를 통해 대량 일괄 등록 (INSERT)
+5. DB 트랜잭션 Commit 및 커넥션 Close 후 프로세스 종료
+
+[핵심 알고리즘]
+- Start Stub (인입부): 첫 유의미한(50mm 이상) 세그먼트의 진행 방향이 수직(Z축)이면 수직 직선 구간이 끝나는 곳까지를 Stub으로 삼음. 수평이면 첫 번째 세그먼트의 끝(index 1)까지 분할.
+- End Stub (도출부): 종단점(PoC)에서 역방향으로 탐색하여 최초로 50mm 이상이며 진행 방향이 전환되는 첫 번째 엘보(Elbow) 정점까지 분할.
+- Middle Trunk (본선): Start Stub의 끝점(Start Free Point)과 End Stub의 시작점(End Free Point) 사이의 중간 본선 구간.
+- 미세 지터 필터링: 50mm 미만의 미세 선분은 방향 분류 판정에서 생략하여 오류 판정을 예외 처리함.
+
+[주요 함수]
+- axis_snap(d): 벡터 d를 6방향(0~5: +x, -x, +y, -y, +z, -z) 중 가장 가까운 축 방향 인덱스로 매핑
+- get_first_run(points): 시작점부터 동일 축 방향으로 진행하는 첫 번째 직선 구간의 길이, 끝 인덱스, Z축 여부 판정
+- segment_route(points): 배관 좌표 목록을 Start Stub, Middle Trunk, End Stub, Start Free Point, End Free Point로 분할하는 코어 로직
+- load_route_data_bulk(conn): 데이터베이스로부터 배관 세그먼트 좌표 데이터를 조회하여 3D 폴리라인으로 재구성
+- run_segmentation(conn): 전체 배관 경로에 대해 분할 알고리즘을 실행하고 DB 적재 프로세스 제어
+
+[주요 변수]
+- first_axis: 시작부의 첫 유의미한 세그먼트 진행 방향 축 인덱스
+- start_idx: Start Stub의 분할 종료 기준 정점 인덱스
+- last_axis: 종단부 역방향 탐색 시의 최초 진행 방향 축 인덱스
+- end_idx: End Stub의 분할 시작 기준 정점 인덱스
+- start_stub_pts / middle_trunk_pts / end_stub_pts: 분할된 각 세그먼트의 3D 좌표 점열 리스트
+- start_free_point / end_free_point: 각 Stub과 Trunk 사이의 연결점(접속 자유점) 좌표
 """
 
 import sys
@@ -82,41 +119,50 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
         return [], [], [], None, None
         
     # --- 1. START_STUB 분할 ---
-    # 첫 번째 유의미한(50mm 이상) 세그먼트의 진행 방향 찾기
-    first_axis = -1
-    for i in range(len(points) - 1):
-        a, b = points[i], points[i+1]
-        if dist(a, b) >= 50.0:
-            first_axis = axis_snap(vec_sub(b, a)) // 2
-            break
-            
     start_idx = 1
-    if first_axis != -1:
-        first_run_len = 0.0
-        end_idx = 0
-        for i in range(len(points) - 1):
-            a, b = points[i], points[i+1]
-            L = dist(a, b)
-            if L < 50.0:
-                end_idx = i + 1
-                continue
-            axis = axis_snap(vec_sub(b, a)) // 2
-            if axis == first_axis:
-                first_run_len += L
-                end_idx = i + 1
-            else:
+    matched_csf = False
+    if points[0][2] >= 13700.0:
+        for i in range(1, len(points)):
+            if points[i][2] <= 13700.0:
+                start_idx = i
+                matched_csf = True
                 break
                 
-        is_vertical = (first_axis == 2) # Z축
-        # 수직인 경우 격자보 관통 스텁으로 판단하여 그 런의 끝까지 포함
-        if is_vertical:
-            start_idx = end_idx
+    if not matched_csf:
+        # 첫 번째 유의미한(50mm 이상) 세그먼트의 진행 방향 찾기
+        first_axis = -1
+        for i in range(len(points) - 1):
+            a, b = points[i], points[i+1]
+            if dist(a, b) >= 50.0:
+                first_axis = axis_snap(vec_sub(b, a)) // 2
+                break
+                
+        if first_axis != -1:
+            first_run_len = 0.0
+            end_idx = 0
+            for i in range(len(points) - 1):
+                a, b = points[i], points[i+1]
+                L = dist(a, b)
+                if L < 50.0:
+                    end_idx = i + 1
+                    continue
+                axis = axis_snap(vec_sub(b, a)) // 2
+                if axis == first_axis:
+                    first_run_len += L
+                    end_idx = i + 1
+                else:
+                    break
+                    
+            is_vertical = (first_axis == 2) # Z축
+            # 수직인 경우 격자보 관통 스텁으로 판단하여 그 런의 끝까지 포함
+            if is_vertical:
+                start_idx = end_idx
+            else:
+                # 수직이 아니면 첫 세그먼트 끝(points[1])까지만 자름
+                start_idx = 1
         else:
-            # 수직이 아니면 첫 세그먼트 끝(points[1])까지만 자름
             start_idx = 1
-    else:
-        start_idx = 1
-        
+            
     start_stub_pts = points[:start_idx + 1]
     start_free_point = start_stub_pts[-1]
     

@@ -2,18 +2,46 @@
 # -*- coding: utf-8 -*-
 
 # ==============================================================================
-# [실행 명령어 및 도구 안내]
-# 본 스크립트는 TB_ROUTE_GROUP_PATTERN 테이블 및 TB_EQUIPMENTS 테이블을 조회하여,
-# 장비 호기별/유틸리티별 그룹배관 추출 결과를 수려한 3D 인터랙티브 웹 대시보드(HTML)로
-# 추출하고 브라우저에 즉시 연동하는 도구입니다.
-#
-# 실행 방법:
-#    > python Tools/ViewRouteGroup3D.py --password dinno
-#
-# 옵션 인자:
-#    --password    : DB 비밀번호 (기본값: dinno)
-#    --html-out    : 생성할 HTML 웹페이지의 출력 경로 (기본값: data/output/route_group_viewer.html)
+# [실행명령어 예시]
+#   1) 기본 DB 비밀번호를 적용하여 대시보드 뷰어 생성 및 자동 실행:
+#      > python Tools/ViewRouteGroup3D.py --password dinno
+#   2) 대시보드 HTML 출력 파일명 및 출력 경로 커스텀 지정:
+#      > python Tools/ViewRouteGroup3D.py --password dinno --html-out data/output/custom_viewer.html
 # ==============================================================================
+
+"""
+[전체적인 코드내의 흐름도]
+1. main() 실행 -> argparse 인자 및 DB 설정 파싱
+2. open_connection() -> PostgreSQL 데이터베이스에 연결
+3. load_route_groups() -> TB_ROUTE_GROUP_PATTERN 테이블에서 그룹 아이디, 멤버 정보, 3D WKT 기하 정보 로드 및 parse_multilinestring_z()를 통한 3D 배열 파싱
+4. load_equipments() -> TB_EQUIPMENTS 테이블에서 장비의 영역 정보(AABB) 및 접속 포트(PoC) 리스트를 로드
+5. generate_viewer_html() 호출:
+   a. Plotly.js와 Tailwind CSS가 내장된 미려한 다크 테마 HTML 템플릿 로드
+   b. JSON 데이터를 HTML 내부의 JS 변수에 동적 주입
+   c. 지정된 경로(data/output/route_group_viewer.html 등)에 HTML 저장
+6. 저장된 로컬 HTML 주소를 webbrowser.open()을 이용해 기본 브라우저에서 즉시 실행
+7. DB 커넥션 종료 및 프로세스 완료
+
+[핵심 알고리즘]
+- WKT Geometry 파싱: PostGIS의 MULTILINESTRING Z 좌표 문자열을 정규표현식(Regex)을 이용해 개별 라인의 점열(x, y, z)을 파싱하여 JS에 적합한 3D 수치 배열로 복원.
+- 3D 가시화 및 인터랙션 (Client-Side JS):
+  - Plotly.js의 Mesh3D 타입을 활용해 장비들의 AABB 영역을 반투명 입체 상자로 렌더링.
+  - Scatter3D 타입을 활용해 배관 라인들을 튜브/선 형태로 표현하고, 시작/끝 접속점을 분기점 구체(Sphere)로 표시.
+  - SECTION_BOUNDS 공간 범위(Bounding Box)를 와이어프레임과 옅은 푸른색 입체 부피면으로 표현하여 그룹 공용 통로 가시성 극대화.
+  - 뷰포트 내 특정 배관 라인 클릭 또는 좌측 사이드바 리스트 항목 선택 시, Plotly API를 이용해 선택된 배관의 선 굵기를 강조(Highlight)하고 타 배관들은 반투명화(Dimming)하는 오퍼시티 연동.
+
+[주요 함수]
+- parse_multilinestring_z(wkt): PostGIS의 3차원 다중 선 WKT 문자열을 파이썬 다차원 좌표 배열로 변환
+- load_route_groups(conn): DB로부터 그룹 배관 정보 및 3D 기하 정보를 조회하여 리스트화
+- load_equipments(conn): DB로부터 장비 AABB 및 PoC 좌표 레이아웃 조회
+- generate_viewer_html(groups, equipments, output_path): 단일 파일로 동작하는 대화형 웹 뷰어 HTML 문서 제작
+- render3D(group, targetGuid): [JS] 선택된 그룹배관 및 장비 레이아웃을 3D Plotly 캔버스에 바인딩 및 선택 배관 디밍 처리
+
+[주요 변수]
+- groups / EQUIP_DATA: 데이터베이스에서 가져온 그룹 배관 데이터 및 장비 배치 정보 JSON
+- traces: [JS] Plotly.js 3D 렌더링 대상 개체 정보(Mesh3D, Scatter3D 등)를 담는 배열
+- selectedGroup: [JS] 현재 사용자가 선택하여 3D 화면에 활성화 중인 그룹 배관 정보 객체
+"""
 
 import sys
 import os

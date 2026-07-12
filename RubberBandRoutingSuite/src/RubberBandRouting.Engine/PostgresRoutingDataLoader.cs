@@ -96,6 +96,10 @@ public sealed record ExistingRoutePath(
     List<Vec3> MiddleTrunkPoints,
     List<Vec3> EndStubPoints);
 
+public sealed record SpatialZone(
+    string Name,
+    Aabb Bounds);
+
 public sealed class RoutingScene
 {
     public RoutingProject Project { get; init; } = new(0, string.Empty, string.Empty, null, null, new Aabb(new Vec3(), new Vec3()));
@@ -106,6 +110,7 @@ public sealed class RoutingScene
     public List<PocPoint> DuctLateralPocs { get; } = new();
     public List<RouteTask> Tasks { get; } = new();
     public List<ExistingRoutePath> ExistingRoutePaths { get; } = new();
+    public List<SpatialZone> SpatialZones { get; } = new();
     public List<string> LoadWarnings { get; } = new();
 
     public IReadOnlyList<Aabb> CollisionObstacles => Obstacles.Where(o => !o.IsPassThrough).Select(o => o.Bounds).ToList();
@@ -159,6 +164,7 @@ public sealed class PostgresRoutingDataLoader
         await TryLoadPocsAsync(conn, scene, minx, miny, maxx, maxy, cancellationToken);
         await TryLoadRouteTasksAsync(conn, scene, minx, miny, maxx, maxy, cancellationToken);
         await TryLoadExistingRoutePathsAsync(conn, scene, minx, miny, maxx, maxy, cancellationToken);
+        await TryLoadSpatialZonesAsync(conn, scene, minx, miny, maxx, maxy, project.Bounds, cancellationToken);
         AddEndpointPocs(scene);
         if (scene.Tasks.Count == 0) BuildNearestPocTasks(scene);
         return scene;
@@ -273,6 +279,54 @@ public sealed class PostgresRoutingDataLoader
     {
         try { await LoadExistingRoutePathsAsync(conn, scene, minx, miny, maxx, maxy, ct); }
         catch (Exception ex) { scene.LoadWarnings.Add($"기존경로 로드 실패: {ex.Message}"); }
+    }
+
+    private static async Task TryLoadSpatialZonesAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, Aabb projectBounds, CancellationToken ct)
+    {
+        try { await LoadSpatialZonesAsync(conn, scene, minx, miny, maxx, maxy, projectBounds, ct); }
+        catch (Exception ex) { scene.LoadWarnings.Add($"공간 영역 로드 실패: {ex.Message}"); }
+    }
+
+    private static async Task LoadSpatialZonesAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, Aabb projectBounds, CancellationToken ct)
+    {
+        const string checkSql = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='TB_SPACE_INFO'";
+        await using (var cmdCheck = new NpgsqlCommand(checkSql, conn))
+        {
+            var count = Convert.ToInt32(await cmdCheck.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+            if (count == 0) return;
+        }
+
+        const string sql = @"SELECT ""SPACE_NAME"", 
+                                   ""AABB_MINX"", ""AABB_MINY"", ""AABB_MINZ"", 
+                                   ""AABB_MAXX"", ""AABB_MAXY"", ""AABB_MAXZ""
+                            FROM ""TB_SPACE_INFO""
+                            WHERE ""AABB_MINX"" <= @maxx AND ""AABB_MAXX"" >= @minx 
+                              AND ""AABB_MINY"" <= @maxy AND ""AABB_MAXY"" >= @miny
+                            ORDER BY ""AABB_MINZ""";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        AddXy(cmd, minx, miny, maxx, maxy);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            var rawName = Str(r, 0).Trim();
+            string cleanName = "";
+            var upper = rawName.ToUpperInvariant();
+            if (upper.Contains("CSF")) cleanName = "CSF";
+            else if (upper.Contains("A/F") || upper.Contains("AF")) cleanName = "A/F";
+            else if (upper.Contains("CR")) cleanName = "CR";
+            else if (upper.Contains("FSF")) cleanName = "FSF";
+            else if (upper.Contains("AREA") || upper.Contains("BUILDING")) cleanName = "AREA";
+
+            if (string.IsNullOrEmpty(cleanName)) continue;
+
+            var box = ReadBox(r, 1, rawName);
+            var clipped = ClipBox(box, projectBounds.Min.X, projectBounds.Min.Y, projectBounds.Min.Z, 
+                                       projectBounds.Max.X, projectBounds.Max.Y, projectBounds.Max.Z);
+            if (clipped != null)
+            {
+                scene.SpatialZones.Add(new SpatialZone(cleanName, clipped.Value));
+            }
+        }
     }
 
     private static async Task LoadExistingRoutePathsAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
