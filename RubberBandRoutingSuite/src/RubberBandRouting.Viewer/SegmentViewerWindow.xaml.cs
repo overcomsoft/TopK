@@ -377,7 +377,13 @@ public partial class SegmentViewerWindow : Window
         double minY2 = double.MaxValue, maxY2 = double.MinValue;
         double minZ2 = double.MaxValue, maxZ2 = double.MinValue;
 
-        if (_spatialZones.Count > 0)
+        if (points.Count > 0)
+        {
+            minX2 = points.Min(p => p.X); maxX2 = points.Max(p => p.X);
+            minY2 = points.Min(p => p.Y); maxY2 = points.Max(p => p.Y);
+            minZ2 = points.Min(p => p.Z); maxZ2 = points.Max(p => p.Z);
+        }
+        else if (_spatialZones.Count > 0)
         {
             foreach (var zone in _spatialZones)
             {
@@ -388,12 +394,6 @@ public partial class SegmentViewerWindow : Window
                 minZ2 = Math.Min(minZ2, zone.Bounds.Min.Z);
                 maxZ2 = Math.Max(maxZ2, zone.Bounds.Max.Z);
             }
-        }
-        else if (points.Count > 0)
-        {
-            minX2 = points.Min(p => p.X); maxX2 = points.Max(p => p.X);
-            minY2 = points.Min(p => p.Y); maxY2 = points.Max(p => p.Y);
-            minZ2 = points.Min(p => p.Z); maxZ2 = points.Max(p => p.Z);
         }
         else
         {
