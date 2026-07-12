@@ -406,29 +406,40 @@ public partial class SegmentViewerWindow : Window
         var centerY = (minY2 + maxY2) / 2.0;
         var centerZ = (minZ2 + maxZ2) / 2.0;
 
-        var sizeX = Math.Max(100, maxX2 - minX2);
-        var sizeY = Math.Max(100, maxY2 - minY2);
-        var sizeZ = Math.Max(100, maxZ2 - minZ2);
+        // 패딩을 20% 추가하여 경로 양 끝이 잘리지 않도록 함
+        var sizeX = Math.Max(500, (maxX2 - minX2) * 1.2);
+        var sizeY = Math.Max(500, (maxY2 - minY2) * 1.2);
+        var sizeZ = Math.Max(500, (maxZ2 - minZ2) * 1.2);
 
-        if (ViewportXY.Camera is OrthographicCamera camXY)
+        // HelixViewport3D 렌더링 완료 후에 카메라를 적용해야 반영됨
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Render, () =>
         {
-            camXY.Position = new Point3D(centerX, centerY, centerZ + 200000);
+            // 수평(XY) 뷰: Z축 위에서 아래로 내려다봄 → X, Y 범위로 너비 결정
+            if (ViewportXY.Camera is not OrthographicCamera camXY)
+            {
+                camXY = new OrthographicCamera();
+                ViewportXY.Camera = camXY;
+            }
+            camXY.Position = new Point3D(centerX, centerY, centerZ + 500000);
             camXY.LookDirection = new Vector3D(0, 0, -1);
             camXY.UpDirection = new Vector3D(0, 1, 0);
-            camXY.Width = Math.Max(sizeX, sizeY) * 1.2;
+            camXY.Width = Math.Max(sizeX, sizeY);
             camXY.NearPlaneDistance = 1.0;
-            camXY.FarPlaneDistance = 1000000.0;
-        }
+            camXY.FarPlaneDistance = 2000000.0;
 
-        if (ViewportZ.Camera is OrthographicCamera camZ)
-        {
-            camZ.Position = new Point3D(centerX, centerY + 200000, centerZ);
+            // 수직(Z) 뷰: Y축 앞에서 뒤로 바라봄 → X, Z 범위로 너비 결정
+            if (ViewportZ.Camera is not OrthographicCamera camZ)
+            {
+                camZ = new OrthographicCamera();
+                ViewportZ.Camera = camZ;
+            }
+            camZ.Position = new Point3D(centerX, centerY + 500000, centerZ);
             camZ.LookDirection = new Vector3D(0, -1, 0);
             camZ.UpDirection = new Vector3D(0, 0, 1);
-            camZ.Width = Math.Max(sizeX, sizeZ) * 1.2;
+            camZ.Width = Math.Max(sizeX, sizeZ);
             camZ.NearPlaneDistance = 1.0;
-            camZ.FarPlaneDistance = 1000000.0;
-        }
+            camZ.FarPlaneDistance = 2000000.0;
+        });
     }
 
     private void DrawSpatialZones(List<Visual3D> bucket, HelixViewport3D viewport)
