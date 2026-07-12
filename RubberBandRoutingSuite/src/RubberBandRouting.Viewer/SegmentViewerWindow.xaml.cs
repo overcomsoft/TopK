@@ -412,9 +412,21 @@ public partial class SegmentViewerWindow : Window
         var sizeZ = Math.Max(500, (maxZ2 - minZ2) * 1.2);
 
         // HelixViewport3D 렌더링 완료 후에 카메라를 적용해야 반영됨
-        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Render, () =>
+        // DispatcherPriority.Loaded: 레이아웃+렌더 완료 후 → ActualWidth/ActualHeight 확정된 시점
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
         {
-            // 수평(XY) 뷰: Z축 위에서 아래로 내려다봄 → X, Y 범위로 너비 결정
+            // ── 수평(XY) 뷰: Z축 위에서 아래로 내려다봄 ──────────────────────────────
+            // 뷰포트 aspect ratio 계산 (width/height)
+            double xyAspect = ViewportXY.ActualWidth > 0 && ViewportXY.ActualHeight > 0
+                ? ViewportXY.ActualWidth / ViewportXY.ActualHeight
+                : 1.5;
+
+            // OrthographicCamera.Width = 화면 수평 범위(world units)
+            // 화면 수직 범위 = Width / aspect
+            // → 두 축(X, Y) 모두 보이려면:
+            //   Width >= sizeX  AND  Width / aspect >= sizeY  →  Width >= sizeY * aspect
+            double neededXY = Math.Max(sizeX, sizeY * xyAspect) * 1.1;
+
             if (ViewportXY.Camera is not OrthographicCamera camXY)
             {
                 camXY = new OrthographicCamera();
@@ -423,37 +435,44 @@ public partial class SegmentViewerWindow : Window
             camXY.Position = new Point3D(centerX, centerY, centerZ + 500000);
             camXY.LookDirection = new Vector3D(0, 0, -1);
             camXY.UpDirection = new Vector3D(0, 1, 0);
-            camXY.Width = Math.Max(sizeX, sizeY);
+            camXY.Width = neededXY;
             camXY.NearPlaneDistance = 1.0;
             camXY.FarPlaneDistance = 2000000.0;
 
-            // 수직(단면) 뷰: 경로의 주 수평 이동 방향을 자동 감지하여 직각 방향에서 바라봄.
-            // - Y 방향 이동이 지배적 → X 방향(+X)에서 바라봄 → 단면에 Y-Z 평면이 보임
-            // - X 방향 이동이 지배적 → Y 방향(+Y)에서 바라봄 → 단면에 X-Z 평면이 보임
-            // 이렇게 하면 A/F 구역 수평 이동 구간이 수직 단면도에 올바르게 보임.
+            // ── 수직(단면) 뷰: 경로의 주 수평 이동 방향 직각에서 바라봄 ───────────────
+            // Y 이동 지배적 → +X에서 바라봄(Y-Z 평면), X 이동 지배적 → +Y에서 바라봄(X-Z 평면)
+            double zAspect = ViewportZ.ActualWidth > 0 && ViewportZ.ActualHeight > 0
+                ? ViewportZ.ActualWidth / ViewportZ.ActualHeight
+                : 1.5;
+
             if (ViewportZ.Camera is not OrthographicCamera camZ)
             {
                 camZ = new OrthographicCamera();
                 ViewportZ.Camera = camZ;
             }
 
-            bool yDominant = sizeY >= sizeX; // Y가 더 크면 Y가 주 이동 방향
+            bool yDominant = sizeY >= sizeX;
+            double domHoriz = yDominant ? sizeY : sizeX;
+
+            // Width(수평) >= domHoriz  AND  Width/aspect(수직) >= sizeZ
+            // → Width >= Math.Max(domHoriz, sizeZ * aspect)
+            double neededZ = Math.Max(domHoriz, sizeZ * zAspect) * 1.1;
+
             if (yDominant)
             {
-                // Y 방향 이동 경로 → X축 방향(+X)에서 바라봄 → Y-Z 평면이 단면에 표시
+                // Y 방향 이동 → X축(+X)에서 바라봄 → Y-Z 평면 표시
                 camZ.Position = new Point3D(centerX + 500000, centerY, centerZ);
                 camZ.LookDirection = new Vector3D(-1, 0, 0);
                 camZ.UpDirection = new Vector3D(0, 0, 1);
-                camZ.Width = Math.Max(sizeY, sizeZ);
             }
             else
             {
-                // X 방향 이동 경로 → Y축 방향(+Y)에서 바라봄 → X-Z 평면이 단면에 표시
+                // X 방향 이동 → Y축(+Y)에서 바라봄 → X-Z 평면 표시
                 camZ.Position = new Point3D(centerX, centerY + 500000, centerZ);
                 camZ.LookDirection = new Vector3D(0, -1, 0);
                 camZ.UpDirection = new Vector3D(0, 0, 1);
-                camZ.Width = Math.Max(sizeX, sizeZ);
             }
+            camZ.Width = neededZ;
             camZ.NearPlaneDistance = 1.0;
             camZ.FarPlaneDistance = 2000000.0;
         });
