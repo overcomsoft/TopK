@@ -427,16 +427,33 @@ public partial class SegmentViewerWindow : Window
             camXY.NearPlaneDistance = 1.0;
             camXY.FarPlaneDistance = 2000000.0;
 
-            // 수직(Z) 뷰: Y축 앞에서 뒤로 바라봄 → X, Z 범위로 너비 결정
+            // 수직(단면) 뷰: 경로의 주 수평 이동 방향을 자동 감지하여 직각 방향에서 바라봄.
+            // - Y 방향 이동이 지배적 → X 방향(+X)에서 바라봄 → 단면에 Y-Z 평면이 보임
+            // - X 방향 이동이 지배적 → Y 방향(+Y)에서 바라봄 → 단면에 X-Z 평면이 보임
+            // 이렇게 하면 A/F 구역 수평 이동 구간이 수직 단면도에 올바르게 보임.
             if (ViewportZ.Camera is not OrthographicCamera camZ)
             {
                 camZ = new OrthographicCamera();
                 ViewportZ.Camera = camZ;
             }
-            camZ.Position = new Point3D(centerX, centerY + 500000, centerZ);
-            camZ.LookDirection = new Vector3D(0, -1, 0);
-            camZ.UpDirection = new Vector3D(0, 0, 1);
-            camZ.Width = Math.Max(sizeX, sizeZ);
+
+            bool yDominant = sizeY >= sizeX; // Y가 더 크면 Y가 주 이동 방향
+            if (yDominant)
+            {
+                // Y 방향 이동 경로 → X축 방향(+X)에서 바라봄 → Y-Z 평면이 단면에 표시
+                camZ.Position = new Point3D(centerX + 500000, centerY, centerZ);
+                camZ.LookDirection = new Vector3D(-1, 0, 0);
+                camZ.UpDirection = new Vector3D(0, 0, 1);
+                camZ.Width = Math.Max(sizeY, sizeZ);
+            }
+            else
+            {
+                // X 방향 이동 경로 → Y축 방향(+Y)에서 바라봄 → X-Z 평면이 단면에 표시
+                camZ.Position = new Point3D(centerX, centerY + 500000, centerZ);
+                camZ.LookDirection = new Vector3D(0, -1, 0);
+                camZ.UpDirection = new Vector3D(0, 0, 1);
+                camZ.Width = Math.Max(sizeX, sizeZ);
+            }
             camZ.NearPlaneDistance = 1.0;
             camZ.FarPlaneDistance = 2000000.0;
         });

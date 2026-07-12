@@ -119,15 +119,22 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
         return [], [], [], None, None
         
     # --- 1. START_STUB 분할 ---
+    # Start Stub: 장비 PoC부터 → A/F구역 수평 이동 → 격자보 관통 수직 하강 → CSF구역 진입 직전까지
+    # 핵심: CSF 구역(Z ≤ 13700) 경계를 처음 넘는 점의 "직전 점"이 Start Stub의 끝이 아니라,
+    #        실제로 CSF 구역을 향해 내려가는 수직 구간 전체가 Start Stub에 포함되어야 함.
+    #        따라서 "CSF 경계를 처음 넘는 점(i)"이 Start Stub의 마지막 점이 되어야 함.
+    #        즉 start_idx = i (CSF로 진입하는 점까지 포함, Middle Trunk는 그 다음부터 시작)
     start_idx = 1
     matched_csf = False
     if points[0][2] >= 13700.0:
         for i in range(1, len(points)):
             if points[i][2] <= 13700.0:
+                # CSF 경계를 넘어서는 바로 이 점(i)이 격자보 통과 수직 하강의 끝점.
+                # Start Stub은 points[0..i]까지 (i 포함), Middle Trunk는 points[i..]부터.
                 start_idx = i
                 matched_csf = True
                 break
-                
+            
     if not matched_csf:
         # 첫 번째 유의미한(50mm 이상) 세그먼트의 진행 방향 찾기
         first_axis = -1
