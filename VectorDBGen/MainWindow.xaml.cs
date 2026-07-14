@@ -103,7 +103,7 @@ namespace VectorDBGen
         private static readonly Dictionary<string, string[]> _builderSourceRequirements = new()
         {
             ["feature"] = new[] { "TB_ROUTE_PATH", "TB_ROUTE_SEGMENTS", "TB_ROUTE_SEGMENT_DETAIL" },
-            ["context"] = new[] { "TB_ROUTE_PATH", "TB_ROUTE_SEGMENTS", "TB_ROUTE_SEGMENT_DETAIL", "TB_BIM_OBSTACLES" },
+            ["context"] = new[] { "TB_ROUTE_PATH", "TB_BIM_OBSTACLE" },
             ["group"]   = new[] { "TB_ROUTE_PATH" },
             ["segment"] = new[] { "TB_ROUTE_PATH", "TB_ROUTE_SEGMENTS", "TB_ROUTE_SEGMENT_DETAIL" },
         };
@@ -121,7 +121,7 @@ namespace VectorDBGen
         private static readonly Dictionary<string, string> _builderDdlFile = new()
         {
             ["feature"] = "create_feature_vector_table.sql",
-            ["context"] = "create_context_vector_table.sql",
+            ["context"] = "create_route_context_vector_table.sql",
             ["group"]   = "create_auto_design_tables.sql",
             ["segment"] = "create_auto_design_tables.sql",
         };
@@ -350,8 +350,8 @@ namespace VectorDBGen
                 {
                     AppendLog($"  [warn] 누락 소스 테이블({missingSource.Count}): {string.Join(", ", missingSource)}\n", error: true);
                     AppendLog("         → 이 테이블들은 벡터 DDL로 생성되지 않습니다 (상위 BIM/Route 데이터 수급 파이프라인 필요)\n", error: true);
-                    if (missingSource.Contains("TB_BIM_OBSTACLES"))
-                        AppendLog("         → TB_BIM_OBSTACLES 누락 시 Context Vector 빌더는 실행 불가\n", error: true);
+                    if (missingSource.Contains("TB_BIM_OBSTACLE"))
+                        AppendLog("         → TB_BIM_OBSTACLE 누락 시 Context Vector 빌더는 실행 불가\n", error: true);
                     if (missingSource.Contains("TB_ROUTE_PATH"))
                         AppendLog("         → TB_ROUTE_PATH 누락 시 모든 빌더 실행 불가\n", error: true);
                     AppendLog("\n");
@@ -591,7 +591,7 @@ namespace VectorDBGen
             var allDdls = new[]
             {
                 "create_feature_vector_table.sql",
-                "create_context_vector_table.sql",
+                "create_route_context_vector_table.sql",
                 "create_auto_design_tables.sql",
             };
             await RunDdlWithReportAsync("전체 벡터 테이블 생성", "all", allDdls);
@@ -703,7 +703,7 @@ namespace VectorDBGen
             var confirmMsg =
                 "1~4 빌더를 순차 실행합니다.\n\n" +
                 "  1) Feature Vector  (TB_ROUTE_FEATURE_VECTOR · 30D)\n" +
-                "  2) Context Vector  (TB_ROUTE_CONTEXT_VECTOR · 24D)\n" +
+                "  2) Context Vector  (TB_ROUTE_CONTEXT_VECTOR · 30D)\n" +
                 "  3) Design Group    (TB_ROUTE_DESIGN_GROUP)\n" +
                 "  4) Segment Template (TB_ROUTE_SEGMENT_TEMPLATE)\n\n" +
                 "각 단계는 대상 벡터 테이블을 전체 삭제 후 재생성합니다.\n" +
@@ -847,7 +847,7 @@ namespace VectorDBGen
         private static string DescribeBuilder(string tag) => tag switch
         {
             "feature" => "Feature Vector (TB_ROUTE_FEATURE_VECTOR · 30D)",
-            "context" => "Context Vector (TB_ROUTE_CONTEXT_VECTOR · 24D)",
+            "context" => "Context Vector (TB_ROUTE_CONTEXT_VECTOR · 30D)",
             "group"   => "Design Group (TB_ROUTE_DESIGN_GROUP)",
             "segment" => "Segment Template (TB_ROUTE_SEGMENT_TEMPLATE)",
             _         => tag,
@@ -1252,8 +1252,8 @@ namespace VectorDBGen
             AppendLog("\n해결 방법:\n", error: true);
             AppendLog("  1) 이 테이블들은 벡터 DDL 대상이 아님 — 상위 BIM/Route 데이터 수급 파이프라인을\n", error: true);
             AppendLog("     먼저 실행해 테이블을 채운 뒤 재시도하세요.\n", error: true);
-            if (missing.Contains("TB_BIM_OBSTACLES"))
-                AppendLog("  2) Context Vector 빌드는 TB_BIM_OBSTACLES 없이 불가합니다.\n", error: true);
+            if (missing.Contains("TB_BIM_OBSTACLE"))
+                AppendLog("  2) Context Vector 빌드는 TB_BIM_OBSTACLE 없이 불가합니다.\n", error: true);
             if (missing.Contains("TB_ROUTE_PATH"))
                 AppendLog("  2) TB_ROUTE_PATH 는 모든 빌더의 최소 요구사항입니다.\n", error: true);
             AppendLog("\n", error: true);
@@ -1604,8 +1604,6 @@ namespace VectorDBGen
                 case "context":
                     {
                         var sb = new StringBuilder(db);
-                        if (double.TryParse(TxtStartRadius.Text, out var sr)) sb.Append($" --start-radius {sr}");
-                        if (double.TryParse(TxtEndRadius.Text, out var er)) sb.Append($" --end-radius {er}");
                         var lim = TxtCtxLimit.Text?.Trim() ?? "";
                         if (!string.IsNullOrEmpty(lim) && int.TryParse(lim, out var lv) && lv > 0)
                             sb.Append($" --limit {lv}");
@@ -1674,6 +1672,7 @@ namespace VectorDBGen
             {
                 candidateDirs.Add(root);
                 if (includeToolsDir) candidateDirs.Add(Path.Combine(root, "Tools"));
+                candidateDirs.Add(Path.Combine(root, "Tools", "sql"));
             }
 
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1696,6 +1695,7 @@ namespace VectorDBGen
             {
                 dirs.Add(root);
                 if (includeToolsDir) dirs.Add(Path.Combine(root, "Tools"));
+                dirs.Add(Path.Combine(root, "Tools", "sql"));
             }
 
             return string.Join("\n", dirs.Distinct(StringComparer.OrdinalIgnoreCase).Select(d => $"  - {d}"));

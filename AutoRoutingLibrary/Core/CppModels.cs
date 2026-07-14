@@ -6,6 +6,9 @@ namespace AutoRoutingLibrary.Core
     /// <summary>A grid cell in integer I/J/K coordinates.</summary>
     public readonly record struct PathCell(int I, int J, int K);
 
+    /// <summary>A preferred corridor cell with a one-based learned-route rank.</summary>
+    public readonly record struct RankedPathCell(PathCell Cell, int Rank);
+
     /// <summary>A 3D point or size expressed in millimeters.</summary>
     public readonly record struct Vec3(double X, double Y, double Z);
 

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Route Source Scope Import Contract",
+  "description": "Route/BIM importer가 lifecycle build에 전달할 원본 scope 계약. model_revision_key는 source가 바뀔 때마다 새 값이어야 한다.",
+  "type": "object",
+  "required": ["project_scope_key", "model_revision_key", "import_batch_id", "source_artifact_hash"],
+  "properties": {
+    "project_scope_key": {"type": "string", "minLength": 1, "description": "원본 데이터의 논리 project 식별자"},
+    "model_revision_key": {"type": "string", "minLength": 1, "description": "불변 모델 revision 식별자"},
+    "import_batch_id": {"type": "string", "minLength": 1, "description": "동일 importer 실행에서 생성된 행을 묶는 batch ID"},
+    "source_artifact": {"type": "string", "description": "GLB/Revit/CSV 등 원본 artifact 이름 또는 위치"},
+    "source_artifact_hash": {"type": "string", "minLength": 16, "description": "원본 artifact 내용 checksum"},
+    "parent_revision_key": {"type": ["string", "null"], "description": "증분/파생 revision의 직전 부모"},
+    "scope_mode": {"enum": ["FULL_DATABASE_SNAPSHOT", "MEMBERSHIP"], "description": "전체 DB 단일 scope 또는 명시적 다대다 membership 방식"}
+  },
+  "additionalProperties": false
+}

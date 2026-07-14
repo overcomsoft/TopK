@@ -1,0 +1,15 @@
+{
+  "host": "localhost",
+  "port": 5432,
+  "database": "DDW_AI_DB",
+  "user": "postgres",
+  "password": "",
+  "defaultK": 5,
+  "useObstacleContext": true,
+  "obstacleLimit": 2500,
+  "weightPosition": 70,
+  "weightPattern": 0,
+  "weightVector": 0,
+  "weightContext": 30,
+  "redistributeMissingPatternWeight": true
+}

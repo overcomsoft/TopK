@@ -1,197 +1,175 @@
 # VectorDBGen Context Vector 모듈 상세 문서
 
-## 1. 문서 목적
+최종 갱신: 2026-07-13
+인코더: `topkgen-v3`, `vector(30)`
 
-본 문서는 VectorDBGen에서 `Context Vector` 빌더로 호출되는 `BuildContextVectors.py` 모듈의 처리 구조와 구현 기준을 설명한다. Context Vector는 단순 경로 형상뿐 아니라 시작점/종료점 주변의 BIM 장애물, 밀집도, clearance, 인접 설비 환경 등을 벡터화하여 route path의 환경 맥락을 표현한다.
+## 1. 목적
 
-현재 저장소에는 `BuildContextVectors.py` 파일이 포함되어 있지 않으므로, 본 문서는 VectorDBGen의 호출 계약과 예상 알고리즘을 기준으로 작성한다.
+기존 설계 경로의 시작점과 종점 주변 장애물 환경을 30차원 벡터로 저장하고, 신규 라우팅 요청의 장애물 환경과 비교해 Top-K 후보를 재정렬한다. Context Vector는 1차 pgvector ANN 후보 추출에는 사용하지 않고, 후보 재정렬의 `ctxScore`에만 사용한다.
 
-## 2. 모듈 개요
+## 2. 구성과 데이터 흐름
 
 | 항목 | 내용 |
-| --- | --- |
-| VectorDBGen 빌더 Tag | `context` |
-| 실행 스크립트 | `BuildContextVectors.py` |
-| 대상 테이블 | `TB_ROUTE_CONTEXT_VECTOR` |
-| DDL 파일 | `create_context_vector_table.sql` |
-| 벡터 차원 | 24D |
-| 주요 입력 테이블 | `TB_ROUTE_PATH`, `TB_ROUTE_SEGMENTS`, `TB_ROUTE_SEGMENT_DETAIL`, `TB_BIM_OBSTACLES` |
-| 주요 목적 | 경로 주변 공간 맥락과 장애물 영향을 24차원 vector로 변환 |
-
-Context Vector는 Feature Vector와 달리 경로 자체의 모양보다 “경로가 놓인 환경”을 수치화한다. 예를 들어 시작점 주변 장애물 개수, 종료점 주변 설비 밀도, 경로 bounding corridor 내 장애물 점유율, 수직/수평 공간 여유 등을 계산하여 AI rerank 또는 후속 설계 자동화에 활용한다.
-
-## 3. 전체 프로세스
+|---|---|
+| VectorDBGen tag | `context` |
+| 실행 스크립트 | `Tools/BuildContextVectors.py` |
+| 상세 CLI | `Tools/ExtractObstacleContextVector.py` |
+| 공용 인코더 | `Tools/context_vector_encoder.py` |
+| DDL | `Tools/sql/create_route_context_vector_table.sql` |
+| 경로 입력 | `TB_ROUTE_FEATURE_VECTOR`의 시작·종점 좌표 |
+| 장애물 입력 | `TB_BIM_OBSTACLE`의 구조 장애물 AABB |
+| 출력 | `TB_ROUTE_CONTEXT_VECTOR` |
+| 벡터 차원 | 30D |
 
 ```mermaid
 flowchart TD
-    A["VectorDBGen UI: Context Vector 선택"] --> B["Preflight 검사"]
-    B --> C["BuildContextVectors.py 존재 확인"]
-    C --> D["create_context_vector_table.sql 존재 확인"]
-    D --> E["Source table 확인"]
-    E --> F["TB_BIM_OBSTACLES 존재 확인"]
-    F --> G["TB_ROUTE_CONTEXT_VECTOR 자동 생성"]
-    G --> H["Python 실행"]
-    H --> I["Route path/segment 조회"]
-    I --> J["BIM obstacle 조회"]
-    J --> K["Start/End 반경 기반 context feature 계산"]
-    K --> L["24D context vector 저장"]
+    A["TB_ROUTE_FEATURE_VECTOR 7,879건"] --> B["시작·종점 좌표 읽기"]
+    C["TB_BIM_OBSTACLE 구조 장애물 164,490건"] --> D["전역 공간 인덱스 구성"]
+    B --> E["Start/End 500·1,000mm shell 조회"]
+    D --> E
+    B --> F["경로 chord 주변 장애물 조회"]
+    D --> F
+    E --> G["Endpoint 13D × 2"]
+    F --> H["Tier3 4D"]
+    G --> I["30D 결합 및 L2 정규화"]
+    H --> I
+    I --> J["TB_ROUTE_CONTEXT_VECTOR 저장"]
 ```
 
-세부 처리 단계:
+`BuildContextVectors.py`와 상세 CLI는 동일한 Python 공용 인코더를 사용한다. C# 검색기는 같은 반경, 차원 배치, 정규화 및 설정 해시를 사용한다.
 
-1. VectorDBGen에서 Context Vector 빌더를 선택한다.
-2. UI에서 시작 반경, 종료 반경, 개발용 limit 값을 입력한다.
-3. `PreflightCheckAsync("context")`가 `TB_BIM_OBSTACLES`까지 포함해 필수 source table을 검사한다.
-4. target table이 없으면 `create_context_vector_table.sql`을 실행한다.
-5. Python 빌더가 route path와 obstacle 데이터를 조회한다.
-6. 각 route path별 시작점/종료점/경로 corridor 주변 context를 계산한다.
-7. 24D vector를 `TB_ROUTE_CONTEXT_VECTOR`에 저장한다.
+## 3. 범위 정책
 
-## 4. 핵심 알고리즘
+v3의 범위는 다음과 같다.
 
-### 4.1 Start/End 반경 기반 공간 분석
+- `SCOPE_KIND = GLOBAL_SPATIAL_ALL_BAYS`
+- `SCOPE_VALUE = ''`
+- `ENCODER_VERSION = topkgen-v3`
 
-VectorDBGen UI 기본값:
+현재 DB에서는 모든 구조 장애물이 하나의 전역 좌표계에 있고, 같은 AABB가 서로 다른 BAY에 중복 배치된 사례가 없다. 따라서 문자열 BAY로 미리 거르지 않고 전역 공간 인덱스에서 실제 좌표 반경과 chord 영역에 닿는 장애물만 조회한다.
 
-- `--start-radius`: 기본 1000 mm
-- `--end-radius`: 기본 2000 mm
+이 방식은 `PROCESS_NAME -> BAY`가 일대일이 아니고, 경로 BAY와 장애물 BAY의 명명 수준도 서로 다른 현재 데이터에서 누락을 방지한다. 단, 향후 여러 프로젝트나 revision의 좌표가 겹치는 DB로 확장하면 `PROJECT_ID` 또는 `MODEL_REVISION_ID`를 범위 키에 추가해야 한다.
 
-예상 처리:
+## 4. 30D 레이아웃
 
-1. route path의 시작 좌표와 종료 좌표를 가져온다.
-2. `TB_BIM_OBSTACLES`에서 해당 좌표 반경 내 장애물을 조회한다.
-3. 장애물의 개수, 평균 거리, 최소 거리, bounding volume, 카테고리 분포를 계산한다.
-4. 시작점과 종료점 각각에 대해 별도 context feature를 만든다.
+### START `[0:13]`, END `[13:26]`
 
-### 4.2 경로 Corridor 기반 분석
+| 상대 인덱스 | 특징 |
+|---:|---|
+| 0 | 0~500mm 구조 장애물 수 / 8 |
+| 1 | 500~1,000mm 구조 장애물 수 / 8 |
+| 2~4 | 가장 가까운 구조 장애물 AABB 표면 방향 XYZ |
+| 5 | 가장 가까운 구조 장애물 표면거리 / 1,000 |
+| 6 | 0~500mm 벽 수 / 5 |
+| 7 | 500~1,000mm 벽 수 / 5 |
+| 8~10 | 가장 가까운 벽 AABB 표면 방향 XYZ |
+| 11 | 가장 가까운 벽 표면거리 / 1,000 |
+| 12 | 1,000mm 이내 구조물·벽이 없는 free-space 표시 |
 
-route segment 전체를 감싸는 corridor 또는 bounding box를 만든 뒤, 해당 영역과 겹치는 장애물 정보를 계산한다.
+### Tier3 `[26:30]`
 
-예상 feature:
+| 인덱스 | 특징 |
+|---:|---|
+| 26 | 시작·종점 Z level 변화 |
+| 27 | 시작~종점 chord 격자별 구조 장애물 점유 점수 |
+| 28 | 주변 벽 장축과 chord의 평행도 |
+| 29 | chord 수평방향의 X축 cosine |
 
-- corridor 내 장애물 개수
-- corridor 내 obstacle volume 합계
-- segment와 가장 가까운 obstacle 거리
-- X/Y/Z 방향 여유 공간
-- 수직 이동 구간 주변 장애물 밀도
-- 장비/덕트/배관 유형별 주변 객체 비율
+마지막에 전체 30D를 L2 정규화한다. free-space 차원 때문에 완전 무장애 환경도 영벡터가 되지 않는다.
 
-### 4.3 24D Context Vector 예시 구성
+## 5. 기하 계산 원칙
 
-| Index 범위 | 의미 | 설명 |
-| --- | --- | --- |
-| 0~3 | Start obstacle summary | 시작점 주변 장애물 개수, 최소거리, 평균거리, 밀도 |
-| 4~7 | End obstacle summary | 종료점 주변 장애물 개수, 최소거리, 평균거리, 밀도 |
-| 8~11 | Corridor obstacle summary | 경로 corridor 내 장애물 개수/밀도/점유율/최소거리 |
-| 12~15 | Clearance statistics | X/Y/Z/전체 clearance 요약 |
-| 16~19 | Vertical context | 상부/하부 공간 여유, Z 이동 주변 장애물 영향 |
-| 20~23 | Category distribution | 장애물/설비 유형별 비율 또는 one-hot 요약 |
+- 장애물 중심거리가 아니라 point-to-AABB 최단 표면거리를 사용한다.
+- AABB가 점유하는 모든 1,000mm grid cell에 장애물을 등록한다.
+- 여러 cell에서 발견된 동일 장애물은 `INSTANCE_ID + AABB`로 중복 제거한다.
+- Endpoint 계산은 최대 1,000mm shell만 조회한다.
+- Tier3 chord 계산은 순서가 보장되는 grid traversal을 사용하며 200점을 넘으면 균등 downsampling한다.
 
-실제 구현에서는 프로젝트 DB 스키마의 obstacle 타입, AABB/OBB 좌표 보유 여부에 따라 feature 정의를 확정해야 한다.
+## 6. 실행
 
-## 5. 주요 함수 설계
-
-| 함수 | 역할 |
-| --- | --- |
-| `parse_args()` | DB 인자, `--start-radius`, `--end-radius`, `--limit` 파싱 |
-| `connect_db(args)` | DB 연결 |
-| `fetch_routes(conn, limit=None)` | route path와 segment 요약 조회 |
-| `fetch_obstacles(conn)` | BIM obstacle geometry 조회 |
-| `build_spatial_index(obstacles)` | 장애물 공간 검색 가속 구조 생성. R-tree 또는 grid index 권장 |
-| `query_nearby_obstacles(index, point, radius)` | 특정 좌표 반경 내 장애물 검색 |
-| `query_corridor_obstacles(index, route_bbox)` | 경로 corridor와 겹치는 장애물 검색 |
-| `compute_context_vector(route, obstacles, start_radius, end_radius)` | 24D context vector 계산 |
-| `upsert_context_vectors(conn, rows)` | `TB_ROUTE_CONTEXT_VECTOR` 저장 |
-| `main()` | 전체 실행 |
-
-## 6. 주요 변수
-
-| 변수 | 의미 |
-| --- | --- |
-| `start_radius` | 시작점 주변 context 조회 반경. 기본 1000 mm |
-| `end_radius` | 종료점 주변 context 조회 반경. 기본 2000 mm |
-| `limit` | 개발/디버깅용 처리 row 제한 |
-| `route_bbox` | 경로 전체 bounding box |
-| `obstacle_rows` | BIM 장애물 데이터 |
-| `spatial_index` | 장애물 검색용 공간 인덱스 |
-| `near_start` | 시작점 주변 장애물 목록 |
-| `near_end` | 종료점 주변 장애물 목록 |
-| `corridor_obstacles` | 경로 corridor 주변 장애물 목록 |
-| `context_vector` | 24D float 배열 |
-
-## 7. 실행 명령어
-
-VectorDBGen에서 생성하는 기본 명령어 형식:
+전체 재생성과 저장:
 
 ```powershell
-python -u BuildContextVectors.py `
-  --host <host> `
-  --port <port> `
-  --dbname <database> `
-  --user <user> `
-  --password <password> `
-  --start-radius 1000 `
-  --end-radius 2000 `
-  --limit <optional-limit>
+python Tools/BuildContextVectors.py --config Tools/tools.settings.json
 ```
 
-예시:
+DB를 변경하지 않는 검증:
 
 ```powershell
-python -u BuildContextVectors.py `
-  --host localhost `
-  --port 5432 `
-  --dbname DDW_AI_DB `
-  --user postgres `
-  --password "<password>" `
-  --start-radius 1000 `
-  --end-radius 2000 `
-  --limit 500
+python Tools/ExtractObstacleContextVector.py --config Tools/tools.settings.json extract --dry-run
 ```
 
-인자 설명:
+현재 DB coverage와 인코더 계약 확인:
 
-| 인자 | 필수 | 설명 |
-| --- | --- | --- |
-| `--host` | 예 | PostgreSQL host |
-| `--port` | 예 | PostgreSQL port |
-| `--dbname` | 예 | DB명 |
-| `--user` | 예 | DB 사용자 |
-| `--password` | 예 | DB 비밀번호 |
-| `--start-radius` | 아니오 | 시작점 주변 장애물 분석 반경 |
-| `--end-radius` | 아니오 | 종료점 주변 장애물 분석 반경 |
-| `--limit` | 아니오 | 처리 row 제한. 개발/성능 검증용 |
+```powershell
+python Tools/ExtractObstacleContextVector.py --config Tools/tools.settings.json status
+```
 
-## 8. DB 저장 컬럼 권장안
+전체 Top-K 품질 평가와 배포 게이트 강제 적용:
 
-| 컬럼 | 타입 | 설명 |
-| --- | --- | --- |
-| `ROUTE_PATH_GUID` | text | 원본 경로 GUID |
-| `PROCESS_NAME` | text | 공정명 |
-| `EQUIPMENT_NAME` | text | 장비명 |
-| `UTILITY_GROUP` | text | 유틸리티 그룹 |
-| `UTILITY` | text | 유틸리티 |
-| `START_RADIUS_MM` | double precision | 시작점 분석 반경 |
-| `END_RADIUS_MM` | double precision | 종료점 분석 반경 |
-| `OBSTACLE_COUNT_START` | integer | 시작점 주변 장애물 수 |
-| `OBSTACLE_COUNT_END` | integer | 종료점 주변 장애물 수 |
-| `MIN_CLEARANCE_MM` | double precision | 최소 여유거리 |
-| `CONTEXT_VECTOR` | vector(24) | pgvector context vector |
-| `CREATED_AT` | timestamp | 생성 시각 |
+```powershell
+python Tools/EvaluateContextTopK.py `
+  --config Tools/tools.settings.json `
+  --output-json data/output/context_topk_deployment_gate.json `
+  --output-md Docs/ContextVector_Deployment_Gate.md `
+  --enforce-gate
+```
 
-## 9. 성능 고려 사항
+게이트가 차단되면 종료 코드는 `2`다. 기본 기준은 전체/후보 coverage 99% 이상, 양끝축·패턴 Top-1 각각 1%p 이상 개선, Feature cosine 감소 0.04 이하, 운영 쿼리 100건 이상, 현재 가중치와 권장 가중치 일치다.
 
-- `TB_BIM_OBSTACLES` row 수가 많으면 단순 전수 비교는 급격히 느려질 수 있다.
-- 장애물 AABB/OBB 좌표에 대해 GiST, SP-GiST 또는 별도 공간 인덱스를 고려한다.
-- Python 내부에서는 R-tree, grid hashing, KD-tree 등의 공간 인덱스를 사용하는 것이 좋다.
-- VectorDBGen UI 주석 기준으로 Context 단계는 수천 건 처리 시 수십 초 이상 걸릴 수 있다.
+개발용 일부 행 검증은 반드시 `--dry-run`과 함께 사용한다. 부분 행 저장은 전체 테이블을 축소할 수 있으므로 프로그램이 차단한다.
 
-## 10. 실패 시 확인 사항
+```powershell
+python Tools/BuildContextVectors.py --config Tools/tools.settings.json --limit 100 --dry-run
+```
 
-| 증상 | 확인 사항 |
-| --- | --- |
-| Context 빌더 실행 불가 | `TB_BIM_OBSTACLES` 존재 여부 확인 |
-| 처리 시간이 과도함 | `--limit`으로 샘플 실행 후 공간 인덱스 최적화 |
-| context vector null | obstacle 좌표 컬럼명, route 좌표 컬럼명 확인 |
-| target table 미존재 | `create_context_vector_table.sql` 실행 여부 확인 |
+## 7. 저장 컬럼과 검색 계약
 
+| 컬럼 | 설명 |
+|---|---|
+| `ROUTE_PATH_GUID` | `TB_ROUTE_FEATURE_VECTOR`의 경로 GUID |
+| `CONTEXT_VECTOR` | `vector(30)` |
+| `START_META_JSON`, `END_META_JSON` | shell count와 최근접 표면거리 |
+| `TIER3_META_JSON` | chord 보조 특징 원시값 |
+| `SCOPE_KIND`, `SCOPE_VALUE` | 전역 공간 범위 정책과 값 |
+| `SOURCE_BAY` | 계보 진단용 원본 process 값; 공간 필터로 사용하지 않음 |
+| `ENCODER_VERSION` | `topkgen-v3` |
+| `ENCODER_CONFIG_JSON`, `ENCODER_CONFIG_HASH` | Python/C# 계산 계약 |
+| `ENCODED_AT` | 생성 시각 |
+
+C# 검색기는 후보 Context Vector를 사용할 때 version, config hash 및 scope kind가 모두 일치하는 행만 조인한다. `bay` 인자는 하위 호환 진단용이며 v3 장애물 공간 필터에는 필요하지 않다.
+
+재정렬 기본 가중치는 다음과 같다.
+
+```text
+position 0.45 + pattern 0.27 + feature 0.18 + context 0.10
+```
+
+후보 Context가 없으면 기존 baseline 가중치 `0.50 + 0.30 + 0.20`으로 개별 후보를 재정규화한다.
+
+## 8. 검증 결과
+
+- Feature/Context: 7,879 / 7,879건, coverage 100%
+- 구조 장애물: 164,490건, 고유 기하 164,445건
+- 전체 30D norm min/max: 1.0 / 1.0
+- 실제 C# 검색 후보 Context: 150 / 150건
+- Python 저장 벡터와 C# 실시간 계산 최대 오차: 약 `1.8E-08`
+- leave-one-out 운영 표본 825건에서 기본 가중치 0.10의 양끝축 Top-1: 21.212% (baseline 대비 +2.91%p)
+- 같은 조건의 패턴 Top-1: 14.303% (baseline 대비 +2.06%p)
+
+세부 내용은 `Docs/ContextVector_Phase4_Implementation.md`와 `Docs/ContextVector_Phase4_GlobalSpatial_Evaluation.md`를 참조한다.
+
+## 9. 실제 라우팅 A/B 관측
+
+`AutoRouteFinder`의 `Context v3 A/B arm`을 선택하면 `CONTEXT_V3`, 해제하면 `BASELINE_TOPK`로 실제 Routing3DEngine 결과가 `TB_CONTEXT_ROUTING_AB_LOG`에 저장된다. 동일 요청은 SHA-256 `REQUEST_KEY`로 페어링된다.
+
+```powershell
+python Tools/AnalyzeContextRoutingAB.py --config Tools/tools.settings.json status
+python Tools/AnalyzeContextRoutingAB.py --config Tools/tools.settings.json report
+```
+
+현재 비교 지표는 성공률, 실패 사유, 성공 경로 길이, bend 수, 확장 노드와 처리시간이다. 자세한 구현과 운용 절차는 `Docs/ContextVector_Phase6_Implementation.md`를 참조한다.
+
+반복 수집은 `ContextRoutingABRunner`를 사용한다. 기본은 read-only dry-run이며 `--execute`를 지정할 때만 baseline/context 실제 라우팅을 순차 수행하고 로그를 저장한다. 자세한 안전 조건과 최초 실측은 `Docs/ContextVector_Phase7_Implementation.md`를 참조한다.
+
+8단계 층화 캠페인에서 8개 프로젝트의 실제 라우팅 30페어를 수집했다. Top-K는 53.3%의 페어에서 변경됐지만 성공률·길이·bend는 동일해 자동 판정은 `NO_OBSERVED_ROUTE_QUALITY_EFFECT`였다. 자세한 표본과 해석은 `Docs/ContextVector_Phase8_Implementation.md` 및 `Docs/ContextVector_Phase8_Routing_AB_Report.md`를 참조한다.

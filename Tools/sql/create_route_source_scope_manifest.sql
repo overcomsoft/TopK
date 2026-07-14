@@ -1,0 +1,92 @@
+-- Route/Context source revision manifest, audit, project membership migration
+--
+-- 실행 방법
+--   psql -d DDW_AI_DB -f Tools/sql/create_route_source_scope_manifest.sql
+-- 또는
+--   python Tools/RouteContextLifecycle.py --config Tools/tools.settings.json schema
+--
+-- 상태 흐름
+--   DRAFT -> BUILDING -> READY -> ACTIVE -> RETIRED
+--                         +-----> FAILED
+-- 프로젝트별 ACTIVE는 partial unique index로 최대 한 건만 허용한다.
+-- Manifest는 source hash/건수/import artifact/검증결과를 고정하고 Audit는 상태 변경을 기록한다.
+-- MEMBER 테이블은 하나의 route/obstacle이 여러 project scope에 속하는 경우를 표현한다.
+
+CREATE TABLE IF NOT EXISTS "TB_ROUTE_SOURCE_SCOPE_MANIFEST" (
+    "PROJECT_SCOPE_KEY" text NOT NULL,
+    "MODEL_REVISION_KEY" text NOT NULL,
+    "SOURCE_SNAPSHOT_HASH" text NOT NULL,
+    "FEATURE_ROW_COUNT" bigint NOT NULL,
+    "ROUTE_ROW_COUNT" bigint NOT NULL,
+    "OBSTACLE_ROW_COUNT" bigint NOT NULL,
+    "SCOPE_MODE" text NOT NULL DEFAULT 'FULL_DATABASE_SNAPSHOT',
+    "STATUS" text NOT NULL DEFAULT 'DRAFT',
+    "IMPORT_BATCH_ID" text,
+    "SOURCE_ARTIFACT" text,
+    "SOURCE_ARTIFACT_HASH" text,
+    "PARENT_REVISION_KEY" text,
+    "VALIDATION_JSON" jsonb,
+    "NOTE" text,
+    "APPLIED_BY" text NOT NULL DEFAULT current_user,
+    "SOURCE_DATABASE" text,
+    "APPLIED_AT" timestamptz NOT NULL DEFAULT now(),
+    "READY_AT" timestamptz,
+    "PROMOTED_AT" timestamptz,
+    "RETIRED_AT" timestamptz,
+    PRIMARY KEY ("PROJECT_SCOPE_KEY", "MODEL_REVISION_KEY")
+);
+
+ALTER TABLE "TB_ROUTE_SOURCE_SCOPE_MANIFEST"
+    ADD COLUMN IF NOT EXISTS "STATUS" text NOT NULL DEFAULT 'DRAFT',
+    ADD COLUMN IF NOT EXISTS "IMPORT_BATCH_ID" text,
+    ADD COLUMN IF NOT EXISTS "SOURCE_ARTIFACT" text,
+    ADD COLUMN IF NOT EXISTS "SOURCE_ARTIFACT_HASH" text,
+    ADD COLUMN IF NOT EXISTS "PARENT_REVISION_KEY" text,
+    ADD COLUMN IF NOT EXISTS "VALIDATION_JSON" jsonb,
+    ADD COLUMN IF NOT EXISTS "NOTE" text,
+    ADD COLUMN IF NOT EXISTS "APPLIED_BY" text NOT NULL DEFAULT current_user,
+    ADD COLUMN IF NOT EXISTS "READY_AT" timestamptz,
+    ADD COLUMN IF NOT EXISTS "PROMOTED_AT" timestamptz,
+    ADD COLUMN IF NOT EXISTS "RETIRED_AT" timestamptz;
+
+ALTER TABLE "TB_ROUTE_SOURCE_SCOPE_MANIFEST"
+    DROP CONSTRAINT IF EXISTS "CK_TRSSM_STATUS";
+ALTER TABLE "TB_ROUTE_SOURCE_SCOPE_MANIFEST"
+    ADD CONSTRAINT "CK_TRSSM_STATUS"
+    CHECK ("STATUS" IN ('DRAFT','BUILDING','READY','ACTIVE','RETIRED','FAILED'));
+
+CREATE INDEX IF NOT EXISTS "IX_TRSSM_SNAPSHOT"
+    ON "TB_ROUTE_SOURCE_SCOPE_MANIFEST" ("SOURCE_SNAPSHOT_HASH");
+CREATE UNIQUE INDEX IF NOT EXISTS "UX_TRSSM_ONE_ACTIVE"
+    ON "TB_ROUTE_SOURCE_SCOPE_MANIFEST" ("PROJECT_SCOPE_KEY") WHERE "STATUS"='ACTIVE';
+
+CREATE TABLE IF NOT EXISTS "TB_ROUTE_SOURCE_SCOPE_AUDIT" (
+    "AUDIT_ID" uuid PRIMARY KEY,
+    "PROJECT_SCOPE_KEY" text NOT NULL,
+    "MODEL_REVISION_KEY" text,
+    "ACTION" text NOT NULL,
+    "FROM_STATUS" text,
+    "TO_STATUS" text,
+    "DETAIL_JSON" jsonb,
+    "ACTOR" text NOT NULL DEFAULT current_user,
+    "CREATED_AT" timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS "IX_TRSSA_SCOPE_TIME"
+    ON "TB_ROUTE_SOURCE_SCOPE_AUDIT" ("PROJECT_SCOPE_KEY", "CREATED_AT" DESC);
+
+-- Optional many-to-many membership for future partial-project scopes.
+CREATE TABLE IF NOT EXISTS "TB_ROUTE_SOURCE_SCOPE_ROUTE_MEMBER" (
+    "PROJECT_SCOPE_KEY" text NOT NULL,
+    "MODEL_REVISION_KEY" text NOT NULL,
+    "ROUTE_PATH_GUID" text NOT NULL,
+    PRIMARY KEY ("PROJECT_SCOPE_KEY","MODEL_REVISION_KEY","ROUTE_PATH_GUID")
+);
+CREATE TABLE IF NOT EXISTS "TB_ROUTE_SOURCE_SCOPE_OBSTACLE_MEMBER" (
+    "PROJECT_SCOPE_KEY" text NOT NULL,
+    "MODEL_REVISION_KEY" text NOT NULL,
+    "OBSTACLE_KEY" text NOT NULL,
+    PRIMARY KEY ("PROJECT_SCOPE_KEY","MODEL_REVISION_KEY","OBSTACLE_KEY")
+);
+
+COMMENT ON TABLE "TB_ROUTE_SOURCE_SCOPE_MANIFEST" IS
+    'Explicit immutable source-scope assignments. FULL_DATABASE_SNAPSHOT means all current route, feature, and BIM obstacle rows were assigned together.';

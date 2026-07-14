@@ -96,6 +96,7 @@
                     <TextBlock x:Name="TxtConnStatus" VerticalAlignment="Center" FontSize="11" FontWeight="SemiBold" Text="● DB 로드 대기" Foreground="#FFFFB900" Margin="0,0,15,0"/>
                     <CheckBox x:Name="ChkUseFeatureProfile" Content="기존설계 특징점(Rack/Spine/Face) 연계 적용" Foreground="White" IsChecked="True" VerticalAlignment="Center" Margin="0,0,15,0" FontSize="12" FontWeight="SemiBold"/>
                     <CheckBox x:Name="ChkUseTopKSimilarity" Content="유사설계 Top-K 회랑 연계" Foreground="White" IsChecked="True" VerticalAlignment="Center" Margin="0,0,15,0" FontSize="12" FontWeight="SemiBold"/>
+                    <CheckBox x:Name="ChkUseContextVector" Content="Context v3 A/B arm" ToolTip="선택: CONTEXT_V3, 해제: BASELINE_TOPK. 동일 작업의 실제 라우팅 결과가 A/B 로그로 페어링됩니다." Foreground="#FF7FDBFF" IsChecked="True" VerticalAlignment="Center" Margin="0,0,15,0" FontSize="12" FontWeight="SemiBold"/>
                     <Button x:Name="BtnRunRouting" Content="▶ 자동설계 실행" Padding="15,3" Click="BtnRunRouting_Click" Height="26" Background="#FF007ACC" Foreground="White" FontWeight="Bold"/>
                 </StackPanel>
 

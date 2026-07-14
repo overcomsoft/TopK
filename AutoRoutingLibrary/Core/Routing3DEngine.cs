@@ -147,6 +147,23 @@ namespace AutoRoutingLibrary.Core
             Check(Native.r3d_set_corridor_cells(Handle, flattened, flattened.Length / 3), "set_corridor_cells");
         }
 
+        public void SetRankedCorridorCells(
+            IEnumerable<RankedPathCell>? cells, IReadOnlyList<double> rankPenaltyFactors)
+        {
+            if (rankPenaltyFactors == null || rankPenaltyFactors.Count == 0)
+                throw new ArgumentException("At least one rank penalty factor is required.", nameof(rankPenaltyFactors));
+            var factors = rankPenaltyFactors.ToArray();
+            if (factors.Any(value => value < 0.0 || value > 1.0 || double.IsNaN(value) || double.IsInfinity(value)))
+                throw new ArgumentOutOfRangeException(nameof(rankPenaltyFactors), "Factors must be finite values in [0,1].");
+            var ranked = cells?.ToArray() ?? Array.Empty<RankedPathCell>();
+            if (ranked.Any(value => value.Rank < 1 || value.Rank > factors.Length))
+                throw new ArgumentOutOfRangeException(nameof(cells), "Every rank must map to a supplied factor.");
+            var flattened = ranked.SelectMany(value => new[] { value.Cell.I, value.Cell.J, value.Cell.K }).ToArray();
+            var ranks = ranked.Select(value => value.Rank).ToArray();
+            Check(Native.r3d_set_ranked_corridor_cells(
+                Handle, flattened, ranks, ranked.Length, factors, factors.Length), "set_ranked_corridor_cells");
+        }
+
         public void RouteMulti(string priority = "longest")
             => Check(Native.r3d_route_multi(Handle, Native.Utf8(priority)), "route_multi");
 

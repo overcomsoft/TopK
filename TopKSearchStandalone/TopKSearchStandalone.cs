@@ -1,3 +1,14 @@
+// Context Vector 기능 실행 방법(PowerShell)
+// ----------------------------------------
+// 1) 빌드: dotnet build TopKSearchStandalone/TopKSearchStandalone.csproj -c Release
+// 2) 도움말: dotnet run --project TopKSearchStandalone/TopKSearchStandalone.csproj -- --help
+// 3) Context 검색: 일반 검색 인자에 --use-obstacle-context 추가
+// 4) API 호출: SearchAsync(..., useObstacleContext: true)
+//
+// 전체 흐름: 입력 -> endpoint 30D query -> pgvector Feature 후보 -> 기존 hybrid 재정렬
+//            -> ACTIVE strict scope -> query/candidate Context cosine -> 최종 Top-K
+// scope 생략 시 ACTIVE를 자동 선택하며, global fallback은 명시적으로 허용한 경우만 사용한다.
+//
 // ═════════════════════════════════════════════════════════════════════════════
 //  TopKSearchStandalone.cs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,11 +96,11 @@
 //    │ ScorePattern        │ double (0~1)                 │ 패턴 점수         │
 //    │                     │                              │ (가중치 0.30)     │
 //    │ ScoreVector         │ double (0~1)                 │ 30D 코사인 점수   │
-//    │                     │                              │ (가중치 0.20)     │
+//    │                     │                              │ (가중치 0.10)     │
 //    │ SimilarityScore     │ double (0~1)                 │ Combined =        │
 //    │                     │                              │   0.50·Pos +      │
 //    │                     │                              │   0.30·Pat +      │
-//    │                     │                              │   0.20·Vec        │
+//    │                     │                              │   0.18·Vec        │
 //    └────────────────────┴──────────────────────────────┴───────────────────┘
 //
 //    SearchMeta — 실행 진단/로깅 정보
@@ -164,16 +175,25 @@
 //                             ▼
 //    ┌────────────────────────────────────────────────────────────────────┐
 //    │ [3] RerankHybrid()                                                  │
-//    │     Phase 2 — 3가지 유사도 가중합                                    │
+//    │     Phase 2 — 3~4가지 유사도 가중합                                  │
 //    │                                                                     │
 //    │     posScore  = max(0, 1 − ‖Δq−Δc‖ / 50000)                         │
 //    │     patScore  = 0.5·structScore + 0.5·bendScore                     │
 //    │                  (struct = Levenshtein(RLE 축약), bend = [12:21] cos)│
 //    │     vecScore  = 1 − cosineDistance                                   │
+//    │     ctxScore  = (선택, useObstacleContext=true 시) 장애물 컨텍스트   │
+//    │                  30D 코사인 유사도 (§2.8 BuildContextVector30Async) │
 //    │                                                                     │
-//    │     combined  = 0.50·posScore + 0.30·patScore + 0.20·vecScore       │
+//    │  useObstacleContext=false(기본): combined = 0.50·pos+0.30·pat+0.20·vec│
+//    │  useObstacleContext=true       : combined = 0.45·pos+0.27·pat        │
+//    │                                              +0.18·vec+0.10·ctx      │
 //    │     → 내림차순 정렬 → 상위 K 선정                                   │
 //    └────────────────────────────────────────────────────────────────────┘
+//
+//    ※ ctxScore는 재정렬 단계에서만 사용된다. [2]의 1차 pgvector ANN 후보추출에는
+//       절대 섞지 않는다 — 실측상 후보추출 단계에 섞으면 오히려 정확도가 떨어짐
+//       (기존 FEATURE_VECTOR의 env_cost 구간과 정보 중복, "천장효과").
+//       상세 근거: Docs/20260713_Learned Design Data Reuse Strategy.md
 //
 //  [사용 예시]
 //
@@ -235,6 +255,18 @@
 //    )
 // ═════════════════════════════════════════════════════════════════════════════
 
+// -----------------------------------------------------------------------------
+// Context Vector 운영 실행 요약(한글)
+// 실행: dotnet build TopKSearchStandalone/TopKSearchStandalone.csproj -c Release
+// CLI 도움말: dotnet run --project TopKSearchStandalone/TopKSearchStandalone.csproj -- --help
+// 라이브러리: SearchAsync(..., useObstacleContext: true)
+//
+// 흐름: 입력 -> endpoint 30D query -> pgvector Feature 후보 -> 위치/pattern/feature 재정렬
+//       -> ACTIVE strict scope -> query/candidate Context cosine -> hybrid Top-K
+// 계약: scope 인자를 생략하면 ACTIVE를 자동 선택하고, ACTIVE 0/복수건은 실패한다.
+//       legacy fallback은 allowGlobalContextFallback=true인 진단 호출에서만 허용한다.
+//       SearchMeta는 coverage/scope/snapshot/encoder provenance를 반환한다.
+// -----------------------------------------------------------------------------
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -263,6 +295,16 @@ public sealed record DbConfig(
         $"Host={Host};Port={Port};Database={Database};Username={User};Password={Password};Encoding=UTF8";
 }
 
+/// <summary>
+/// 하이브리드 재정렬 가중치. 합계가 1 또는 100일 필요는 없으며 재정렬 시 활성 항목만
+/// 자동 정규화한다. 모든 값은 0 이상의 유한수여야 한다.
+/// </summary>
+public sealed record RerankWeights(
+    double Position = 0.45,
+    double Pattern = 0.27,
+    double Vector = 0.18,
+    double Context = 0.10);
+
 /// <summary>Top-K 결과 단일 건.</summary>
 /// <param name="Rank">1..K 최종 순위 (Combined 내림차순).</param>
 /// <param name="RoutePathGuid">원본 경로 GUID (TB_ROUTE_PATH 와 조인용).</param>
@@ -277,10 +319,11 @@ public sealed record DbConfig(
 /// <param name="StartXyz">후보 경로의 시작 좌표(mm).</param>
 /// <param name="EndXyz">후보 경로의 종료 좌표(mm).</param>
 /// <param name="CosineDistance">pgvector &lt;=&gt; 연산자 원값(0=동일, 2=정반대).</param>
-/// <param name="ScorePosition">상대위치 유사도 (0~1, 가중치 0.50).</param>
-/// <param name="ScorePattern">패턴 유사도 (0~1, 가중치 0.30).</param>
-/// <param name="ScoreVector">30D 코사인 유사도 (0~1, 가중치 0.20).</param>
+/// <param name="ScorePosition">상대위치 유사도 (0~1, 가중치 0.50 또는 컨텍스트 사용시 0.45).</param>
+/// <param name="ScorePattern">패턴 유사도 (0~1, 가중치 0.30 또는 컨텍스트 사용시 0.27).</param>
+/// <param name="ScoreVector">30D 코사인 유사도 (0~1, 가중치 0.20 또는 컨텍스트 사용시 0.18).</param>
 /// <param name="SimilarityScore">최종 Combined 점수(0~1).</param>
+/// <param name="ScoreContext">장애물 컨텍스트 유사도 (0~1, 가중치 0.10). useObstacleContext=false면 항상 0.</param>
 public sealed record SearchResult(
     int    Rank,
     string RoutePathGuid,
@@ -298,7 +341,8 @@ public sealed record SearchResult(
     double ScorePosition,
     double ScorePattern,
     double ScoreVector,
-    double SimilarityScore);
+    double SimilarityScore,
+    double ScoreContext = 0.0);
 
 /// <summary>검색 실행 메타 (진단/로깅용).</summary>
 public sealed class SearchMeta
@@ -306,9 +350,35 @@ public sealed class SearchMeta
     public double SearchTimeMs    { get; set; }
     public int    TotalCandidates { get; set; }
     public int    FetchN          { get; set; }
+    /// <summary>재정렬 후보 중 호환되는 TB_ROUTE_CONTEXT_VECTOR가 존재하는 건수.</summary>
+    public int    ContextCandidates { get; set; }
+    /// <summary>재정렬 후보의 Context Vector 커버리지(0~1).</summary>
+    public double ContextCoverage => TotalCandidates == 0
+        ? 0.0
+        : (double)ContextCandidates / TotalCandidates;
+    /// <summary>Context 사용 요청은 있었지만 호환 벡터가 없어 baseline 점수를 사용한 후보 수.</summary>
+    public int ContextFallbackCandidates => UsedObstacleContext
+        ? Math.Max(0, TotalCandidates - ContextCandidates)
+        : 0;
+    /// <summary>검색에 적용한 재정렬 가중치 계약.</summary>
+    public string RerankWeightProfile { get; set; } = "baseline:0.50/0.30/0.20";
     public Dictionary<string, string> FiltersApplied { get; set; } = new();
     /// <summary>쿼리 벡터 앞 6개 원소(다른 구현체와 대조 검증용).</summary>
     public double[] QueryVectorHead { get; set; } = Array.Empty<double>();
+    /// <summary>쿼리 Context Vector 앞 6개 원소(Python 색인 벡터와 parity 진단용).</summary>
+    public double[] QueryContextVectorHead { get; set; } = Array.Empty<double>();
+    /// <summary>이번 검색이 장애물 컨텍스트 벡터(ctxScore)를 재정렬에 사용했는지 여부.</summary>
+    public bool UsedObstacleContext { get; set; }
+    public string ContextSnapshotHash { get; set; } = "";
+    public string ContextScopeStatus { get; set; } = "";
+    public string ContextBuildRunId { get; set; } = "";
+    public string ContextProjectScopeKey { get; set; } = "";
+    public string ContextModelRevisionKey { get; set; } = "";
+    public string ContextEncoderVersion { get; set; } = "";
+    public string ContextEncoderConfigHash { get; set; } = "";
+    public bool ContextProvenanceConsistent { get; set; } = true;
+    public string ContextProvenanceIssue { get; set; } = "";
+    public int ContextProvenanceTupleCount { get; set; }
 }
 
 /// <summary>
@@ -391,7 +461,8 @@ public sealed record RoutePreset(
     (double X, double Y, double Z) EndXyz,
     string TargetOwnerName,
     double TotalLengthMm,
-    int    BendCount);
+    int    BendCount,
+    string Bay = "");
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -410,6 +481,17 @@ public static class TopKSearchStandalone
 
     /// <summary>벡터 차원 수. TB_ROUTE_FEATURE_VECTOR.FEATURE_VECTOR vector(30).</summary>
     public const int VECTOR_DIM = 30;
+
+    /// <summary>장애물 컨텍스트 벡터 차원 수. 시작 13D + 종료 13D + Tier3 4D.</summary>
+    public const int CONTEXT_VECTOR_DIM = 30;
+    public const int CONTEXT_ENDPOINT_DIM = 13;
+
+    /// <summary>시작/종료 공통 근접 shell 반경(mm).</summary>
+    public const double CTX_NEAR_RADIUS_MM = 500.0;
+    /// <summary>시작/종료 공통 외곽 반경(mm). 두 번째 shell은 500~1000mm.</summary>
+    public const double CTX_MID_RADIUS_MM = 1000.0;
+    public const string CONTEXT_ENCODER_VERSION = "topkgen-v3";
+    public const string CONTEXT_ENCODER_CONFIG_HASH = "bd5ff8de064cec2a2603dc514b18e9baa2e3d077b081a2d5477f91149e5a430b";
 
     /// <summary>30D 벡터의 차원 그룹별 (start, end, weight).
     /// 가중치는 원 설계 문서 기준이며 벡터 스케일링에만 사용(합=1 아님).</summary>
@@ -437,6 +519,7 @@ public static class TopKSearchStandalone
     private const double TOTAL_LENGTH_MAX    = 66433.582;
 
     // ─ 재정렬 가중치 (Phase 2) ─ C# TopKSearchService 와 동일 ────────────────
+    // useObstacleContext=false(기본값)일 때 사용 — 기존 호출자와 100% 동일한 결과 보장.
     /// <summary>상대위치 유사도 가중치 (최우선 순위).</summary>
     public const double RERANK_W_POSITION = 0.50;
     /// <summary>패턴 유사도 가중치.</summary>
@@ -447,6 +530,18 @@ public static class TopKSearchStandalone
     public const double RERANK_W_STRUCT   = 0.50;
     /// <summary>패턴 유사도 내 꺾임(코사인) 비중.</summary>
     public const double RERANK_W_BEND     = 0.50;
+
+    // ─ 재정렬 가중치 (컨텍스트 포함, useObstacleContext=true일 때만 사용) ──────
+    // 기존 3항목(0.50/0.30/0.20)을 0.9배로 비례 축소하고 ctxScore에 0.10을 배정
+    // (TopKGen v3 7,879건 전량 색인 leave-one-out 평가에서 context weight=0.10이
+    //  운영 양끝축 Top-1 일치를 최대화한 결과를 따름 — Phase4 평가 문서 참조).
+    // 1차 pgvector ANN 후보추출에는 절대 섞지 않고, 재정렬 단계에서만 사용한다
+    // (섞으면 오히려 정확도가 떨어짐이 실측됨 — TB_ROUTE_CONTEXT_VECTOR 스키마 주석 참조).
+    public const double RERANK_W_POSITION_CTX = 0.45;
+    public const double RERANK_W_PATTERN_CTX  = 0.27;
+    public const double RERANK_W_VECTOR_CTX   = 0.18;
+    /// <summary>장애물 컨텍스트 유사도 가중치 (useObstacleContext=true일 때만 적용).</summary>
+    public const double RERANK_W_CONTEXT      = 0.10;
 
     /// <summary>상대거리 정규화 한계(mm). relDist 가 이 이상이면 posScore=0.</summary>
     public const double REL_DIST_MAX_MM = 50000.0;
@@ -493,6 +588,11 @@ public static class TopKSearchStandalone
     /// <param name="k">반환할 Top-K 수량 (&gt;=1).</param>
     /// <param name="size">배관 구경 필터 (선택, 기본 공백).</param>
     /// <param name="queryPattern">방향 패턴 힌트 (선택, 예:"H-R-H"). 제공 시 struct 점수 활성.</param>
+    /// <param name="useObstacleContext">true면 시작/종료 PoC 주변 장애물(기둥/보) 배치를 30D
+    /// 컨텍스트 벡터로 즉석 계산해 재정렬 4번째 항목(ctxScore, 가중치 0.10)에 반영한다.
+    /// TB_ROUTE_CONTEXT_VECTOR(Tools/ExtractObstacleContextVector.py 산출)가 없는 후보는
+    /// 미색인 상태로 보고 기존 3항목 baseline 점수로 fallback한다. 기본값 false — 기존 호출자의 결과에 영향 없음.</param>
+    /// <param name="bay">하위 호환용 진단 필드. v3 전역 공간 인코더에서는 장애물 필터에 사용하지 않는다.</param>
     /// <exception cref="ArgumentOutOfRangeException">k&lt;1 또는 좌표가 유효하지 않을 때.</exception>
     /// <exception cref="Npgsql.NpgsqlException">DB 접속/쿼리 실패.</exception>
     public static async Task<(List<SearchResult> Results, SearchMeta Meta)> SearchAsync(
@@ -505,10 +605,25 @@ public static class TopKSearchStandalone
         (double X, double Y, double Z) endXyz,
         int k = 5,
         string size = "",
-        string queryPattern = "")
+        string queryPattern = "",
+        bool useObstacleContext = false,
+        string bay = "",
+        string projectScopeKey = "",
+        string modelRevisionKey = "",
+        bool allowGlobalContextFallback = false,
+        RerankWeights? rerankWeights = null,
+        bool redistributeMissingPatternWeight = false)
     {
+        // 주요 입력 변수
+        // - useObstacleContext: false=기존 feature 검색, true=Context hybrid 재정렬
+        // - contextWeight: Context cosine의 최종점수 비중(나머지 점수는 비례 축소)
+        // - projectScopeKey/modelRevisionKey: 고정할 source revision, 둘 다 비면 ACTIVE 자동 조회
+        // - allowGlobalContextFallback: legacy 무범위 Context를 명시적으로 허용하는 비상 스위치
         if (k < 1) throw new ArgumentOutOfRangeException(nameof(k), "k must be >= 1");
-
+        projectScopeKey = (projectScopeKey ?? "").Trim();
+        modelRevisionKey = (modelRevisionKey ?? "").Trim();
+        if (string.IsNullOrEmpty(projectScopeKey) != string.IsNullOrEmpty(modelRevisionKey))
+            throw new ArgumentException("projectScopeKey and modelRevisionKey must be provided together");
         var sw = Stopwatch.StartNew();
 
         // [1] 쿼리 벡터 생성
@@ -518,14 +633,28 @@ public static class TopKSearchStandalone
         int fetchN = Math.Max(k * FETCH_MULTIPLIER, FETCH_MIN);
         await using var conn = new NpgsqlConnection(db.ToConnectionString());
         await conn.OpenAsync().ConfigureAwait(false);
+        if (useObstacleContext && string.IsNullOrEmpty(projectScopeKey) && !allowGlobalContextFallback)
+        {
+            (projectScopeKey, modelRevisionKey) = await ResolveActiveContextScopeAsync(conn).ConfigureAwait(false);
+        }
+
+        // [2.5] (선택) 쿼리 시점 장애물 컨텍스트 벡터 — 경로 없이 start/end + 주변 장애물만으로 계산 가능.
+        //       1차 ANN 후보추출(FetchCandidatesAsync)에는 절대 섞지 않고 재정렬 단계에서만 사용한다.
+        double[]? queryCtxVec = useObstacleContext
+            ? await BuildContextVector30Async(
+                conn, startXyz, endXyz, bay, projectScopeKey, modelRevisionKey).ConfigureAwait(false)
+            : null;
 
         var candidates = await FetchCandidatesAsync(
             conn, queryVec,
             processName, equipmentName, utilityGroup, utility, size,
-            fetchN).ConfigureAwait(false);
+            fetchN, includeContext: useObstacleContext,
+            projectScopeKey: projectScopeKey, modelRevisionKey: modelRevisionKey).ConfigureAwait(false);
 
         // [3] 하이브리드 재정렬
-        var results = RerankHybrid(candidates, startXyz, endXyz, queryPattern, k);
+        ValidateRerankWeights(rerankWeights);
+        var results = RerankHybrid(candidates, startXyz, endXyz, queryPattern, k, queryCtxVec,
+            rerankWeights, redistributeMissingPatternWeight);
 
         sw.Stop();
         var meta = new SearchMeta
@@ -533,6 +662,9 @@ public static class TopKSearchStandalone
             SearchTimeMs    = sw.Elapsed.TotalMilliseconds,
             TotalCandidates = candidates.Count,
             FetchN          = fetchN,
+            ContextCandidates = useObstacleContext
+                ? candidates.Count(c => c.ContextVector != null)
+                : 0,
             FiltersApplied  = new Dictionary<string, string>
             {
                 ["process_name"]   = processName   ?? "",
@@ -540,10 +672,84 @@ public static class TopKSearchStandalone
                 ["utility_group"]  = utilityGroup  ?? "",
                 ["utility"]        = utility       ?? "",
                 ["size"]           = size          ?? "",
+                ["bay"]            = bay           ?? "",
+                ["project_scope_key"] = projectScopeKey,
+                ["model_revision_key"] = modelRevisionKey,
             },
-            QueryVectorHead = queryVec.Take(6).ToArray(),
+            QueryVectorHead     = queryVec.Take(6).ToArray(),
+            QueryContextVectorHead = queryCtxVec?.Take(6).ToArray() ?? Array.Empty<double>(),
+            UsedObstacleContext = useObstacleContext,
+            RerankWeightProfile = DescribeRerankWeights(
+                rerankWeights, useObstacleContext, queryPattern, redistributeMissingPatternWeight),
         };
+        PopulateContextProvenance(meta, candidates, useObstacleContext);
         return (results, meta);
+    }
+
+    private static async Task<(string Project, string Revision)> ResolveActiveContextScopeAsync(
+        NpgsqlConnection conn)
+    {
+        // ACTIVE가 정확히 한 건이어야 한다. 임의의 최신 revision 선택은 재현성을 깨므로 금지한다.
+        await using var cmd = new NpgsqlCommand(
+            """
+            SELECT "PROJECT_SCOPE_KEY", "MODEL_REVISION_KEY"
+            FROM "TB_ROUTE_SOURCE_SCOPE_MANIFEST"
+            WHERE "STATUS"='ACTIVE'
+            ORDER BY "PROMOTED_AT" DESC NULLS LAST
+            LIMIT 2
+            """, conn);
+        var rows = new List<(string Project, string Revision)>();
+        await using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
+            rows.Add((reader.GetString(0), reader.GetString(1)));
+        if (rows.Count == 0)
+            throw new InvalidOperationException(
+                "No ACTIVE context revision. Promote one or set allowGlobalContextFallback=true explicitly.");
+        if (rows.Count > 1)
+            throw new InvalidOperationException(
+                "Multiple ACTIVE context projects exist; provide projectScopeKey/modelRevisionKey explicitly.");
+        return rows[0];
+    }
+
+    private static void PopulateContextProvenance(
+        SearchMeta meta, IReadOnlyCollection<Candidate> candidates, bool useObstacleContext)
+    {
+        if (!useObstacleContext) return;
+        var withContext = candidates.Where(candidate => candidate.ContextVector != null).ToList();
+        var tuples = withContext
+            .Select(candidate => string.Join("\u001f", new[]
+            {
+                candidate.ContextSnapshotHash, candidate.ContextScopeStatus, candidate.ContextBuildRunId,
+                candidate.ContextProjectScopeKey, candidate.ContextModelRevisionKey,
+                candidate.ContextEncoderVersion, candidate.ContextEncoderConfigHash,
+            }))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        meta.ContextProvenanceTupleCount = tuples.Count;
+        if (withContext.Count == 0)
+        {
+            meta.ContextProvenanceConsistent = true;
+            return;
+        }
+        var first = withContext[0];
+        meta.ContextSnapshotHash = first.ContextSnapshotHash;
+        meta.ContextScopeStatus = first.ContextScopeStatus;
+        meta.ContextBuildRunId = first.ContextBuildRunId;
+        meta.ContextProjectScopeKey = first.ContextProjectScopeKey;
+        meta.ContextModelRevisionKey = first.ContextModelRevisionKey;
+        meta.ContextEncoderVersion = first.ContextEncoderVersion;
+        meta.ContextEncoderConfigHash = first.ContextEncoderConfigHash;
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(meta.ContextSnapshotHash)) missing.Add("snapshot_hash");
+        if (string.IsNullOrWhiteSpace(meta.ContextScopeStatus)) missing.Add("scope_status");
+        if (string.IsNullOrWhiteSpace(meta.ContextBuildRunId)) missing.Add("build_run_id");
+        if (string.IsNullOrWhiteSpace(meta.ContextEncoderVersion)) missing.Add("encoder_version");
+        if (string.IsNullOrWhiteSpace(meta.ContextEncoderConfigHash)) missing.Add("encoder_config_hash");
+        meta.ContextProvenanceConsistent = tuples.Count == 1 && missing.Count == 0;
+        if (tuples.Count > 1)
+            meta.ContextProvenanceIssue = $"mixed_context_provenance:{tuples.Count}";
+        else if (missing.Count > 0)
+            meta.ContextProvenanceIssue = "missing_context_provenance:" + string.Join(",", missing);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -933,7 +1139,8 @@ public static class TopKSearchStandalone
                 COALESCE(""TARGET_POSX"", 0), COALESCE(""TARGET_POSY"", 0), COALESCE(""TARGET_POSZ"", 0),
                 COALESCE(TRIM(""TARGET_OWNER_NAME""), ''),
                 COALESCE(""TOTAL_LENGTH"", 0),
-                COALESCE(""BEND_COUNT"", 0)
+                COALESCE(""BEND_COUNT"", 0),
+                COALESCE(TRIM(""BAY""), '')
             FROM ""TB_ROUTE_PATH""
             {whereSql}
             ORDER BY ""PROCESS_NAME"", ""EQUIPMENT_NAME"", ""SOURCE_UTILITY"", ""ROUTE_PATH_GUID""
@@ -959,7 +1166,8 @@ public static class TopKSearchStandalone
                 EndXyz:          (reader.GetDouble(9),  reader.GetDouble(10), reader.GetDouble(11)),
                 TargetOwnerName: reader.GetString(12),
                 TotalLengthMm:   reader.GetDouble(13),
-                BendCount:       (int)Math.Round(reader.GetDouble(14))));
+                BendCount:       (int)Math.Round(reader.GetDouble(14)),
+                Bay:             reader.GetString(15)));
         }
         return list;
     }
@@ -1037,16 +1245,28 @@ public static class TopKSearchStandalone
         public (double X, double Y, double Z) EndXyz   { get; set; }
         public double   CosineDistance { get; set; }
         public double[] FeatureVector  { get; set; } = new double[VECTOR_DIM];
+        /// <summary>TB_ROUTE_CONTEXT_VECTOR.CONTEXT_VECTOR (없으면 null). includeContext=true일 때만 채워짐.</summary>
+        public double[]? ContextVector { get; set; }
+        public string ContextSnapshotHash { get; set; } = "";
+        public string ContextScopeStatus { get; set; } = "";
+        public string ContextBuildRunId { get; set; } = "";
+        public string ContextProjectScopeKey { get; set; } = "";
+        public string ContextModelRevisionKey { get; set; } = "";
+        public string ContextEncoderVersion { get; set; } = "";
+        public string ContextEncoderConfigHash { get; set; } = "";
     }
 
     /// <summary>pgvector 코사인 거리 기준 상위 N개를 DB에서 가져온다.
     /// WHERE 필터는 비어있지 않은 항목만 AND 연결.</summary>
+    /// <param name="includeContext">true면 TB_ROUTE_CONTEXT_VECTOR를 LEFT JOIN하여
+    /// 각 후보의 30D 컨텍스트 벡터도 함께 가져온다(없는 후보는 null).</param>
     private static async Task<List<Candidate>> FetchCandidatesAsync(
         NpgsqlConnection conn,
         double[] queryVec,
         string processName, string equipmentName,
         string utilityGroup, string utility, string size,
-        int fetchN)
+        int fetchN, bool includeContext = false,
+        string projectScopeKey = "", string modelRevisionKey = "")
     {
         // 1) WHERE 절 동적 구성 (바인딩 파라미터 이름 순서 기록)
         var whereParts  = new List<string>();
@@ -1056,6 +1276,14 @@ public static class TopKSearchStandalone
         AddFilter("UTILITY_GROUP",  "@ug", utilityGroup,  whereParts, paramValues);
         AddFilter("UTILITY",        "@ut", utility,       whereParts, paramValues);
         AddFilter("SIZE",           "@sz", size,          whereParts, paramValues);
+        bool strictScope = !string.IsNullOrEmpty(projectScopeKey);
+        if (strictScope)
+        {
+            whereParts.Add("fv.\"PROJECT_SCOPE_KEY\" = @cps");
+            whereParts.Add("fv.\"MODEL_REVISION_KEY\" = @cmr");
+            paramValues.Add(("@cps", projectScopeKey));
+            paramValues.Add(("@cmr", modelRevisionKey));
+        }
         string whereSql = whereParts.Count > 0
             ? "WHERE " + string.Join(" AND ", whereParts)
             : "";
@@ -1063,31 +1291,59 @@ public static class TopKSearchStandalone
         // 2) pgvector 리터럴 "[v0,v1,...]" 생성
         string vecLit = ToPgVectorLiteral(queryVec);
 
+        // 2.5) 컨텍스트 벡터 LEFT JOIN (includeContext=true일 때만) — 없는 후보는 NULL로 자연 처리됨.
+        //      절대 ORDER BY/1차 ANN 필터에는 관여하지 않음(재정렬 전용, 스키마 주석 참조).
+        string ctxJoin   = includeContext ? $@"LEFT JOIN ""TB_ROUTE_CONTEXT_VECTOR"" cv
+            ON TRIM(cv.""ROUTE_PATH_GUID"") = TRIM(fv.""ROUTE_PATH_GUID"")
+           AND cv.""ENCODER_VERSION"" = '{CONTEXT_ENCODER_VERSION}'
+           AND cv.""ENCODER_CONFIG_HASH"" = '{CONTEXT_ENCODER_CONFIG_HASH}'
+           AND cv.""SCOPE_KIND"" = 'GLOBAL_SPATIAL_ALL_BAYS'
+           AND cv.""PROJECT_SCOPE_KEY"" = @ctx_project
+           AND cv.""MODEL_REVISION_KEY"" = @ctx_revision
+           AND cv.""SCOPE_RESOLUTION_STATUS"" = @ctx_status" : "";
+        string ctxSelect = includeContext ? @", cv.""CONTEXT_VECTOR""::text AS ctx_text,
+                COALESCE(cv.""SOURCE_SNAPSHOT_HASH"", ''),
+                COALESCE(cv.""SCOPE_RESOLUTION_STATUS"", ''),
+                COALESCE(cv.""BUILD_RUN_ID""::text, ''),
+                COALESCE(cv.""PROJECT_SCOPE_KEY"", ''),
+                COALESCE(cv.""MODEL_REVISION_KEY"", ''),
+                COALESCE(cv.""ENCODER_VERSION"", ''),
+                COALESCE(cv.""ENCODER_CONFIG_HASH"", '')" : "";
+
         // 3) SQL — <=> 는 pgvector 코사인 거리 연산자
         //    FEATURE_VECTOR::text 는 후보의 [12:21] 꺾임 구간 비교에 필요
         string sql = $@"
             SELECT
-                TRIM(""ROUTE_PATH_GUID""),
-                COALESCE(TRIM(""PROCESS_NAME""),    ''),
-                COALESCE(TRIM(""EQUIPMENT_NAME""),  ''),
-                COALESCE(TRIM(""UTILITY_GROUP""),   ''),
-                COALESCE(TRIM(""UTILITY""),         ''),
-                COALESCE(TRIM(""SIZE""),            ''),
-                COALESCE(TRIM(""DIRECTION_PATTERN""), ''),
-                COALESCE(""TOTAL_LENGTH_MM"", 0),
-                COALESCE(""STEP_COUNT"", 0),
-                COALESCE(""START_POSX"", 0), COALESCE(""START_POSY"", 0), COALESCE(""START_POSZ"", 0),
-                COALESCE(""END_POSX"",   0), COALESCE(""END_POSY"",   0), COALESCE(""END_POSZ"",   0),
-                (""FEATURE_VECTOR"" <=> @vec::vector) AS cosine_distance,
-                ""FEATURE_VECTOR""::text AS vec_text
-            FROM ""TB_ROUTE_FEATURE_VECTOR""
+                TRIM(fv.""ROUTE_PATH_GUID""),
+                COALESCE(TRIM(fv.""PROCESS_NAME""),    ''),
+                COALESCE(TRIM(fv.""EQUIPMENT_NAME""),  ''),
+                COALESCE(TRIM(fv.""UTILITY_GROUP""),   ''),
+                COALESCE(TRIM(fv.""UTILITY""),         ''),
+                COALESCE(TRIM(fv.""SIZE""),            ''),
+                COALESCE(TRIM(fv.""DIRECTION_PATTERN""), ''),
+                COALESCE(fv.""TOTAL_LENGTH_MM"", 0),
+                COALESCE(fv.""STEP_COUNT"", 0),
+                COALESCE(fv.""START_POSX"", 0), COALESCE(fv.""START_POSY"", 0), COALESCE(fv.""START_POSZ"", 0),
+                COALESCE(fv.""END_POSX"",   0), COALESCE(fv.""END_POSY"",   0), COALESCE(fv.""END_POSZ"",   0),
+                (fv.""FEATURE_VECTOR"" <=> @vec::vector) AS cosine_distance,
+                fv.""FEATURE_VECTOR""::text AS vec_text
+                {ctxSelect}
+            FROM ""TB_ROUTE_FEATURE_VECTOR"" fv
+            {ctxJoin}
             {whereSql}
-            ORDER BY ""FEATURE_VECTOR"" <=> @vec::vector
+            ORDER BY fv.""FEATURE_VECTOR"" <=> @vec::vector
             LIMIT @n;";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("vec", vecLit);
         cmd.Parameters.AddWithValue("n",   fetchN);
+        if (includeContext)
+        {
+            cmd.Parameters.AddWithValue("ctx_project", projectScopeKey);
+            cmd.Parameters.AddWithValue("ctx_revision", modelRevisionKey);
+            cmd.Parameters.AddWithValue(
+                "ctx_status", strictScope ? "STRICT_COMMON_KEY" : "GLOBAL_FALLBACK_NO_COMMON_KEY");
+        }
         foreach (var (name, val) in paramValues)
             cmd.Parameters.AddWithValue(name.TrimStart('@'), val);
 
@@ -1112,6 +1368,17 @@ public static class TopKSearchStandalone
             };
             string vecText = reader.IsDBNull(16) ? "" : reader.GetString(16);
             c.FeatureVector = ParsePgVectorLiteral(vecText);
+            if (includeContext && reader.FieldCount > 17 && !reader.IsDBNull(17))
+            {
+                c.ContextVector = ParsePgVectorLiteral(reader.GetString(17), CONTEXT_VECTOR_DIM);
+                c.ContextSnapshotHash = reader.GetString(18);
+                c.ContextScopeStatus = reader.GetString(19);
+                c.ContextBuildRunId = reader.GetString(20);
+                c.ContextProjectScopeKey = reader.GetString(21);
+                c.ContextModelRevisionKey = reader.GetString(22);
+                c.ContextEncoderVersion = reader.GetString(23);
+                c.ContextEncoderConfigHash = reader.GetString(24);
+            }
             list.Add(c);
         }
         return list;
@@ -1132,15 +1399,23 @@ public static class TopKSearchStandalone
     // 2.5 Phase 2 — 하이브리드 재정렬
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>3가지 유사도(위치/패턴/벡터)의 가중합으로 후보를 재정렬, 상위 k개 반환.
-    /// 본 로직은 RoutingAIViewer의 TopKSearchService 와 결과가 동일해야 한다.</summary>
+    /// <summary>3~4가지 유사도(위치/패턴/벡터/[컨텍스트])의 가중합으로 후보를 재정렬, 상위 k개 반환.
+    /// queryContextVector가 null이면(기본) 기존 3항목 가중치(0.50/0.30/0.20)로 RoutingAIViewer의
+    /// TopKSearchService 와 완전히 동일한 결과를 낸다. non-null이고 후보 Context도 있으면
+    /// 4항목 가중치(0.45/0.27/0.18/0.10)로 ctxScore를 추가 반영하며,
+    /// 후보 Context가 없으면 기존 baseline 점수로 fallback한다.</summary>
     private static List<SearchResult> RerankHybrid(
         List<Candidate> candidates,
         (double X, double Y, double Z) startXyz,
         (double X, double Y, double Z) endXyz,
         string queryPattern,
-        int k)
+        int k,
+        double[]? queryContextVector = null,
+        RerankWeights? requestedWeights = null,
+        bool redistributeMissingPatternWeight = false)
     {
+        bool useContext = queryContextVector != null;
+        bool usePattern = !string.IsNullOrWhiteSpace(queryPattern) || !redistributeMissingPatternWeight;
         // 쿼리 변위벡터 Δq (start→end)
         double qdx = endXyz.X - startXyz.X;
         double qdy = endXyz.Y - startXyz.Y;
@@ -1149,7 +1424,7 @@ public static class TopKSearchStandalone
         // 좌표만 입력받은 경우 쿼리 꺾임 벡터(9D)는 계산 불가 → null
         double[]? queryBendVec = null;
 
-        var scored = new List<(double Combined, Candidate Cand, double Pos, double Pat, double Vec)>(candidates.Count);
+        var scored = new List<(double Combined, Candidate Cand, double Pos, double Pat, double Vec, double Ctx)>(candidates.Count);
 
         foreach (var c in candidates)
         {
@@ -1177,12 +1452,40 @@ public static class TopKSearchStandalone
             // pgvector <=> (cosine distance) = 1 - cosine similarity 관계
             double vecScore = 1.0 - c.CosineDistance;
 
-            // 최종 가중합
-            double combined = posScore     * RERANK_W_POSITION
-                            + patternScore * RERANK_W_PATTERN
-                            + vecScore     * RERANK_W_VECTOR;
+            // (4) (선택) 장애물 컨텍스트 유사도 ─────────────────────────────
+            // 후보에 TB_ROUTE_CONTEXT_VECTOR 레코드가 없으면(미색인) ctxScore=0으로 처리한다.
+            bool hasCandidateContext = useContext && c.ContextVector != null;
+            double ctxScore = 0.0;
+            if (hasCandidateContext)
+                ctxScore = Math.Max(0.0, CosineSimilarity(queryContextVector!, c.ContextVector!));
 
-            scored.Add((combined, c, posScore, patternScore, vecScore));
+            // 후보 Context가 아직 색인되지 않은 경우에는 "환경 불일치"로 간주하지 않고
+            // 기존 3항목 baseline 가중치로 fallback한다. 부분 색인 상태에서 ctxScore=0을
+            // 강제하면 미색인 여부가 순위를 결정하는 coverage bias가 발생한다.
+            var defaults = hasCandidateContext
+                ? new RerankWeights(RERANK_W_POSITION_CTX, RERANK_W_PATTERN_CTX,
+                    RERANK_W_VECTOR_CTX, RERANK_W_CONTEXT)
+                : new RerankWeights(RERANK_W_POSITION, RERANK_W_PATTERN, RERANK_W_VECTOR, 0.0);
+            var weights = requestedWeights ?? defaults;
+            double wPos = weights.Position;
+            double wPat = usePattern ? weights.Pattern : 0.0;
+            double wVec = weights.Vector;
+            double wCtx = hasCandidateContext ? weights.Context : 0.0;
+            double activeWeight = wPos + wPat + wVec + wCtx;
+            if (activeWeight <= 0.0)
+                throw new InvalidOperationException("활성 유사도 가중치 합계가 0입니다.");
+            wPos /= activeWeight;
+            wPat /= activeWeight;
+            wVec /= activeWeight;
+            wCtx /= activeWeight;
+
+            // 최종 가중합
+            double combined = posScore     * wPos
+                            + patternScore * wPat
+                            + vecScore     * wVec
+                            + ctxScore     * wCtx;
+
+            scored.Add((combined, c, posScore, patternScore, vecScore, ctxScore));
         }
 
         // 내림차순 정렬 후 상위 k
@@ -1190,7 +1493,7 @@ public static class TopKSearchStandalone
 
         var results = new List<SearchResult>(Math.Min(k, scored.Count));
         int rank = 1;
-        foreach (var (combined, c, pos, pat, vec) in scored.Take(k))
+        foreach (var (combined, c, pos, pat, vec, ctx) in scored.Take(k))
         {
             results.Add(new SearchResult(
                 Rank:             rank++,
@@ -1209,9 +1512,40 @@ public static class TopKSearchStandalone
                 ScorePosition:    pos,
                 ScorePattern:     pat,
                 ScoreVector:      vec,
-                SimilarityScore:  combined));
+                SimilarityScore:  combined,
+                ScoreContext:     ctx));
         }
         return results;
+    }
+
+    private static void ValidateRerankWeights(RerankWeights? weights)
+    {
+        if (weights is null) return;
+        var values = new[] { weights.Position, weights.Pattern, weights.Vector, weights.Context };
+        if (values.Any(value => !double.IsFinite(value) || value < 0.0))
+            throw new ArgumentOutOfRangeException(nameof(weights), "유사도 가중치는 0 이상의 유한수여야 합니다.");
+        if (values.Sum() <= 0.0)
+            throw new ArgumentOutOfRangeException(nameof(weights), "유사도 가중치 합계는 0보다 커야 합니다.");
+    }
+
+    private static string DescribeRerankWeights(RerankWeights? requested, bool useContext,
+        string queryPattern, bool redistributeMissingPatternWeight)
+    {
+        if (requested is null && !redistributeMissingPatternWeight)
+            return useContext ? "context-v3:0.45/0.27/0.18/0.10" : "baseline:0.50/0.30/0.20";
+        var weights = requested ?? (useContext
+            ? new RerankWeights(RERANK_W_POSITION_CTX, RERANK_W_PATTERN_CTX,
+                RERANK_W_VECTOR_CTX, RERANK_W_CONTEXT)
+            : new RerankWeights(RERANK_W_POSITION, RERANK_W_PATTERN, RERANK_W_VECTOR, 0.0));
+        var patternActive = !string.IsNullOrWhiteSpace(queryPattern) || !redistributeMissingPatternWeight;
+        var p = weights.Position;
+        var t = patternActive ? weights.Pattern : 0.0;
+        var v = weights.Vector;
+        var c = useContext ? weights.Context : 0.0;
+        var sum = p + t + v + c;
+        if (sum <= 0.0) return "invalid:0/0/0/0";
+        return $"custom:{p / sum:F3}/{t / sum:F3}/{v / sum:F3}/{c / sum:F3}" +
+               (patternActive ? "" : ":pattern-auto-off");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1311,22 +1645,315 @@ public static class TopKSearchStandalone
         return sb.ToString();
     }
 
-    /// <summary>pgvector 텍스트 "[v0,v1,...]" → double[30]. 차원 불일치 시 0 패딩.</summary>
-    private static double[] ParsePgVectorLiteral(string text)
+    /// <summary>pgvector 텍스트 "[v0,v1,...]" → double[dim]. 차원 불일치 시 0 패딩.
+    /// dim 생략 시 VECTOR_DIM(30) — CONTEXT_VECTOR_DIM(24) 파싱 시 명시적으로 전달.</summary>
+    private static double[] ParsePgVectorLiteral(string text, int dim = VECTOR_DIM)
     {
-        var result = new double[VECTOR_DIM];
+        var result = new double[dim];
         if (string.IsNullOrEmpty(text)) return result;
         var s = text.Trim();
         if (s.StartsWith('[')) s = s[1..];
         if (s.EndsWith(']'))   s = s[..^1];
         var parts = s.Split(',');
-        int count = Math.Min(parts.Length, VECTOR_DIM);
+        int count = Math.Min(parts.Length, dim);
         for (int i = 0; i < count; i++)
         {
             double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out double val);
             result[i] = val;
         }
         return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 2.8 (선택) 장애물 컨텍스트 벡터 — 30D, 쿼리 시점 계산 가능
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Tools/ExtractObstacleContextVector.py 와 완전히 동일한 레이아웃/공식으로
+    //  계산해야 코사인 비교가 의미를 가진다(양쪽 구현이 어긋나면 조용히 틀린
+    //  유사도를 낼 뿐 예외가 나지 않으므로 특히 주의).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static readonly string[] ColumnDdworksTypes = { "COLUMN_ARCHITECTURE", "COLUMN_STRUCTURE" };
+    private static readonly string[] BeamDdworksTypes    = { "BEAM_ARCHITECTURE", "BEAM_STRUCTURE" };
+
+    private sealed class NearbyObstacle
+    {
+        public string Id = "";
+        public (double X, double Y, double Z) Minimum;
+        public (double X, double Y, double Z) Maximum;
+        public (double X, double Y, double Z) Center;
+        public (double X, double Y, double Z) Closest;
+        public (double X, double Y, double Z) Extent;
+        public double Distance;
+    }
+
+    /// <summary>start/end 좌표 + 전역 공간의 주변 장애물(TB_BIM_OBSTACLE)만으로 30D 컨텍스트 벡터를 계산한다.
+    /// BAY 문자열로 선필터하지 않고 실제 1,000mm 반경/경로 바운딩박스로 공간 필터링한다.</summary>
+    public static async Task<double[]> BuildContextVector30Async(
+        NpgsqlConnection conn,
+        (double X, double Y, double Z) startXyz,
+        (double X, double Y, double Z) endXyz,
+        string bay,
+        string projectScopeKey = "",
+        string modelRevisionKey = "")
+    {
+        var startColumns = await FetchNearbyObstaclesAsync(conn, startXyz, CTX_MID_RADIUS_MM, ColumnDdworksTypes, projectScopeKey, modelRevisionKey).ConfigureAwait(false);
+        var startBeams    = await FetchNearbyObstaclesAsync(conn, startXyz, CTX_MID_RADIUS_MM, BeamDdworksTypes, projectScopeKey, modelRevisionKey).ConfigureAwait(false);
+        var endColumns    = await FetchNearbyObstaclesAsync(conn, endXyz,   CTX_MID_RADIUS_MM, ColumnDdworksTypes, projectScopeKey, modelRevisionKey).ConfigureAwait(false);
+        var endBeams      = await FetchNearbyObstaclesAsync(conn, endXyz,   CTX_MID_RADIUS_MM, BeamDdworksTypes, projectScopeKey, modelRevisionKey).ConfigureAwait(false);
+
+        double[] startContext = EncodeEndpoint(startXyz, startColumns, startBeams);
+        double[] endContext   = EncodeEndpoint(endXyz,   endColumns,   endBeams);
+
+        // Tier3: 경로 전체 컬럼 격자셀 탐색은 start~end 바운딩박스 하나로 일괄 조회(성능).
+        double minX = Math.Min(startXyz.X, endXyz.X) - 600.0, maxX = Math.Max(startXyz.X, endXyz.X) + 600.0;
+        double minY = Math.Min(startXyz.Y, endXyz.Y) - 600.0, maxY = Math.Max(startXyz.Y, endXyz.Y) + 600.0;
+        double avgZ = (startXyz.Z + endXyz.Z) / 2.0;
+        var pathColumns = await FetchObstaclesInBoxAsync(conn, minX, minY, maxX, maxY, ColumnDdworksTypes, projectScopeKey, modelRevisionKey).ConfigureAwait(false);
+        double[] tier3 = EncodeTier3(startXyz, endXyz, pathColumns, startBeams.Concat(endBeams).ToList());
+
+        var full = new double[CONTEXT_VECTOR_DIM];
+        Array.Copy(startContext, 0, full, 0, CONTEXT_ENDPOINT_DIM);
+        Array.Copy(endContext, 0, full, CONTEXT_ENDPOINT_DIM, CONTEXT_ENDPOINT_DIM);
+        Array.Copy(tier3, 0, full, CONTEXT_ENDPOINT_DIM * 2, 4);
+        L2NormalizeInPlace(full);
+        return full;
+    }
+
+    /// <summary>point 주변 radius(mm) 이내, 지정 DDWORKS_TYPE 목록에 속한 장애물을 AABB 범위조건으로 조회.</summary>
+    private static async Task<List<NearbyObstacle>> FetchNearbyObstaclesAsync(
+        NpgsqlConnection conn, (double X, double Y, double Z) point, double radius, string[] ddworksTypes,
+        string projectScopeKey = "", string modelRevisionKey = "")
+    {
+        bool strictScope = !string.IsNullOrEmpty(projectScopeKey);
+        string sql = @"
+            SELECT COALESCE(""INSTANCE_ID"", ''),
+                   ""AABB_MINX"",""AABB_MINY"",""AABB_MINZ"",""AABB_MAXX"",""AABB_MAXY"",""AABB_MAXZ""
+            FROM ""TB_BIM_OBSTACLE""
+            WHERE ""DDWORKS_TYPE"" = ANY(@types)
+              AND ""AABB_MINX"" <= @maxx AND ""AABB_MAXX"" >= @minx
+              AND ""AABB_MINY"" <= @maxy AND ""AABB_MAXY"" >= @miny
+              AND ""AABB_MINZ"" <= @maxz AND ""AABB_MAXZ"" >= @minz" +
+              (strictScope ? @" AND ""PROJECT_SCOPE_KEY"" = @cps AND ""MODEL_REVISION_KEY"" = @cmr" : "");
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("types", ddworksTypes);
+        cmd.Parameters.AddWithValue("minx", point.X - radius); cmd.Parameters.AddWithValue("maxx", point.X + radius);
+        cmd.Parameters.AddWithValue("miny", point.Y - radius); cmd.Parameters.AddWithValue("maxy", point.Y + radius);
+        cmd.Parameters.AddWithValue("minz", point.Z - radius); cmd.Parameters.AddWithValue("maxz", point.Z + radius);
+        if (strictScope)
+        {
+            cmd.Parameters.AddWithValue("cps", projectScopeKey);
+            cmd.Parameters.AddWithValue("cmr", modelRevisionKey);
+        }
+
+        var result = new List<NearbyObstacle>();
+        await using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
+        {
+            string rawId = reader.GetString(0);
+            double minx = reader.GetDouble(1), miny = reader.GetDouble(2), minz = reader.GetDouble(3);
+            double maxx = reader.GetDouble(4), maxy = reader.GetDouble(5), maxz = reader.GetDouble(6);
+            var minimum = (minx, miny, minz);
+            var maximum = (maxx, maxy, maxz);
+            var center = ((minx + maxx) / 2.0, (miny + maxy) / 2.0, (minz + maxz) / 2.0);
+            var closest = ClosestPointOnAabb(point, minimum, maximum);
+            double d = Distance3(point, closest);
+            if (d <= radius)
+                result.Add(new NearbyObstacle
+                {
+                    Id = FormattableString.Invariant($"{rawId.Trim()}|{minx:R}|{miny:R}|{minz:R}|{maxx:R}|{maxy:R}|{maxz:R}"),
+                    Minimum = minimum, Maximum = maximum, Center = center, Closest = closest,
+                    Extent = (maxx - minx, maxy - miny, maxz - minz), Distance = d
+                });
+        }
+        return result;
+    }
+
+    /// <summary>XY 바운딩박스 내 지정 타입 장애물 전체 조회 (Tier3 경로 격자셀 탐색용, Z 조건 없음).</summary>
+    private static async Task<List<NearbyObstacle>> FetchObstaclesInBoxAsync(
+        NpgsqlConnection conn, double minX, double minY, double maxX, double maxY, string[] ddworksTypes,
+        string projectScopeKey = "", string modelRevisionKey = "")
+    {
+        bool strictScope = !string.IsNullOrEmpty(projectScopeKey);
+        string sql = @"
+            SELECT COALESCE(""INSTANCE_ID"", ''),
+                   ""AABB_MINX"",""AABB_MINY"",""AABB_MINZ"",""AABB_MAXX"",""AABB_MAXY"",""AABB_MAXZ""
+            FROM ""TB_BIM_OBSTACLE""
+            WHERE ""DDWORKS_TYPE"" = ANY(@types)
+              AND ""AABB_MINX"" <= @maxx AND ""AABB_MAXX"" >= @minx
+              AND ""AABB_MINY"" <= @maxy AND ""AABB_MAXY"" >= @miny" +
+              (strictScope ? @" AND ""PROJECT_SCOPE_KEY"" = @cps AND ""MODEL_REVISION_KEY"" = @cmr" : "");
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("types", ddworksTypes);
+        cmd.Parameters.AddWithValue("minx", minX); cmd.Parameters.AddWithValue("maxx", maxX);
+        cmd.Parameters.AddWithValue("miny", minY); cmd.Parameters.AddWithValue("maxy", maxY);
+        if (strictScope)
+        {
+            cmd.Parameters.AddWithValue("cps", projectScopeKey);
+            cmd.Parameters.AddWithValue("cmr", modelRevisionKey);
+        }
+
+        var result = new List<NearbyObstacle>();
+        await using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+        while (await reader.ReadAsync().ConfigureAwait(false))
+        {
+            string rawId = reader.GetString(0);
+            double minx = reader.GetDouble(1), miny = reader.GetDouble(2), minz = reader.GetDouble(3);
+            double maxx = reader.GetDouble(4), maxy = reader.GetDouble(5), maxz = reader.GetDouble(6);
+            var minimum = (minx, miny, minz);
+            var maximum = (maxx, maxy, maxz);
+            var center = ((minx + maxx) / 2.0, (miny + maxy) / 2.0, (minz + maxz) / 2.0);
+            result.Add(new NearbyObstacle
+            {
+                Id = FormattableString.Invariant($"{rawId.Trim()}|{minx:R}|{miny:R}|{minz:R}|{maxx:R}|{maxy:R}|{maxz:R}"),
+                Minimum = minimum, Maximum = maximum, Center = center, Closest = center,
+                Extent = (maxx - minx, maxy - miny, maxz - minz), Distance = 0.0
+            });
+        }
+        return result;
+    }
+
+    /// <summary>한 endpoint를 13D로 인코딩한다. 기둥/보 각각
+    /// near count, 500~1000mm count, 최근접 AABB 표면방향 XYZ, 표면거리/1000 순서이며
+    /// 마지막 차원은 1000mm 안에 기둥/보가 모두 없는 free-space 표시다.</summary>
+    private static double[] EncodeEndpoint(
+        (double X, double Y, double Z) point, List<NearbyObstacle> columns, List<NearbyObstacle> beams)
+    {
+        var vector = new double[CONTEXT_ENDPOINT_DIM];
+
+        void Fill(int offset, List<NearbyObstacle> obstacles, double countScale)
+        {
+            int nearCount = obstacles.Count(o => o.Distance <= CTX_NEAR_RADIUS_MM + 1e-9);
+            int midCount = obstacles.Count - nearCount;
+            vector[offset] = Clamp01(nearCount / countScale);
+            vector[offset + 1] = Clamp01(midCount / countScale);
+            if (obstacles.Count == 0) return;
+
+            var nearest = obstacles.OrderBy(o => o.Distance)
+                .ThenBy(o => o.Minimum.X).ThenBy(o => o.Minimum.Y).ThenBy(o => o.Minimum.Z)
+                .ThenBy(o => o.Maximum.X).ThenBy(o => o.Maximum.Y).ThenBy(o => o.Maximum.Z)
+                .ThenBy(o => o.Id, StringComparer.Ordinal).First();
+            if (nearest.Distance > 1e-9)
+            {
+                vector[offset + 2] = (nearest.Closest.X - point.X) / nearest.Distance;
+                vector[offset + 3] = (nearest.Closest.Y - point.Y) / nearest.Distance;
+                vector[offset + 4] = (nearest.Closest.Z - point.Z) / nearest.Distance;
+            }
+            vector[offset + 5] = Clamp01(nearest.Distance / CTX_MID_RADIUS_MM);
+        }
+
+        Fill(0, columns, 8.0);
+        Fill(6, beams, 5.0);
+        vector[12] = columns.Count == 0 && beams.Count == 0 ? 1.0 : 0.0;
+        return vector;
+    }
+
+    /// <summary>시작~종료 2점 경로 기준 보조 특징 4D (Tools/ExtractObstacleContextVector.py::encode_tier3 와 동일 공식).
+    /// [0] Z층 전환수/3, [1] 경로상 1m 격자 중 기둥이 있는 셀 수/15, [2] 진행방향-보 장축 평행도, [3] 수평 진행방향 코사인.</summary>
+    private static double[] EncodeTier3(
+        (double X, double Y, double Z) start, (double X, double Y, double Z) end,
+        List<NearbyObstacle> pathColumns, List<NearbyObstacle> nearbyBeams)
+    {
+        const double gridCellMm = 1000.0;
+        const int maxCells = 200;
+
+        var zLevels = new HashSet<double>(new[] { Math.Round(start.Z / 500.0) * 500.0, Math.Round(end.Z / 500.0) * 500.0 });
+        double layerTransitions = Clamp01((zLevels.Count - 1) / 3.0);
+
+        double dx = end.X - start.X, dy = end.Y - start.Y;
+        double horizLen = Math.Sqrt(dx * dx + dy * dy);
+        var cells = LineGridCells(start, end, gridCellMm);
+        IReadOnlyList<(int X, int Y)> limitedCells = cells;
+        if (cells.Count > maxCells)
+        {
+            var sampled = new List<(int X, int Y)>(maxCells);
+            int last = cells.Count - 1;
+            for (int i = 0; i < maxCells; i++)
+                sampled.Add(cells[(int)Math.Round(i * last / (double)(maxCells - 1))]);
+            limitedCells = sampled;
+        }
+
+        int colCellCount = 0;
+        foreach (var (cx, cy) in limitedCells)
+        {
+            double centerX = (cx + 0.5) * gridCellMm, centerY = (cy + 0.5) * gridCellMm;
+            var cellCenter = (centerX, centerY, (start.Z + end.Z) / 2.0);
+            bool hasColumn = pathColumns.Any(o => PointAabbDistance(cellCenter, o.Minimum, o.Maximum) <= gridCellMm * 0.6 + 1e-9);
+            if (hasColumn) colCellCount++;
+        }
+        double columnGridScore = Clamp01(colCellCount / 15.0);
+
+        double beamParallelism = 0.0;
+        if (horizLen > 1e-6 && nearbyBeams.Count > 0)
+        {
+            double pux = dx / horizLen, puy = dy / horizLen;
+            var scores = new List<double>();
+            foreach (var b in nearbyBeams.GroupBy(o => o.Id, StringComparer.Ordinal).Select(g => g.First()))
+            {
+                var ext = new[] { b.Extent.X, b.Extent.Y, b.Extent.Z };
+                int axis = 0;
+                for (int i = 1; i < 3; i++) if (ext[i] > ext[axis]) axis = i;
+                double bux, buy;
+                if (axis == 0) { bux = 1.0; buy = 0.0; }
+                else if (axis == 1) { bux = 0.0; buy = 1.0; }
+                else continue; // 장축이 수직(Z)인 보는 수평 평행도 비교에서 제외
+                scores.Add(Math.Abs(pux * bux + puy * buy));
+            }
+            if (scores.Count > 0) beamParallelism = scores.Average();
+        }
+
+        double bearingCos = horizLen > 1e-6 ? dx / horizLen : 0.0;
+
+        return new[] { layerTransitions, columnGridScore, beamParallelism, bearingCos };
+    }
+
+    private static List<(int X, int Y)> LineGridCells(
+        (double X, double Y, double Z) start, (double X, double Y, double Z) end, double cellSize)
+    {
+        double x0 = start.X / cellSize, y0 = start.Y / cellSize;
+        double x1 = end.X / cellSize, y1 = end.Y / cellSize;
+        int cx = (int)Math.Floor(x0), cy = (int)Math.Floor(y0);
+        int endX = (int)Math.Floor(x1), endY = (int)Math.Floor(y1);
+        var cells = new List<(int X, int Y)> { (cx, cy) };
+        double dx = x1 - x0, dy = y1 - y0;
+        int stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+        int stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+        double tDeltaX = dx == 0 ? double.PositiveInfinity : Math.Abs(1.0 / dx);
+        double tDeltaY = dy == 0 ? double.PositiveInfinity : Math.Abs(1.0 / dy);
+        double nextX = stepX > 0 ? cx + 1 : cx;
+        double nextY = stepY > 0 ? cy + 1 : cy;
+        double tMaxX = dx == 0 ? double.PositiveInfinity : (nextX - x0) / dx;
+        double tMaxY = dy == 0 ? double.PositiveInfinity : (nextY - y0) / dy;
+
+        while (cx != endX || cy != endY)
+        {
+            if (tMaxX < tMaxY) { cx += stepX; tMaxX += tDeltaX; }
+            else if (tMaxY < tMaxX) { cy += stepY; tMaxY += tDeltaY; }
+            else { cx += stepX; cy += stepY; tMaxX += tDeltaX; tMaxY += tDeltaY; }
+            cells.Add((cx, cy));
+        }
+        return cells;
+    }
+
+    private static (double X, double Y, double Z) ClosestPointOnAabb(
+        (double X, double Y, double Z) point,
+        (double X, double Y, double Z) minimum,
+        (double X, double Y, double Z) maximum)
+        => (Math.Max(minimum.X, Math.Min(point.X, maximum.X)),
+            Math.Max(minimum.Y, Math.Min(point.Y, maximum.Y)),
+            Math.Max(minimum.Z, Math.Min(point.Z, maximum.Z)));
+
+    private static double PointAabbDistance(
+        (double X, double Y, double Z) point,
+        (double X, double Y, double Z) minimum,
+        (double X, double Y, double Z) maximum)
+        => Distance3(point, ClosestPointOnAabb(point, minimum, maximum));
+
+    private static double Clamp01(double v) => Math.Max(0.0, Math.Min(1.0, v));
+
+    private static double Distance3((double X, double Y, double Z) a, (double X, double Y, double Z) b)
+    {
+        double dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
+        return Math.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 }
 
@@ -1443,7 +2070,9 @@ internal static class Program
                 endXyz:        opt.End,
                 k:             opt.K,
                 size:          opt.Size,
-                queryPattern:  opt.QueryPattern);
+                queryPattern:  opt.QueryPattern,
+                useObstacleContext: opt.UseObstacleContext,
+                bay: opt.Bay);
 
             if (opt.Json) PrintJson(results, meta);
             else          PrintHuman(results, meta);
@@ -1469,6 +2098,7 @@ internal static class Program
         if (string.IsNullOrEmpty(opt.UtilityGroup)) opt.UtilityGroup = p.UtilityGroup;
         if (string.IsNullOrEmpty(opt.Utility))      opt.Utility      = p.Utility;
         if (string.IsNullOrEmpty(opt.Size))         opt.Size         = p.Size;
+        if (string.IsNullOrEmpty(opt.Bay))          opt.Bay          = p.Bay;
         if (!opt.StartProvided) { opt.Start = p.StartXyz; opt.StartProvided = true; }
         if (!opt.EndProvided)   { opt.End   = p.EndXyz;   opt.EndProvided   = true; }
     }
@@ -1501,7 +2131,11 @@ internal static class Program
         public int K = 5;
         public string Size         = "";
         public string QueryPattern = "";
+        public string Bay          = "";
         public bool Json = false;
+        /// <summary>--use-obstacle-context : 시작/종료 PoC 주변 장애물(기둥/보) 컨텍스트 벡터(30D)를
+        /// 재정렬 4번째 항목(ctxScore)에 반영. TB_ROUTE_CONTEXT_VECTOR(ExtractObstacleContextVector.py) 필요.</summary>
+        public bool UseObstacleContext = false;
 
         // 프리셋 관련 옵션
         public bool   ListPresets   = false;
@@ -1540,12 +2174,14 @@ internal static class Program
                 case "--k":              o.K            = int.Parse(Next() ?? throw new ArgumentException("--k requires value")); break;
                 case "--size":           o.Size         = Next() ?? ""; break;
                 case "--query-pattern":  o.QueryPattern = Next() ?? ""; break;
+                case "--bay":            o.Bay          = Next() ?? throw new ArgumentException("--bay requires value"); break;
                 case "--json":           o.Json         = true; break;
                 case "--list-presets":   o.ListPresets  = true; break;
                 case "--preset-guid":    o.PresetGuid   = Next() ?? throw new ArgumentException("--preset-guid requires value"); break;
                 case "--preset-limit":   o.PresetLimit  = int.Parse(Next() ?? throw new ArgumentException("--preset-limit requires value")); break;
                 case "--preset-rank":    o.PresetRank   = int.Parse(Next() ?? throw new ArgumentException("--preset-rank requires value")); break;
                 case "--check-schema":   o.CheckSchema  = true; break;
+                case "--use-obstacle-context": o.UseObstacleContext = true; break;
                 default: throw new ArgumentException($"Unknown option: {a}");
             }
         }
@@ -1577,12 +2213,20 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
       --utility-group <그룹> --utility <유틸리티> \
       --start x,y,z --end x,y,z [--k 5] [--size 20A] \
       [--host localhost] [--port 5432] [--dbname AUTOROUTINGV7] \
-      [--user postgres] [--password dinno] [--query-pattern H-R-H] [--json]
+      [--user postgres] [--password dinno] [--query-pattern H-R-H] \
+      [--use-obstacle-context] [--bay ""CMP BAY""] [--json]
 
   예:
     dotnet run -- --process CMP --equipment kscta01 \
         --utility-group UPW --utility UPW_S \
         --start 12000,8500,3200 --end 14500,10200,3200 --k 5
+
+  --use-obstacle-context : 시작/종료 PoC 주변 장애물(기둥/보) 배치를 30D
+    컨텍스트 벡터로 즉석 계산해 재정렬 4번째 항목(ctxScore, 가중치 0.10)에
+    반영한다. TB_ROUTE_CONTEXT_VECTOR(Tools/ExtractObstacleContextVector.py 로
+    사전 색인 필요) 레코드가 없는 후보는 ctxScore=0으로 처리된다.
+    v3는 모든 BAY 라벨을 포함한 전역 좌표 인덱스에서 실제 근접 장애물만 조회한다.
+    --bay는 하위 호환 및 진단 출력용이며 필수 입력이 아니다.
 
 [2] TB_ROUTE_PATH 기본 프리셋 사용 (공정/장비/유틸리티/좌표를 한 행에서 일괄 로드):
 
@@ -1733,7 +2377,7 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
         Console.WriteLine();
         Console.WriteLine(
             $"{"Idx",3}  {"GUID",-12}  {"Process",-10}  {"Equipment",-16}  {"UG",-8}  {"Utility",-10}  " +
-            $"{"Size",-6}  {"Start(x,y,z)",-28}  {"End(x,y,z)",-28}  {"Len(mm)",8}");
+            $"{"Size",-6}  {"Bay",-12}  {"Start(x,y,z)",-28}  {"End(x,y,z)",-28}  {"Len(mm)",8}");
         Console.WriteLine(new string('-', 150));
 
         int idx = 1;
@@ -1749,7 +2393,7 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
             string e    = $"({p.EndXyz.X:F0},{p.EndXyz.Y:F0},{p.EndXyz.Z:F0})";
             Console.WriteLine(
                 $"{idx++,3}  {guid,-12}  {proc,-10}  {equ,-16}  {ug,-8}  {util,-10}  " +
-                $"{sz,-6}  {s,-28}  {e,-28}  {p.TotalLengthMm,8:F0}");
+                $"{sz,-6}  {Truncate(p.Bay, 12),-12}  {s,-28}  {e,-28}  {p.TotalLengthMm,8:F0}");
         }
 
         Console.WriteLine();
@@ -1783,6 +2427,7 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
             sb.Append($"\"utility_group\":\"{JsonEscape(p.UtilityGroup)}\",");
             sb.Append($"\"utility\":\"{JsonEscape(p.Utility)}\",");
             sb.Append($"\"size\":\"{JsonEscape(p.Size)}\",");
+            sb.Append($"\"bay\":\"{JsonEscape(p.Bay)}\",");
             sb.Append($"\"start_xyz\":[{p.StartXyz.X.ToString("F2", CultureInfo.InvariantCulture)},{p.StartXyz.Y.ToString("F2", CultureInfo.InvariantCulture)},{p.StartXyz.Z.ToString("F2", CultureInfo.InvariantCulture)}],");
             sb.Append($"\"end_xyz\":[{p.EndXyz.X.ToString("F2", CultureInfo.InvariantCulture)},{p.EndXyz.Y.ToString("F2", CultureInfo.InvariantCulture)},{p.EndXyz.Z.ToString("F2", CultureInfo.InvariantCulture)}],");
             sb.Append($"\"target_owner_name\":\"{JsonEscape(p.TargetOwnerName)}\",");
@@ -1801,7 +2446,11 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
         Console.WriteLine();
         Console.WriteLine($"검색 시간: {meta.SearchTimeMs:F1} ms  | " +
                           $"후보 수집: {meta.TotalCandidates}건 (fetch_n={meta.FetchN})");
-        Console.WriteLine($"필터: {string.Join(", ", meta.FiltersApplied.Select(kv => $"{kv.Key}={kv.Value}"))}");
+        Console.WriteLine($"필터: {string.Join(", ", meta.FiltersApplied.Select(kv => $"{kv.Key}={kv.Value}"))}" +
+                          (meta.UsedObstacleContext
+                              ? $"  | 장애물 컨텍스트(ctxScore) 반영됨, 후보 커버리지={meta.ContextCandidates}/{meta.TotalCandidates} ({meta.ContextCoverage:P1}), fallback={meta.ContextFallbackCandidates}"
+                              : ""));
+        Console.WriteLine($"재정렬 계약: {meta.RerankWeightProfile}");
         if (results.Count == 0)
         {
             Console.WriteLine("\n(결과 없음 — 필터 조건과 일치하는 경로가 DB에 없습니다)");
@@ -1809,10 +2458,20 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
         }
 
         Console.WriteLine();
-        Console.WriteLine($"{"Rank",4}  {"Score",6}  {"Pos",5}  {"Pat",5}  {"Vec",5}  " +
-                          $"{"Equip",-18}  {"Utility",-10}  {"Size",-6}  {"Length(mm)",10}  " +
-                          $"{"Pattern",-18}  GUID");
-        Console.WriteLine(new string('-', 120));
+        if (meta.UsedObstacleContext)
+        {
+            Console.WriteLine($"{"Rank",4}  {"Score",6}  {"Pos",5}  {"Pat",5}  {"Vec",5}  {"Ctx",5}  " +
+                              $"{"Equip",-18}  {"Utility",-10}  {"Size",-6}  {"Length(mm)",10}  " +
+                              $"{"Pattern",-18}  GUID");
+            Console.WriteLine(new string('-', 128));
+        }
+        else
+        {
+            Console.WriteLine($"{"Rank",4}  {"Score",6}  {"Pos",5}  {"Pat",5}  {"Vec",5}  " +
+                              $"{"Equip",-18}  {"Utility",-10}  {"Size",-6}  {"Length(mm)",10}  " +
+                              $"{"Pattern",-18}  GUID");
+            Console.WriteLine(new string('-', 120));
+        }
         foreach (var r in results)
         {
             string pat  = Truncate(r.DirectionPattern, 18);
@@ -1820,9 +2479,10 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
             string util = Truncate(r.Utility, 10);
             string sz   = Truncate(r.Size, 6);
             string guid = r.RoutePathGuid.Length > 8 ? r.RoutePathGuid[..8] + "…" : r.RoutePathGuid;
+            string ctxCol = meta.UsedObstacleContext ? $"{r.ScoreContext,5:F2}  " : "";
             Console.WriteLine(
                 $"{r.Rank,4}  {r.SimilarityScore,6:F3}  {r.ScorePosition,5:F2}  " +
-                $"{r.ScorePattern,5:F2}  {r.ScoreVector,5:F2}  " +
+                $"{r.ScorePattern,5:F2}  {r.ScoreVector,5:F2}  {ctxCol}" +
                 $"{equ,-18}  {util,-10}  {sz,-6}  {r.TotalLengthMm,10:F0}  " +
                 $"{pat,-18}  {guid}");
         }
@@ -1840,7 +2500,16 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
         sb.Append("},\n");
         sb.Append("    \"query_vector_head\": [");
         sb.Append(string.Join(", ", meta.QueryVectorHead.Select(v => v.ToString("G", CultureInfo.InvariantCulture))));
-        sb.Append("]\n  },\n  \"results\": [\n");
+        sb.Append("],\n");
+        sb.Append("    \"query_context_vector_head\": [");
+        sb.Append(string.Join(", ", meta.QueryContextVectorHead.Select(v => v.ToString("G", CultureInfo.InvariantCulture))));
+        sb.Append("],\n");
+        sb.Append($"    \"used_obstacle_context\": {(meta.UsedObstacleContext ? "true" : "false")},\n");
+        sb.Append($"    \"context_candidates\": {meta.ContextCandidates},\n");
+        sb.Append($"    \"context_fallback_candidates\": {meta.ContextFallbackCandidates},\n");
+        sb.Append($"    \"context_coverage\": {meta.ContextCoverage.ToString("F6", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"    \"rerank_weight_profile\": \"{JsonEscape(meta.RerankWeightProfile)}\"\n");
+        sb.Append("  },\n  \"results\": [\n");
         for (int i = 0; i < results.Count; i++)
         {
             var r = results[i];
@@ -1861,6 +2530,7 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
             sb.Append($"\"score_position\":{r.ScorePosition.ToString("F4", CultureInfo.InvariantCulture)},");
             sb.Append($"\"score_pattern\":{r.ScorePattern.ToString("F4", CultureInfo.InvariantCulture)},");
             sb.Append($"\"score_vector\":{r.ScoreVector.ToString("F4", CultureInfo.InvariantCulture)},");
+            sb.Append($"\"score_context\":{r.ScoreContext.ToString("F4", CultureInfo.InvariantCulture)},");
             sb.Append($"\"similarity_score\":{r.SimilarityScore.ToString("F4", CultureInfo.InvariantCulture)}");
             sb.Append('}');
             if (i < results.Count - 1) sb.Append(',');

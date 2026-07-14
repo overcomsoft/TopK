@@ -119,7 +119,7 @@
             <ComboBox x:Name="CmbBuilder" Grid.Column="1" SelectionChanged="CmbBuilder_SelectionChanged"
                       VerticalAlignment="Center" Padding="4,2" FontSize="12">
                 <ComboBoxItem Content="1. Feature Vector (TB_ROUTE_FEATURE_VECTOR · 30D)" Tag="feature"/>
-                <ComboBoxItem Content="2. Context Vector (TB_ROUTE_CONTEXT_VECTOR · 24D)" Tag="context"/>
+                <ComboBoxItem Content="2. Context Vector (TB_ROUTE_CONTEXT_VECTOR · 30D)" Tag="context"/>
                 <ComboBoxItem Content="3. Design Group (TB_ROUTE_DESIGN_GROUP)" Tag="group"/>
                 <ComboBoxItem Content="4. Segment Template (TB_ROUTE_SEGMENT_TEMPLATE)" Tag="segment"/>
             </ComboBox>
@@ -167,29 +167,21 @@
 
                 <!-- Context Vector -->
                 <StackPanel x:Name="PnlContext" Visibility="Collapsed">
-                    <TextBlock Text="Context Vector 빌드 옵션 (BIM 장애물 기반 24D)"
+                    <TextBlock Text="Context Vector 빌드 옵션 (BIM 장애물 기반 30D)"
                                FontWeight="SemiBold" Foreground="#FF444444" Margin="0,0,0,6"/>
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="100"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Start 반경(mm):" VerticalAlignment="Center"
-                                   Margin="0,0,6,0" FontSize="11"/>
-                        <TextBox x:Name="TxtStartRadius" Grid.Column="1" Text="1000"
-                                 Height="22" Padding="2" FontSize="11"/>
-                        <TextBlock Grid.Column="2" Text="End 반경(mm):" VerticalAlignment="Center"
+                        <TextBlock Grid.Column="0" Text="Start/End 공통 shell: 0~500mm, 500~1,000mm (AABB 표면거리)"
+                                   VerticalAlignment="Center" FontSize="11" Foreground="#FF555555"/>
+                        <TextBlock Grid.Column="1" Text="Limit(개발용):" VerticalAlignment="Center"
                                    Margin="12,0,6,0" FontSize="11"/>
-                        <TextBox x:Name="TxtEndRadius" Grid.Column="3" Text="2000"
-                                 Height="22" Padding="2" FontSize="11"/>
-                        <TextBlock Grid.Column="4" Text="Limit(개발용):" VerticalAlignment="Center"
-                                   Margin="12,0,6,0" FontSize="11"/>
-                        <TextBox x:Name="TxtCtxLimit" Grid.Column="5" Text=""
+                        <TextBox x:Name="TxtCtxLimit" Grid.Column="2" Text=""
                                  Height="22" Padding="2" FontSize="11"/>
                     </Grid>
                     <TextBlock Text="※ 8,828건 기준 약 70초. TB_ROUTE_CONTEXT_VECTOR 전체 삭제 후 재생성."

@@ -134,11 +134,30 @@ def save_vectors_db(
         total = db.bulk_insert(records, vectors, encoder_version="v1.0")
         LOGGER.info("DB 저장 완료: %d건", total)
 
+        sync_feature_scope_from_route_path(db_params)
         db.ensure_hnsw_index()
         stats = db.get_stats()
         LOGGER.info("DB 통계: %s", stats)
     finally:
         db.close()
+
+
+def sync_feature_scope_from_route_path(db_params: Dict[str, str]) -> None:
+    """Preserve explicit source scope when feature vectors are rebuilt from route paths."""
+    import psycopg2
+
+    with psycopg2.connect(**db_params) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                '''UPDATE "TB_ROUTE_FEATURE_VECTOR" fv
+                      SET "PROJECT_SCOPE_KEY" = rp."PROJECT_SCOPE_KEY",
+                          "MODEL_REVISION_KEY" = rp."MODEL_REVISION_KEY"
+                     FROM "TB_ROUTE_PATH" rp
+                    WHERE TRIM(fv."ROUTE_PATH_GUID") = TRIM(rp."ROUTE_PATH_GUID")
+                      AND (fv."PROJECT_SCOPE_KEY" IS DISTINCT FROM rp."PROJECT_SCOPE_KEY"
+                           OR fv."MODEL_REVISION_KEY" IS DISTINCT FROM rp."MODEL_REVISION_KEY")'''
+            )
+            LOGGER.info("Feature source scope synchronized from TB_ROUTE_PATH: %d rows", cur.rowcount)
 
 
 def main():

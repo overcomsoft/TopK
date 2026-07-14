@@ -30,6 +30,7 @@ data/
 *.ini
 scratch/
 Tools/tools.settings.json
+TopK.3DViewer/viewer.settings.json
 
 # 임시 테스트 및 개발 편의성 스크립트 격리
 check_db*.py

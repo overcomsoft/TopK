@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -1363,6 +1364,13 @@ namespace AutoRouteFinder
 
             bool useFeatures = ChkUseFeatureProfile.IsChecked == true;
             bool useTopK = ChkUseTopKSimilarity.IsChecked == true;
+            bool useContextVector = useTopK && ChkUseContextVector.IsChecked == true;
+            string abArm = !useTopK ? "NO_TOPK" : useContextVector ? "CONTEXT_V3" : "BASELINE_TOPK";
+            string projectKey = (CmbProject.SelectedItem as ProjectInfo)?.GroupId ?? _currentSceneData.SourceFile;
+            Guid abRunId = Guid.NewGuid();
+            var searchTraces = new ConcurrentDictionary<int, ContextSearchTrace>();
+            var abRows = new ConcurrentBag<ContextRoutingAbRecord>();
+            int abSavedCount = 0;
             
             // DgRouteResults 데이터 바인딩 및 대기 상태로 초기 설정
             var results = new System.Collections.ObjectModel.ObservableCollection<RouteResultUI>();
@@ -1483,10 +1491,26 @@ namespace AutoRouteFinder
                                     utility: task.Utility ?? "",
                                     startXyz: (task.Sx, task.Sy, task.Sz),
                                     endXyz: (task.Gx, task.Gy, task.Gz),
-                                    k: 3
+                                    k: 3,
+                                    useObstacleContext: useContextVector
                                 );
 
-                                var (topKResults, _) = searchTask.GetAwaiter().GetResult();
+                                var (topKResults, searchMeta) = searchTask.GetAwaiter().GetResult();
+                                searchTraces[i] = new ContextSearchTrace(
+                                    topKResults.Select(r => r.RoutePathGuid).ToArray(),
+                                    searchMeta.SearchTimeMs,
+                                    searchMeta.ContextCoverage,
+                                    searchMeta.ContextFallbackCandidates,
+                                    searchMeta.RerankWeightProfile,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextSnapshotHash) ? null : searchMeta.ContextSnapshotHash,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextScopeStatus) ? null : searchMeta.ContextScopeStatus,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextBuildRunId) ? null : searchMeta.ContextBuildRunId,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextProjectScopeKey) ? null : searchMeta.ContextProjectScopeKey,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextModelRevisionKey) ? null : searchMeta.ContextModelRevisionKey,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextEncoderVersion) ? null : searchMeta.ContextEncoderVersion,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextEncoderConfigHash) ? null : searchMeta.ContextEncoderConfigHash,
+                                    searchMeta.ContextProvenanceConsistent,
+                                    string.IsNullOrWhiteSpace(searchMeta.ContextProvenanceIssue) ? null : searchMeta.ContextProvenanceIssue);
 
                                 foreach (var res in topKResults)
                                 {
@@ -1535,16 +1559,17 @@ namespace AutoRouteFinder
                     {
                         engine.RouteMultiProgress("longest", progress =>
                         {
+                            int listIndex = engineTaskIndices.IndexOf(progress.TaskIndex);
+                            var routeDetail = engine.GetResult(progress.TaskIndex);
                             Dispatcher.Invoke(() =>
                             {
-                                int listIndex = engineTaskIndices.IndexOf(progress.TaskIndex);
                                 if (listIndex >= 0 && listIndex < results.Count)
                                 {
                                     var uiResult = results[listIndex];
                                     uiResult.Status = progress.Success ? "성공" : "실패";
                                     uiResult.LengthMm = progress.LengthMm;
                                     uiResult.Turns = progress.Turns;
-                                    uiResult.FailReason = progress.Success ? "" : engine.GetResult(progress.TaskIndex).Fail.ToString();
+                                    uiResult.FailReason = progress.Success ? "" : routeDetail.Fail.ToString();
                                     uiResult.ExpandedNodes = progress.ExpandedNodes;
                                     uiResult.ElapsedMs = progress.ElapsedMs;
 
@@ -1592,7 +1617,35 @@ namespace AutoRouteFinder
                                 TxtRouteResult.Text = $"자동설계 결과 (성공: {okCount}, 진행: {done}/{results.Count})";
                                 TxtStatus.Text = $"자동 라우팅 진행 중... ({done}/{results.Count})";
                             });
+
+                            if (listIndex >= 0 && listIndex < tasksToRoute.Count)
+                            {
+                                var task = tasksToRoute[listIndex];
+                                searchTraces.TryGetValue(listIndex, out var trace);
+                                abRows.Add(new ContextRoutingAbRecord(
+                                    Guid.NewGuid(), abRunId, ContextRoutingAbLogger.ExperimentId,
+                                    ContextRoutingAbLogger.BuildRequestKey(task, projectKey), abArm, false, projectKey, null,
+                                    task.RoutePathGuid, task.EquipmentTag, task.Group, task.Utility,
+                                    task.Sx, task.Sy, task.Sz, task.Gx, task.Gy, task.Gz, task.DiameterMm,
+                                    trace, "union", null, 0.5, featureCorridors.Distinct().Count(), 0, 0,
+                                    progress.Success, progress.Success ? null : routeDetail.Fail.ToString(),
+                                    progress.LengthMm, progress.Turns, null, progress.ExpandedNodes, progress.ElapsedMs));
+                            }
                         });
+
+                        try
+                        {
+                            ContextRoutingAbLogger.SaveBatchAsync(_db!.ConnectionString, abRows.ToArray())
+                                .GetAwaiter().GetResult();
+                            abSavedCount = abRows.Count;
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[Context A/B] arm={abArm}, run={abRunId}, saved={abRows.Count}");
+                        }
+                        catch (Exception logEx)
+                        {
+                            // 관찰 로그 실패가 실제 라우팅 결과를 실패로 바꾸면 안 된다.
+                            System.Diagnostics.Debug.WriteLine($"[경고] Context A/B 로그 저장 실패: {logEx.Message}");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1604,7 +1657,7 @@ namespace AutoRouteFinder
                 // 전체 연산 완료 후 최종 마크업
                 int finalOkCount = results.Count(x => x.Status == "성공");
                 TxtRouteResult.Text = $"자동설계 결과 (성공: {finalOkCount}/{results.Count})";
-                TxtStatus.Text = $"자동 라우팅 완료 - 성공 {finalOkCount}개, 실패 {results.Count - finalOkCount}개";
+                TxtStatus.Text = $"자동 라우팅 완료 - 성공 {finalOkCount}개, 실패 {results.Count - finalOkCount}개 | A/B {abArm}: {abSavedCount}건 기록";
             }
             catch (Exception ex)
             {

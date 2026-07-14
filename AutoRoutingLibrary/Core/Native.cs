@@ -74,6 +74,9 @@ namespace AutoRoutingLibrary.Core
         [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int r3d_set_task_goal_dir(IntPtr e, int task, int axis);
         [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int r3d_route_multi(IntPtr e, byte[] priorityUtf8);
         [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int r3d_set_corridor_cells(IntPtr e, int[]? ijk, int n);
+        [DllImport(Dll, CallingConvention = Cdecl)]
+        internal static extern int r3d_set_ranked_corridor_cells(
+            IntPtr e, int[]? ijk, int[]? ranks, int n, double[]? rankPenaltyFactors, int rankCount);
 
         [UnmanagedFunctionPointer(Cdecl)]
         internal delegate int R3dProgressFn(IntPtr user, int phase, int orderIndex, int taskIndex, int success,
