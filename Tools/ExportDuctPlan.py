@@ -187,33 +187,113 @@ def get_bottom_footprint(obb_3d):
     return sorted(bottom_vertices, key=angle)
 
 
+def _parse_poc_entries(pos_json, id_json, size_json, utility_map, fallback_utility, context_name=''):
+    """
+    PoC 계열 컬럼(위치/ID/규격이 각각 별도의 JSON 배열 문자열로 저장된 3종 세트)을 공통
+    파싱하여 {x, y, z, radius, utility} 딕셔너리 리스트로 변환합니다. TB_DUCT의 "본선 연결용"
+    POC_ID_LIST/POC_POSITIONS_LIST/POC_SIZES_LIST와 "곁가지 분기용"
+    TAKEOFF_POC_ID_LIST/TAKEOFF_POC_POSITIONS_LIST/TAKEOFF_POC_SIZES_LIST가 동일한
+    스키마 구조를 공유하므로, fetch_data()에서 이 함수를 두 번(POC용/TAKEOFF용) 호출해
+    파싱 로직 중복을 없앱니다.
+
+    [인자 (Arguments)]
+    - pos_json (str): 좌표 배열 JSON 문자열 (예: '[[x,y,z], ...]' 또는 '[{"x":..,"y":..}, ...]')
+    - id_json (str): 좌표와 같은 순서의 ID(GUID) 배열 JSON 문자열
+    - size_json (str): 좌표와 같은 순서의 규격 문자열 배열 JSON 문자열
+    - utility_map (dict): TB_ROUTE_NODES에서 캐싱한 {ID/GUID: UTILITY} 매핑
+    - fallback_utility (str): 개별 포인트의 유틸리티를 utility_map에서 찾지 못했을 때 대체할 기본값
+      (보통 덕트 자체의 대표 유틸리티 UTILITY 컬럼값)
+    - context_name (str): 파싱 실패 시 경고 메시지에 표시할 덕트 식별용 이름
+
+    [반환값 (Returns)]
+    - list of dict: 각 원소는 {'id','x','y','z','radius','utility'} 키를 가진 포인트 정보
+      ('id'는 이 PoC의 원본 GUID — TB_ROUTE_PATH.TARGET_GUID 등 외부 테이블과의 매칭에
+      사용됨. pos_json이 비어있거나 파싱 실패하면 빈 리스트 반환)
+    """
+    entries = []
+    if not pos_json:
+        return entries
+    try:
+        pos_list = json.loads(pos_json)
+        id_list = json.loads(id_json) if id_json else []
+        size_list = json.loads(size_json) if size_json else []
+
+        for i, item in enumerate(pos_list):
+            pid = ''
+            x_val = 0.0
+            y_val = 0.0
+            z_val = 0.0
+
+            if isinstance(item, dict):
+                pid = item.get('id', '')
+                x_val = item.get('x', 0.0)
+                y_val = item.get('y', 0.0)
+                z_val = item.get('z', 0.0)
+            elif isinstance(item, (list, tuple)):
+                x_val = item[0] if len(item) > 0 else 0.0
+                y_val = item[1] if len(item) > 1 else 0.0
+                z_val = item[2] if len(item) > 2 else 0.0
+
+            if not pid and i < len(id_list):
+                pid = id_list[i]
+
+            size_str = size_list[i] if i < len(size_list) else ''
+            radius = parse_size_to_radius(size_str)
+            # 노드 정보 조회 후 유틸리티 매핑이 없으면 덕트 자체의 대표 유틸리티를 기본값으로 사용
+            utility = utility_map.get(pid) or fallback_utility or 'DEFAULT'
+
+            entries.append({
+                'id': pid,
+                'x': x_val,
+                'y': y_val,
+                'z': z_val,
+                'radius': radius,
+                'utility': utility
+            })
+    except Exception as e:
+        print(f"Warning: JSON parsing error for duct {context_name}: {e}")
+
+    return entries
+
+
 def fetch_data(conn):
     """
-    PostgreSQL 데이터베이스에 질의하여 배관 노드들의 유틸리티 속성 사전 및 
+    PostgreSQL 데이터베이스에 질의하여 배관 노드들의 유틸리티 속성 사전 및
     덕트와 해당 덕트에 장착된 PoC 정보를 일괄 조회하여 구조화된 리스트로 변환합니다.
-    
+
     [인자 (Arguments)]
     - conn: psycopg2를 이용해 정상적으로 오픈된 PostgreSQL 데이터베이스 커넥션 객체
-    
+
     [반환값 (Returns)]
     - list of dict: 각 덕트의 상세 기하 정보와 가공 처리된 PoC 데이터 구조체가 포함된 리스트
-      * 'name': 덕트 고유명
+      * 'name': 덕트 고유명 (INSTANCE_NAME이 비어있으면 INSTANCE_ID로 대체)
+      * 'instance_id': TB_DUCT의 실제 고유 식별자(INSTANCE_ID) 원본값
       * 'poly': XY 평면에 투영되어 정렬된 2D 바닥면 폴리곤 꼭짓점 좌표 리스트
       * 'obb_3d': 덕트 OBB 꼭짓점 8개
       * 'bottom_face_3d': 3D 상에 존재하는 바닥면 4개 정점
-      * 'pocs': 덕트에 연결된 PoC(접속 포인트) 배열 (각 PoC는 x, y, z, radius, utility 속성 소유)
+      * 'pocs': 덕트 "본선"의 시작/끝단 연결점 배열 (인접 덕트와 체인으로 이어지는 POC_*
+        컬럼 기반. TB_DUCT는 거의 모든 행이 이 배열을 정확히 2개만 가지며, 둘 다 덕트
+        길이축 양 끝단에 위치함 — 즉 곁가지 분기가 아니라 "덕트-덕트 연결 관절"이다)
+      * 'takeoffs': 덕트 몸체에서 실제로 갈라져 나가는 곁가지 분기점 배열
+        (TAKEOFF_POC_* 컬럼 기반, 각 원소는 id, x, y, z, radius, utility 속성 소유.
+        'id'는 TB_ROUTE_PATH.TARGET_GUID와 매칭해 이 취출구가 연결된 장비(EQUIPMENT_TAG)를
+        역추적하는 데 쓸 수 있음 — AnalyzeDuctPocPattern.resolve_takeoff_equipment_map() 참조).
+        상단/좌측/우측 등 면(Face) 분포 패턴 분석은 'pocs'가 아니라 이 'takeoffs'를
+        대상으로 해야 한다.
+      * 'takeoff_count': TB_DUCT.TAKEOFF_POC_COUNT 원본값 (파싱된 takeoffs 개수와
+        비교해 데이터 정합성을 검증하는 용도)
       * 'utility': 덕트 자체의 대표 유틸리티 종류
       * 'lateral_number': 대피 또는 Lateral 번호
       * 'utility_group': 유틸리티 그룹명
       * 'level': 덕트 고도 레벨 층 정보
       * 'bay': 베이 정보
       * 'bop': BOP 고도 편차 값
-      
+
     [주요 변수 및 흐름]
     - utility_map (dict): TB_ROUTE_NODES 테이블을 통해 노드의 고유 키(ID, GUID)별 유틸리티 종류를 캐싱한 매핑 사전
     - ducts (list): 최종적으로 구성되어 반환되는 전체 덕트 기하 정보 목록
-    - id_list, pos_list, size_list: TB_DUCT에 들어있는 JSON 문자열 배열 형태의 PoC ID 목록, 좌표 목록, 규격 목록
-    - parse_size_to_radius(): PoC의 규격 배열 정보로부터 기하학적인 원 크기(반지름)를 실 mm 단위로 계산해 pocs 리스트에 적재
+    - _parse_poc_entries(): POC_*와 TAKEOFF_POC_* 두 계열의 JSON 배열(위치/ID/규격)을
+      공통 로직으로 파싱해 pocs/takeoffs 리스트를 각각 채운다.
     """
     # 1. TB_ROUTE_NODES 테이블로부터 노드들의 유틸리티 종류 메타데이터 캐싱
     utility_map = {}
@@ -229,7 +309,7 @@ def fetch_data(conn):
     ducts = []
     with conn.cursor() as cur:
         query = '''
-            SELECT "INSTANCE_NAME", "UTILITY", "LATERAL_NUMBER", "UTILITY_GROUP", "LEVEL", "BAY", "BOP",
+            SELECT "INSTANCE_ID", "INSTANCE_NAME", "UTILITY", "LATERAL_NUMBER", "UTILITY_GROUP", "LEVEL", "BAY", "BOP",
                    "OBB_LEFT_BOTTOM_BACK_X", "OBB_LEFT_BOTTOM_BACK_Y", "OBB_LEFT_BOTTOM_BACK_Z",
                    "OBB_RIGHT_BOTTOM_BACK_X", "OBB_RIGHT_BOTTOM_BACK_Y", "OBB_RIGHT_BOTTOM_BACK_Z",
                    "OBB_RIGHT_TOP_BACK_X", "OBB_RIGHT_TOP_BACK_Y", "OBB_RIGHT_TOP_BACK_Z",
@@ -238,13 +318,15 @@ def fetch_data(conn):
                    "OBB_RIGHT_BOTTOM_FRONT_X", "OBB_RIGHT_BOTTOM_FRONT_Y", "OBB_RIGHT_BOTTOM_FRONT_Z",
                    "OBB_RIGHT_TOP_FRONT_X", "OBB_RIGHT_TOP_FRONT_Y", "OBB_RIGHT_TOP_FRONT_Z",
                    "OBB_LEFT_TOP_FRONT_X", "OBB_LEFT_TOP_FRONT_Y", "OBB_LEFT_TOP_FRONT_Z",
-                   "POC_ID_LIST", "POC_POSITIONS_LIST", "POC_SIZES_LIST"
+                   "POC_ID_LIST", "POC_POSITIONS_LIST", "POC_SIZES_LIST",
+                   "TAKEOFF_POC_ID_LIST", "TAKEOFF_POC_POSITIONS_LIST", "TAKEOFF_POC_SIZES_LIST",
+                   "TAKEOFF_POC_COUNT"
             FROM "TB_DUCT"
             WHERE "OBB_LEFT_BOTTOM_BACK_X" IS NOT NULL
         '''
         cur.execute(query)
         for row in cur.fetchall():
-            (name, utility_col, lateral_number, utility_group, level, bay, bop,
+            (instance_id, name, utility_col, lateral_number, utility_group, level, bay, bop,
              obb_lbb_x, obb_lbb_y, obb_lbb_z,
              obb_rbb_x, obb_rbb_y, obb_rbb_z,
              obb_rtb_x, obb_rtb_y, obb_rtb_z,
@@ -253,7 +335,8 @@ def fetch_data(conn):
              obb_rbf_x, obb_rbf_y, obb_rbf_z,
              obb_rtf_x, obb_rtf_y, obb_rtf_z,
              obb_ltf_x, obb_ltf_y, obb_ltf_z,
-             poc_ids, poc_pos, poc_sizes) = row
+             poc_ids, poc_pos, poc_sizes,
+             takeoff_ids, takeoff_pos, takeoff_sizes, takeoff_count) = row
              
             # 3D 상에서 육면체 OBB를 구성하기 위한 8개의 로컬 좌표 꼭짓점 세팅
             obb_3d = {
@@ -271,54 +354,22 @@ def fetch_data(conn):
             bottom_face = get_bottom_footprint(obb_3d)
             poly = [(p[0], p[1]) for p in bottom_face]
             
-            # PoC 리스트 파싱 및 유틸리티 속성 결합
-            pocs = []
-            if poc_pos:
-                try:
-                    pos_list = json.loads(poc_pos)
-                    id_list = json.loads(poc_ids) if poc_ids else []
-                    size_list = json.loads(poc_sizes) if poc_sizes else []
-                    
-                    for i, item in enumerate(pos_list):
-                        pid = ''
-                        x_val = 0.0
-                        y_val = 0.0
-                        z_val = 0.0
-                        
-                        if isinstance(item, dict):
-                            pid = item.get('id', '')
-                            x_val = item.get('x', 0.0)
-                            y_val = item.get('y', 0.0)
-                            z_val = item.get('z', 0.0)
-                        elif isinstance(item, (list, tuple)):
-                            x_val = item[0] if len(item) > 0 else 0.0
-                            y_val = item[1] if len(item) > 1 else 0.0
-                            z_val = item[2] if len(item) > 2 else 0.0
-                            
-                        if not pid and i < len(id_list):
-                            pid = id_list[i]
-                            
-                        size_str = size_list[i] if i < len(size_list) else ''
-                        radius = parse_size_to_radius(size_str)
-                        # 노드 정보 조회 후 유틸리티 매핑이 없으면 덕트 자체의 대표 유틸리티를 기본값으로 사용
-                        utility = utility_map.get(pid) or utility_col or 'DEFAULT'
-                        
-                        pocs.append({
-                            'x': x_val,
-                            'y': y_val,
-                            'z': z_val,
-                            'radius': radius,
-                            'utility': utility
-                        })
-                except Exception as e:
-                    print(f"Warning: JSON parsing error for duct {name}: {e}")
-                    
+            # 본선 시작/끝단 연결점(POC_*)과 곁가지 분기점(TAKEOFF_POC_*)을 각각 파싱.
+            # 두 계열 모두 위치/ID/규격이 같은 순서의 JSON 배열 3종 세트로 저장되어 있어
+            # 동일한 _parse_poc_entries()를 재사용한다.
+            display_name = name or instance_id
+            pocs = _parse_poc_entries(poc_pos, poc_ids, poc_sizes, utility_map, utility_col, display_name)
+            takeoffs = _parse_poc_entries(takeoff_pos, takeoff_ids, takeoff_sizes, utility_map, utility_col, display_name)
+
             ducts.append({
-                'name': name,
+                'name': display_name,
+                'instance_id': instance_id,
                 'poly': poly,
                 'obb_3d': obb_3d,
                 'bottom_face_3d': bottom_face,
                 'pocs': pocs,
+                'takeoffs': takeoffs,
+                'takeoff_count': takeoff_count,
                 'utility': utility_col,
                 'lateral_number': lateral_number,
                 'utility_group': utility_group,

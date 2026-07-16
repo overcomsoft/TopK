@@ -58,10 +58,11 @@ public partial class GroupPatternViewerWindow : Window
         public SolidColorBrush ColorBrush { get; }
         public List<List<Vec3>> MemberPaths { get; }
         public List<List<Vec3>> TrunkPaths { get; }
+        public string Utility { get; }
 
         public BundleRow(string groupId, int nMembers, double pitchMm, double pitchCv, bool isEqualSpacing,
             string offsetAxis, int nOrthoBends, double trunkLen, double memberDiameter, SolidColorBrush colorBrush,
-            List<List<Vec3>> memberPaths, List<List<Vec3>> trunkPaths)
+            List<List<Vec3>> memberPaths, List<List<Vec3>> trunkPaths, string utility)
         {
             GroupId = groupId;
             NMembers = nMembers;
@@ -75,6 +76,7 @@ public partial class GroupPatternViewerWindow : Window
             ColorBrush = colorBrush;
             MemberPaths = memberPaths;
             TrunkPaths = trunkPaths;
+            Utility = utility;
         }
 
         public string ShortId => GroupId.Length > 8 ? GroupId[..8] : GroupId;
@@ -270,8 +272,17 @@ public partial class GroupPatternViewerWindow : Window
         foreach (var path in matched)
         {
             if (path.Points.Count < 2) continue;
-            var baseDiameter = path.DiameterMm > 0 ? path.DiameterMm : DefaultMemberDiameterMm;
-            DrawTube(path.Points, baseBrush, baseDiameter, _baseVisuals);
+
+            if (path.Fittings != null && path.Fittings.Count > 0)
+            {
+                DrawDetailedSegments(path, baseBrush, _baseVisuals);
+            }
+            else
+            {
+                var baseDiameter = path.DiameterMm > 0 ? path.DiameterMm : DefaultMemberDiameterMm;
+                DrawTube(path.Points, baseBrush, baseDiameter, _baseVisuals);
+            }
+
             allPointsForFit.AddRange(path.Points);
         }
 
@@ -292,7 +303,8 @@ public partial class GroupPatternViewerWindow : Window
             const string sql = @"
                 SELECT ""GROUP_ID"", ""N_MEMBERS"", ""PITCH_MM"", ""PITCH_CV"", ""IS_EQUAL_SPACING"", ""OFFSET_AXIS"",
                        ""N_ORTHO_BENDS"", ""TRUNK_LEN"", ""MEMBER_GUIDS""::text AS member_guids_json,
-                       ST_AsText(""GEOM_3D"") AS geom_wkt, ST_AsText(""TRUNK_GEOM_3D"") AS trunk_wkt
+                       ST_AsText(""GEOM_3D"") AS geom_wkt, ST_AsText(""TRUNK_GEOM_3D"") AS trunk_wkt,
+                       ""UTILITY""
                 FROM ""TB_ROUTE_GROUP_PATTERN""
                 WHERE TRIM(UPPER(""EQUIPMENT_TAG"")) = TRIM(UPPER(@eqTag))
                   AND TRIM(UPPER(""UTILITY_GROUP"")) = TRIM(UPPER(@utilGroup))
@@ -318,6 +330,7 @@ public partial class GroupPatternViewerWindow : Window
                 var memberGuidsJson = reader.IsDBNull(8) ? "" : reader.GetString(8);
                 var geomWkt = reader.IsDBNull(9) ? "" : reader.GetString(9);
                 var trunkWkt = reader.IsDBNull(10) ? "" : reader.GetString(10);
+                var utility = reader.IsDBNull(11) ? "" : reader.GetString(11);
 
                 var brush = GetGroupBrush(groupId, idx++);
                 var memberPaths = ParseWktMultiLineStringZ(geomWkt);
@@ -325,7 +338,7 @@ public partial class GroupPatternViewerWindow : Window
                 var memberDiameter = ResolveMemberDiameter(memberGuidsJson);
 
                 rows.Add(new BundleRow(groupId, nMembers, pitchMm, pitchCv, isEqual, offsetAxis, nBends, trunkLen,
-                    memberDiameter, brush, memberPaths, trunkPaths));
+                    memberDiameter, brush, memberPaths, trunkPaths, utility));
             }
 
             _bundles = rows;
@@ -464,6 +477,67 @@ public partial class GroupPatternViewerWindow : Window
         var tube = new TubeVisual3D { Path = collection, Diameter = diameter, Fill = brush };
         bucket.Add(tube);
         Viewport3D.Children.Add(tube);
+    }
+
+    private void DrawDetailedSegments(ExistingRoutePath path, Brush brush, List<Visual3D> bucket)
+    {
+        if (path.Fittings == null || path.Fittings.Count == 0) return;
+
+        foreach (var f in path.Fittings)
+        {
+            if (f.GlbData != null && f.GlbData.Length > 0)
+            {
+                var mesh = GlbParser.Parse(f.GlbData);
+                if (mesh == null) continue;
+
+                GlbParser.TransformMeshToObb(mesh, f.Lbb, f.Rbb, f.Ltb, f.Lbf);
+
+                var material = new DiffuseMaterial(brush);
+                var model = new GeometryModel3D(mesh, material) { BackMaterial = material };
+                var modelVisual = new ModelVisual3D { Content = model };
+
+                bucket.Add(modelVisual);
+                Viewport3D.Children.Add(modelVisual);
+            }
+            else
+            {
+                // Draw Pipe / Bending cylinders using OBB axes
+                var vX = f.Rbb - f.Lbb;
+                var vY = f.Ltb - f.Lbb;
+                var vZ = f.Lbf - f.Lbb;
+
+                double lenX = vX.Length;
+                double lenY = vY.Length;
+                double lenZ = vZ.Length;
+
+                Vec3 startPt, endPt;
+                if (lenX >= lenY && lenX >= lenZ)
+                {
+                    startPt = f.Lbb + (vY + vZ) * 0.5;
+                    endPt = f.Rbb + (vY + vZ) * 0.5;
+                }
+                else if (lenY >= lenX && lenY >= lenZ)
+                {
+                    startPt = f.Lbb + (vX + vZ) * 0.5;
+                    endPt = f.Ltb + (vX + vZ) * 0.5;
+                }
+                else
+                {
+                    startPt = f.Lbb + (vX + vY) * 0.5;
+                    endPt = f.Lbf + (vX + vY) * 0.5;
+                }
+
+                if ((endPt - startPt).Length < 1.0) continue;
+
+                var diameter = path.DiameterMm > 0 ? path.DiameterMm : 100.0;
+                var pts = new[] { startPt, endPt };
+                var collection = new Point3DCollection(pts.Select(p => new Point3D(p.X, p.Y, p.Z)));
+
+                var tube = new TubeVisual3D { Path = collection, Diameter = diameter, Fill = brush };
+                bucket.Add(tube);
+                Viewport3D.Children.Add(tube);
+            }
+        }
     }
 
     private void AddBillboardText(string text, Vec3 position, List<Visual3D> bucket)

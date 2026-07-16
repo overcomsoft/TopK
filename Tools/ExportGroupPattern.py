@@ -217,9 +217,12 @@ CREATE TABLE IF NOT EXISTS "TB_ROUTE_GROUP_PATTERN" (
     "IS_EQUAL_SPACING" boolean NOT NULL DEFAULT true,
     "OFFSET_AXIS" text NOT NULL DEFAULT 'UNKNOWN',
     "N_ORTHO_BENDS" integer NOT NULL,
+    "ORTHO_PATTERN" text,
     "MEMBER_GUIDS" jsonb NOT NULL,
     "PATTERN_SEQ" text,
     "SECTION_BOUNDS" jsonb,
+    "HORIZ_ELBOWS" jsonb,
+    "VERT_ELBOWS" jsonb,
     {vector_col}
     "FEAT_JSON" jsonb,
     "GEOM_3D" geometry(MultiLineStringZ, 0),
@@ -638,62 +641,134 @@ class UnionFind:
                     self.rank[root_y] += 1
 
 
+def extract_elbow_locations(points, tol=0.9):
+    """
+    3D 폴리라인 경로로부터 수직 밴딩(엘보우) 및 수평 밴딩(엘보우)의 대표 변곡점 3D 좌표를 추출한다.
+    - 수평 밴딩: X-Y 평면상에서 진행 방향이 바뀌는 코너 지점
+    - 수직 밴딩: 수직(Z축) 이동 성분이 포함되는 전환 지점
+    """
+    horizontal_elbows = []
+    vertical_elbows = []
+    
+    for i in range(1, len(points) - 1):
+        p_prev = points[i-1]
+        p_curr = points[i]
+        p_next = points[i+1]
+        
+        v1 = (p_curr[0] - p_prev[0], p_curr[1] - p_prev[1], p_curr[2] - p_prev[2])
+        v2 = (p_next[0] - p_curr[0], p_next[1] - p_curr[1], p_next[2] - p_curr[2])
+        
+        L1 = math.sqrt(v1[0]**2 + v1[1]**2 + v1[2]**2)
+        L2 = math.sqrt(v2[0]**2 + v2[1]**2 + v2[2]**2)
+        
+        if L1 < 1.0 or L2 < 1.0:
+            # 방향 판단이 무의미한 매우 짧은 선분은 통과
+            continue
+            
+        u1 = (v1[0]/L1, v1[1]/L1, v1[2]/L1)
+        u2 = (v2[0]/L2, v2[1]/L2, v2[2]/L2)
+        
+        # 내적이 0.99 미만이면 유의미하게 꺾인 지점(변곡점)으로 판정
+        dot = u1[0]*u2[0] + u1[1]*u2[1] + u1[2]*u2[2]
+        if dot < 0.99:
+            # 세그먼트 중 하나라도 수직 성분(Z축 방향)을 90% 이상 가지면 수직 엘보우로 분류
+            is_vertical = (abs(u1[2]) >= tol) or (abs(u2[2]) >= tol)
+            
+            elbow_coord = {
+                'x': round(p_curr[0], 1),
+                'y': round(p_curr[1], 1),
+                'z': round(p_curr[2], 1)
+            }
+            if is_vertical:
+                vertical_elbows.append(elbow_coord)
+            else:
+                horizontal_elbows.append(elbow_coord)
+                
+    return {
+        'horizontal': horizontal_elbows,
+        'vertical': vertical_elbows
+    }
+
+
 def extract_orthogonal_segments(points, tol=ARROW_TOL):
     """
-    폴리라인을 축정렬 직교 세그먼트 리스트로 분해한다. 각 세그먼트는 진행축(X/Y/Z, 경사면 D)에 따라
-    'from'/'to' 좌표의 횡단(수직) 성분을 두 끝점의 평균값으로 고정(축 정렬)하여, 미세한 모서리 정렬
-    오차가 이후 check_parallel_overlap()의 피치 계산에 섞여 들어가는 것을 방지한다.
+    X-Y 평면상에 폴리라인을 투영하고, 300mm 미만의 엘보/밴딩 부속 세그먼트를 제거한 뒤,
+    동일 축(X 또는 Y) 방향의 연속 직선들을 단일 직선으로 병합(Collinear Merge)하여 추출한다.
+    Z축(수직) 성분은 2D 단면 투영에 따라 자연스럽게 필터링된다.
     """
-    segments = []
+    if len(points) < 2:
+        return []
+        
+    raw_segs = []
     for a, b in zip(points, points[1:]):
         dx = b[0] - a[0]
         dy = b[1] - a[1]
         dz = b[2] - a[2]
-        L = math.sqrt(dx**2 + dy**2 + dz**2)
-        if L < 1.0:  # 1mm 미만의 미세 세그먼트는 무시
-            continue
-        ux, uy, uz = dx/L, dy/L, dz/L
+        L3d = math.sqrt(dx**2 + dy**2 + dz**2)
+        L2d = math.sqrt(dx**2 + dy**2)
         
-        if abs(uz) >= tol:
-            direction = 'Z'
-            mx = (a[0] + b[0]) / 2.0
-            my = (a[1] + b[1]) / 2.0
-            p_from = (mx, my, a[2])
-            p_to = (mx, my, b[2])
-        elif abs(ux) >= tol:
+        if L3d < 1.0:
+            continue
+            
+        # Z축 수직 이동은 2D 평면상에서 길이가 0에 수렴하므로 제외
+        if L2d < 10.0:
+            continue
+            
+        ux_2d, uy_2d = dx/L2d, dy/L2d
+        
+        # 2D 평면 기준 X축 또는 Y축 스냅
+        if abs(ux_2d) >= tol:
             direction = 'X'
             my = (a[1] + b[1]) / 2.0
-            mz = (a[2] + b[2]) / 2.0
-            p_from = (a[0], my, mz)
-            p_to = (b[0], my, mz)
-        elif abs(uy) >= tol:
+            p_from = (a[0], my, a[2])
+            p_to = (b[0], my, b[2])
+        elif abs(uy_2d) >= tol:
             direction = 'Y'
             mx = (a[0] + b[0]) / 2.0
-            mz = (a[2] + b[2]) / 2.0
-            p_from = (mx, a[1], mz)
-            p_to = (mx, b[1], mz)
+            p_from = (mx, a[1], a[2])
+            p_to = (mx, b[1], b[2])
         else:
             direction = 'D'
             p_from = a
             p_to = b
             
-        segments.append({
+        raw_segs.append({
             'from': p_from,
             'to': p_to,
             'dir': direction,
-            'len': L,
+            'len': L2d,  # 2D 평면 길이 기준 분석
+            'len_3d': L3d,
             'vector': (dx, dy, dz),
-            'unit': (ux, uy, uz)
+            'unit': (ux_2d, uy_2d, 0.0)
         })
-    return segments
+        
+    # 엘보/밴딩 부속(300mm 미만의 세그먼트) 제거 및 동일 축 연속 병합
+    major_segs = []
+    for s in raw_segs:
+        if s['len'] < 300.0:
+            # 300mm 미만은 엘보 밴딩으로 간주하여 본선 매칭에서 필터링
+            continue
+            
+        if not major_segs:
+            major_segs.append(s)
+        else:
+            prev = major_segs[-1]
+            if prev['dir'] == s['dir'] and prev['dir'] != 'D':
+                # 동일 축 진행 시 병합
+                prev['to'] = s['to']
+                new_dx = prev['to'][0] - prev['from'][0]
+                new_dy = prev['to'][1] - prev['from'][1]
+                prev['len'] = math.sqrt(new_dx**2 + new_dy**2)
+            else:
+                major_segs.append(s)
+                
+    return major_segs
 
 
 def check_parallel_overlap(s1, s2, max_pitch=1500.0, min_overlap=100.0):
     """
-    두 직교 세그먼트가 "평행하게 나란히 달리는지" 판정한다.
-    조건: (1) 같은 진행축(dir)이고 경사(D)가 아니며, (2) 진행축에 수직인 평면에서의 거리(피치)가
-    max_pitch 이하, (3) 진행축 방향으로 투영한 두 구간의 겹침 길이가 min_overlap 이상.
-    통과 시 (pitch, overlap_len)을 반환하고, 미통과 시 (None, 0.0)을 반환한다.
+    X-Y 평면상에서의 2D 직교 평행 및 겹침을 검사한다.
+    (Z 성분은 무시하고, X/Y 축 방향 및 평행 거리를 기준으로 판단)
     """
     if s1['dir'] != s2['dir'] or s1['dir'] == 'D':
         return None, 0.0
@@ -703,23 +778,17 @@ def check_parallel_overlap(s1, s2, max_pitch=1500.0, min_overlap=100.0):
     p2_from, p2_to = s2['from'], s2['to']
     
     if d == 'X':
-        y1, z1 = p1_from[1], p1_from[2]
-        y2, z2 = p2_from[1], p2_from[2]
-        pitch = math.sqrt((y1 - y2)**2 + (z1 - z2)**2)
+        # X축 평행인 경우: 피치는 Y축 거리 차이
+        pitch = abs(p1_from[1] - p2_from[1])
         min1, max1 = min(p1_from[0], p1_to[0]), max(p1_from[0], p1_to[0])
         min2, max2 = min(p2_from[0], p2_to[0]), max(p2_from[0], p2_to[0])
     elif d == 'Y':
-        x1, z1 = p1_from[0], p1_from[2]
-        x2, z2 = p2_from[0], p2_from[2]
-        pitch = math.sqrt((x1 - x2)**2 + (z1 - z2)**2)
+        # Y축 평행인 경우: 피치는 X축 거리 차이
+        pitch = abs(p1_from[0] - p2_from[0])
         min1, max1 = min(p1_from[1], p1_to[1]), max(p1_from[1], p1_to[1])
         min2, max2 = min(p2_from[1], p2_to[1]), max(p2_from[1], p2_to[1])
-    else:  # 'Z'
-        x1, y1 = p1_from[0], p1_from[1]
-        x2, y2 = p2_from[0], p2_from[1]
-        pitch = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
-        min1, max1 = min(p1_from[2], p1_to[2]), max(p1_from[2], p1_to[2])
-        min2, max2 = min(p2_from[2], p2_to[2]), max(p2_from[2], p2_to[2])
+    else:
+        return None, 0.0
         
     if pitch > max_pitch:
         return None, 0.0
@@ -896,6 +965,7 @@ def extract_pipe_feature(guid, points, row_meta) -> dict:
         trunk_axis = 0 if extent[0] >= extent[1] else 1
         
     ortho_segs = extract_orthogonal_segments(points)
+    n_bends = max(0, len(ortho_segs) - 1)
         
     return {
         'guid': guid,
@@ -1264,6 +1334,25 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                     ) for sec in section_bounds
                 ))
                 
+                # ORTHO_PATTERN: 2D 대표 패턴명
+                if 'D' in dedup_pattern:
+                    ortho_pattern = "Slope / Diagonal"
+                elif rep_bends == 0:
+                    if trunk_len < 300.0:
+                        ortho_pattern = "No-Header / Empty"
+                    else:
+                        ortho_pattern = "Direct"
+                elif rep_bends == 1:
+                    ortho_pattern = "L-Shape"
+                elif rep_bends == 2:
+                    ortho_pattern = "Staircase"
+                elif rep_bends == 3:
+                    ortho_pattern = "U-Shape"
+                else:
+                    ortho_pattern = f"Complex Multi-bend ({rep_bends} Bends)"
+
+                elbow_locs = extract_elbow_locations(base_route['points'])
+
                 bundle = {
                     'GROUP_ID': group_id,
                     'EQUIPMENT_TAG': eq_tag,
@@ -1278,16 +1367,19 @@ def analyze_patterns(conn, dry_run=False, image_out=None) -> list[dict]:
                     'IS_EQUAL_SPACING': is_equal_spacing,
                     'OFFSET_AXIS': offset_axis,
                     'N_ORTHO_BENDS': rep_bends,
+                    'ORTHO_PATTERN': ortho_pattern,
                     'MEMBER_GUIDS': m_guids,
                     'PATTERN_SEQ': dedup_pattern,
                     'SECTION_BOUNDS': section_bounds,
+                    'HORIZ_ELBOWS': elbow_locs['horizontal'],
+                    'VERT_ELBOWS': elbow_locs['vertical'],
                     'FEAT': rep_feat,
                     'GEOM_WKT': geom_wkt,
                     'TRUNK_WKT': trunk_wkt,
                     'TRUNK_LEN': trunk_len
                 }
                 detected_bundles.append(bundle)
-                print(f"  -> Detected Parallel Bundle: ID={group_id[:8]}... Pattern={dedup_pattern}, Members={len(m_guids)}, Z={trunk_z:,.1f}, Pitch={pitch_mm:,.1f} (CV={pitch_cv:.3f}, {'REGULAR' if is_equal_spacing else 'IRREGULAR'}), Offset={offset_axis}, Spread={trunk_xy_spread:,.1f}, Bends={rep_bends}")
+                print(f"  -> Detected Parallel Bundle: ID={group_id[:8]}... Pattern={dedup_pattern} ({ortho_pattern}), Members={len(m_guids)}, Z={trunk_z:,.1f}, Pitch={pitch_mm:,.1f} (CV={pitch_cv:.3f}, {'REGULAR' if is_equal_spacing else 'IRREGULAR'}), Offset={offset_axis}, Spread={trunk_xy_spread:,.1f}, Bends={rep_bends}")
                 
             # 유효 번들로 사용된 세그먼트들 assigned 처리하여 소거
             for sec in valid_sections:
@@ -1344,15 +1436,15 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
     cols = [
         "GROUP_ID", "EQUIPMENT_TAG", "UTILITY_GROUP", "UTILITY", "N_MEMBERS", "AVG_SIMILARITY",
         "TRUNK_Z", "TRUNK_XY_SPREAD", "PITCH_MM", "PITCH_CV", "IS_EQUAL_SPACING", "OFFSET_AXIS",
-        "N_ORTHO_BENDS", "MEMBER_GUIDS",
-        "PATTERN_SEQ", "SECTION_BOUNDS", "FEAT_JSON", "GEOM_3D", "TRUNK_GEOM_3D", "TRUNK_LEN"
+        "N_ORTHO_BENDS", "ORTHO_PATTERN", "MEMBER_GUIDS",
+        "PATTERN_SEQ", "SECTION_BOUNDS", "HORIZ_ELBOWS", "VERT_ELBOWS", "FEAT_JSON", "GEOM_3D", "TRUNK_GEOM_3D", "TRUNK_LEN"
     ]
     if has_vector:
         cols.append("FEAT")
         
     placeholders = []
     for c in cols:
-        if c in ("MEMBER_GUIDS", "SECTION_BOUNDS", "FEAT_JSON"):
+        if c in ("MEMBER_GUIDS", "SECTION_BOUNDS", "HORIZ_ELBOWS", "VERT_ELBOWS", "FEAT_JSON"):
             placeholders.append("%s::jsonb")
         elif c == "FEAT":
             placeholders.append("%s::vector")
@@ -1376,8 +1468,8 @@ def save_bundle_patterns(conn, bundles: list[dict]) -> None:
         row = [
             b['GROUP_ID'], b['EQUIPMENT_TAG'], b['UTILITY_GROUP'], b['UTILITY'], b['N_MEMBERS'], b['AVG_SIMILARITY'],
             b['TRUNK_Z'], b['TRUNK_XY_SPREAD'], b['PITCH_MM'], b['PITCH_CV'], b['IS_EQUAL_SPACING'], b['OFFSET_AXIS'],
-            b['N_ORTHO_BENDS'], json.dumps(b['MEMBER_GUIDS']),
-            b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['FEAT']), geom_wkt, trunk_wkt,
+            b['N_ORTHO_BENDS'], b['ORTHO_PATTERN'], json.dumps(b['MEMBER_GUIDS']),
+            b['PATTERN_SEQ'], json.dumps(b['SECTION_BOUNDS']), json.dumps(b['HORIZ_ELBOWS']), json.dumps(b['VERT_ELBOWS']), json.dumps(b['FEAT']), geom_wkt, trunk_wkt,
             b['TRUNK_LEN']
         ]
         if has_vector:

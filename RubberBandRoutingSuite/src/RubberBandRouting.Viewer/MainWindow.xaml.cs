@@ -29,6 +29,8 @@ public partial class MainWindow : Window
     private readonly List<Visual3D> _selectedStepVisuals = new();
     private readonly List<Visual3D> _featureVisuals = new();
     private readonly List<Visual3D> _existingRouteVisuals = new();
+    private readonly List<Visual3D> _highlightVisuals = new();
+    private ObjectInfoWindow? _infoWindow;
     private readonly List<Visual3D> _groupPatternVisuals = new();
     private readonly List<GroupPatternRow> _loadedGroupPatterns = new();
     private readonly PostgresRoutingDataLoader _loader = new();
@@ -491,32 +493,337 @@ public partial class MainWindow : Window
         PickVisualAt(pos);
     }
 
+    private object? FindVisualOwner(DependencyObject? vis, out Visual3D? matchedVisual)
+    {
+        matchedVisual = null;
+        while (vis != null)
+        {
+            if (vis is Visual3D vis3D && _visualOwners.TryGetValue(vis3D, out var owner))
+            {
+                matchedVisual = vis3D;
+                return owner;
+            }
+            vis = VisualTreeHelper.GetParent(vis);
+        }
+        return null;
+    }
+
     private void PickVisualAt(Point position)
     {
-        if (VisualTreeHelper.HitTest(Viewport.Viewport, position) is not RayMeshGeometry3DHitTestResult hit) return;
-        if (hit.VisualHit is not Visual3D visual) return;
-        if (!_visualOwners.TryGetValue(visual, out var owner)) return;
+        var hits = new List<RayMeshGeometry3DHitTestResult>();
+        VisualTreeHelper.HitTest(Viewport.Viewport, null,
+            result =>
+            {
+                if (result is RayMeshGeometry3DHitTestResult meshHit)
+                {
+                    hits.Add(meshHit);
+                }
+                return HitTestResultBehavior.Continue;
+            },
+            new PointHitTestParameters(position));
+
+        object? owner = null;
+        Visual3D? visual = null;
+
+        // 1. Prioritize small/detailed objects (fittings, POCs, features, auto-route segments) so overlapping tubes do not block them
+        foreach (var hit in hits)
+        {
+            var ow = FindVisualOwner(hit.VisualHit, out var vis);
+            if (ow != null)
+            {
+                if (ow is ExistingRouteFitting || ow is AutoRouteSegment || ow is PocPoint || ow is FeaturePointInfo || ow is TaskFeatureInfo)
+                {
+                    owner = ow;
+                    visual = vis;
+                    break;
+                }
+            }
+        }
+
+        // 2. Fallback to larger objects (SceneObject, ExistingRoutePath, ResultRow)
+        if (owner == null)
+        {
+            foreach (var hit in hits)
+            {
+                var ow = FindVisualOwner(hit.VisualHit, out var vis);
+                if (ow != null)
+                {
+                    if (ow is SceneObject || ow is ExistingRoutePath || ow is ResultRow)
+                    {
+                        owner = ow;
+                        visual = vis;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (owner == null || visual == null) return;
+
+        ClearVisuals(_highlightVisuals);
 
         switch (owner)
         {
-            case FeaturePointInfo featureInfo:
-                // Select the owning route first (refreshes highlight + the normal per-route tabs),
-                // then overwrite the analysis grid with the specific feature point's own properties.
-                GridResults.SelectedItem = featureInfo.Route;
-                GridResults.ScrollIntoView(featureInfo.Route);
-                ShowFeaturePointProperties(featureInfo);
+            case ExistingRouteFitting fitting:
+                {
+                    HighlightObb(fitting.Lbb, fitting.Rbb, fitting.Ltb, fitting.Lbf, _highlightVisuals);
+
+                    var parent = _scene?.ExistingRoutePaths.FirstOrDefault(p => p.Fittings.Contains(fitting));
+                    if (parent != null)
+                    {
+                        SelectExistingRoutePath(parent);
+                    }
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("부속 종류 (Type)", fitting.Type),
+                        new("모델 템플릿 ID", fitting.ModelTemplateId),
+                        new("상세 GUID", fitting.SegmentDetailGuid),
+                        new("OBB LBB 위치", FormatVec(fitting.Lbb)),
+                        new("OBB 가로 (Width)", $"{(fitting.Rbb - fitting.Lbb).Length:N1} mm"),
+                        new("OBB 세로 (Length)", $"{(fitting.Ltb - fitting.Lbb).Length:N1} mm"),
+                        new("OBB 높이 (Height)", $"{(fitting.Lbf - fitting.Lbb).Length:N1} mm")
+                    };
+                    if (parent != null)
+                    {
+                        props.Add(new("소속 배관 그룹", parent.Group ?? "-"));
+                        props.Add(new("소속 배관 유틸리티", parent.Utility ?? "-"));
+                        props.Add(new("소속 배관 관경", $"{parent.DiameterMm} mm"));
+                    }
+                    ShowObjectInfo("배관 자재 (Fitting)", fitting.Type, props);
+                }
                 break;
-            case TaskFeatureInfo taskFeatureInfo:
-                ShowTaskFeatureProperties(taskFeatureInfo);
+
+             case AutoRouteSegment autoSeg:
+                {
+                    if (autoSeg.Type == "PIPE")
+                    {
+                        var pts = new[] { autoSeg.Start, autoSeg.End };
+                        var radius = autoSeg.Diameter > 0 ? autoSeg.Diameter + 20 : 120.0;
+                        DrawPath(pts, Brushes.Yellow, radius, _highlightVisuals);
+                    }
+                    else
+                    {
+                        var size = autoSeg.Diameter > 0 ? autoSeg.Diameter * 1.3 : 150.0;
+                        var box = new Aabb(autoSeg.Start - new Vec3(size/2, size/2, size/2), autoSeg.Start + new Vec3(size/2, size/2, size/2));
+                        HighlightAabb(box, _highlightVisuals);
+                    }
+
+                    GridResults.SelectedItem = autoSeg.ParentRoute;
+                    GridResults.ScrollIntoView(autoSeg.ParentRoute);
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("부재 구분", $"자동설계 {autoSeg.Type}"),
+                        new("소속 경로 GUID", autoSeg.RouteGuid),
+                        new("유틸리티 그룹", autoSeg.ParentRoute.Group),
+                        new("유틸리티", autoSeg.ParentRoute.Utility),
+                        new("관경 (mm)", $"{autoSeg.Diameter:N0} mm"),
+                    };
+                    if (autoSeg.Type == "PIPE")
+                    {
+                        props.Add(new("구간 길이 (mm)", $"{autoSeg.Length:N0} mm"));
+                        props.Add(new("시작 위치", FormatVec(autoSeg.Start)));
+                        props.Add(new("종단 위치", FormatVec(autoSeg.End)));
+                    }
+                    else
+                    {
+                        props.Add(new("위치 좌표", FormatVec(autoSeg.Start)));
+                    }
+
+                    ShowObjectInfo($"자동설계 배관 ({autoSeg.Type})", autoSeg.Type, props);
+                }
                 break;
-            case ResultRow resultRow:
-                GridResults.SelectedItem = resultRow;
-                GridResults.ScrollIntoView(resultRow);
+
+            case SceneObject obj:
+                {
+                    HighlightAabb(obj.Bounds, _highlightVisuals);
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("객체 이름", obj.Name),
+                        new("분류 (Category)", obj.Category),
+                        new("유틸리티", obj.Utility ?? "-"),
+                        new("Pass-Through 여부", obj.IsPassThrough ? "통과 가능 (예)" : "충돌 장애물 (아니오)"),
+                        new("크기 (X x Y x Z)", $"{(obj.Bounds.Max.X - obj.Bounds.Min.X):N1} x {(obj.Bounds.Max.Y - obj.Bounds.Min.Y):N1} x {(obj.Bounds.Max.Z - obj.Bounds.Min.Z):N1} mm"),
+                        new("중심 위치", FormatVec(obj.Bounds.Center))
+                    };
+                    ShowObjectInfo("BIM 장애물 / 설비", obj.Name, props);
+                }
                 break;
+
+            case PocPoint poc:
+                {
+                    var size = PocMarkerRadius(poc);
+                    var box = new Aabb(poc.Position - new Vec3(size, size, size), poc.Position + new Vec3(size, size, size));
+                    HighlightAabb(box, _highlightVisuals);
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("포인트 이름", poc.Name),
+                        new("소유 장비/덕트", poc.OwnerName),
+                        new("유틸리티", poc.Utility ?? "-"),
+                        new("그룹", poc.Group ?? "-"),
+                        new("연결 지점 형태", poc.IsRouteStart ? "시작점 (Source)" : "종점 (Target/Duct)"),
+                        new("접속 크기", $"{poc.SizeMm:N0} mm"),
+                        new("위치 좌표", FormatVec(poc.Position))
+                    };
+                    ShowObjectInfo("연결 접속구 (PoC)", poc.Name, props);
+                }
+                break;
+
             case ExistingRoutePath existingPath:
-                SelectExistingRoutePath(existingPath);
+                {
+                    SelectExistingRoutePath(existingPath);
+
+                    var points = existingPath.Points;
+                    if (points.Count >= 2)
+                    {
+                        var radius = existingPath.DiameterMm > 0 ? existingPath.DiameterMm + 20 : 120.0;
+                        DrawPath(points, Brushes.Yellow, radius, _highlightVisuals);
+                    }
+
+                    var length = 0.0;
+                    for (var i = 1; i < points.Count; i++) length += (points[i] - points[i - 1]).Length;
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("경로 GUID", existingPath.RoutePathGuid),
+                        new("그룹", existingPath.Group ?? "-"),
+                        new("유틸리티", existingPath.Utility ?? "-"),
+                        new("시작 PoC 장비", existingPath.SourceName ?? "-"),
+                        new("종단 PoC 덕트", existingPath.TargetName ?? "-"),
+                        new("관경 (Diameter)", $"{existingPath.DiameterMm:N0} mm"),
+                        new("경로 점 개수", points.Count.ToString()),
+                        new("총 길이", $"{length:N0} mm")
+                    };
+                    ShowObjectInfo("기존설계 배관 경로", $"[{existingPath.Group}] {existingPath.Utility}", props);
+                }
+                break;
+
+            case FeaturePointInfo featureInfo:
+                {
+                    GridResults.SelectedItem = featureInfo.Route;
+                    GridResults.ScrollIntoView(featureInfo.Route);
+                    ShowFeaturePointProperties(featureInfo);
+
+                    var feature = featureInfo.Feature;
+                    var box = new Aabb(feature.Position - new Vec3(100, 100, 100), feature.Position + new Vec3(100, 100, 100));
+                    HighlightAabb(box, _highlightVisuals);
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("특징점 종류", FeatureRoleLabel(feature.Role)),
+                        new("필수 여부", feature.Required ? "필수" : "선택"),
+                        new("위치 좌표", FormatVec(feature.Position)),
+                        new("소속 경로", $"[{featureInfo.Route.Group}] {featureInfo.Route.Utility}")
+                    };
+                    ShowObjectInfo("배관 특징점 (Feature)", FeatureRoleLabel(feature.Role), props);
+                }
+                break;
+
+            case TaskFeatureInfo taskFeatureInfo:
+                {
+                    ShowTaskFeatureProperties(taskFeatureInfo);
+
+                    var feature = taskFeatureInfo.Feature;
+                    var box = new Aabb(feature.Position - new Vec3(100, 100, 100), feature.Position + new Vec3(100, 100, 100));
+                    HighlightAabb(box, _highlightVisuals);
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("특징점 종류", FeatureRoleLabel(feature.Role)),
+                        new("필수 여부", feature.Required ? "필수" : "선택"),
+                        new("위치 좌표", FormatVec(feature.Position)),
+                        new("소속 태스크", $"[{taskFeatureInfo.Task.Group}] {taskFeatureInfo.Task.Utility}")
+                    };
+                    ShowObjectInfo("태스크 특징점 (Feature)", FeatureRoleLabel(feature.Role), props);
+                }
+                break;
+
+            case ResultRow resultRow:
+                {
+                    GridResults.SelectedItem = resultRow;
+                    GridResults.ScrollIntoView(resultRow);
+
+                    if (resultRow.RouteSegments != null && resultRow.RouteSegments.Count > 0)
+                    {
+                        var pts = resultRow.RouteSegments.SelectMany(s => new[] { s.Start, s.End }).ToList();
+                        var radius = resultRow.RouteDiameter > 0 ? resultRow.RouteDiameter + 20 : 120.0;
+                        DrawPath(pts, Brushes.Yellow, radius, _highlightVisuals);
+                    }
+
+                    var props = new List<KeyValuePair<string, string>>
+                    {
+                        new("결과 인덱스", resultRow.Index.ToString()),
+                        new("그룹", resultRow.Group),
+                        new("유틸리티", resultRow.Utility),
+                        new("시작PoC", resultRow.StartPoC),
+                        new("종단PoC", resultRow.EndPoC),
+                        new("설계 상태", resultRow.Status),
+                        new("관경", $"{resultRow.RouteDiameter:N0} mm"),
+                        new("경로 총 길이", $"{resultRow.LengthMm:N0} mm"),
+                        new("세그먼트 개수", resultRow.RouteSegments?.Count.ToString() ?? "0")
+                    };
+                    ShowObjectInfo("자동설계 라우팅 결과", $"[{resultRow.Group}] {resultRow.Utility}", props);
+                }
                 break;
         }
+    }
+
+    private void HighlightObb(Vec3 lbb, Vec3 rbb, Vec3 ltb, Vec3 lbf, List<Visual3D> bucket)
+    {
+        var p0 = lbb;
+        var p1 = rbb;
+        var p2 = rbb + (ltb - lbb);
+        var p3 = ltb;
+
+        var vZ = lbf - lbb;
+        var p4 = p0 + vZ;
+        var p5 = p1 + vZ;
+        var p6 = p2 + vZ;
+        var p7 = p3 + vZ;
+
+        var brush = Brushes.Cyan;
+        double thickness = 30.0;
+
+        DrawPath(new[] { p0, p1 }, brush, thickness, bucket);
+        DrawPath(new[] { p1, p2 }, brush, thickness, bucket);
+        DrawPath(new[] { p2, p3 }, brush, thickness, bucket);
+        DrawPath(new[] { p3, p0 }, brush, thickness, bucket);
+
+        DrawPath(new[] { p4, p5 }, brush, thickness, bucket);
+        DrawPath(new[] { p5, p6 }, brush, thickness, bucket);
+        DrawPath(new[] { p6, p7 }, brush, thickness, bucket);
+        DrawPath(new[] { p7, p4 }, brush, thickness, bucket);
+
+        DrawPath(new[] { p0, p4 }, brush, thickness, bucket);
+        DrawPath(new[] { p1, p5 }, brush, thickness, bucket);
+        DrawPath(new[] { p2, p6 }, brush, thickness, bucket);
+        DrawPath(new[] { p3, p7 }, brush, thickness, bucket);
+    }
+
+    private void HighlightAabb(Aabb box, List<Visual3D> bucket)
+    {
+        AddWireBox(box, Brushes.Cyan, 30.0, bucket);
+    }
+
+    private void ShowObjectInfo(string category, string name, List<KeyValuePair<string, string>> props)
+    {
+        if (_infoWindow == null)
+        {
+            _infoWindow = new ObjectInfoWindow { Owner = this };
+        }
+        _infoWindow.SetInfo(category, name, props);
+
+        _infoWindow.Left = this.Left + this.Width + 5;
+        _infoWindow.Top = this.Top;
+
+        if (_infoWindow.Left + _infoWindow.Width > SystemParameters.VirtualScreenWidth)
+        {
+            _infoWindow.Left = this.Left + this.Width - _infoWindow.Width - 20;
+        }
+
+        _infoWindow.Show();
     }
 
     private void ShowFeaturePointProperties(FeaturePointInfo info)
@@ -636,26 +943,34 @@ public partial class MainWindow : Window
             var p = paths[i];
             var diameter = ExistingRouteDiameter(p);
             
-            // 1. Start Stub (보라색 계열)
-            if (TglExistingStart.IsChecked == true && p.StartStubPoints != null && p.StartStubPoints.Count >= 2)
+            // Draw discrete detailed segments (fittings and straight pipes) if loaded, otherwise fallback
+            if (p.Fittings != null && p.Fittings.Count > 0)
             {
-                var startBrush = new SolidColorBrush(Color.FromRgb(167, 139, 250));
-                startBrush.Freeze();
-                DrawPath(p.StartStubPoints, startBrush, diameter, _existingRouteVisuals, p);
+                DrawDetailedSegments(p, ExistingRouteBrush(p.Group), _existingRouteVisuals);
             }
-            
-            // 2. Middle Trunk (유틸리티/그룹별 고유 색상)
-            if (TglExistingTrunk.IsChecked == true && p.MiddleTrunkPoints != null && p.MiddleTrunkPoints.Count >= 2)
+            else
             {
-                DrawPath(p.MiddleTrunkPoints, ExistingRouteBrush(p.Group), diameter, _existingRouteVisuals, p);
-            }
-            
-            // 3. End Stub (하늘색 계열)
-            if (TglExistingEnd.IsChecked == true && p.EndStubPoints != null && p.EndStubPoints.Count >= 2)
-            {
-                var endBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248));
-                endBrush.Freeze();
-                DrawPath(p.EndStubPoints, endBrush, diameter, _existingRouteVisuals, p);
+                // 1. Start Stub (보라색 계열)
+                if (TglExistingStart.IsChecked == true && p.StartStubPoints != null && p.StartStubPoints.Count >= 2)
+                {
+                    var startBrush = new SolidColorBrush(Color.FromRgb(167, 139, 250));
+                    startBrush.Freeze();
+                    DrawPath(p.StartStubPoints, startBrush, diameter, _existingRouteVisuals, p);
+                }
+                
+                // 2. Middle Trunk (유틸리티/그룹별 고유 색상)
+                if (TglExistingTrunk.IsChecked == true && p.MiddleTrunkPoints != null && p.MiddleTrunkPoints.Count >= 2)
+                {
+                    DrawPath(p.MiddleTrunkPoints, ExistingRouteBrush(p.Group), diameter, _existingRouteVisuals, p);
+                }
+                
+                // 3. End Stub (하늘색 계열)
+                if (TglExistingEnd.IsChecked == true && p.EndStubPoints != null && p.EndStubPoints.Count >= 2)
+                {
+                    var endBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248));
+                    endBrush.Freeze();
+                    DrawPath(p.EndStubPoints, endBrush, diameter, _existingRouteVisuals, p);
+                }
             }
         }
         UpdateVisibleObjectText();
@@ -962,17 +1277,8 @@ public partial class MainWindow : Window
             var isSelected = selected != null && ReferenceEquals(row, selected);
             var brush = isSelected ? Brushes.Yellow : row.RouteBrush;
             var diameter = isSelected ? Math.Max(row.RouteDiameter + 70, row.RouteDiameter * 1.55) : row.RouteDiameter;
-            if (row.PipePaths.Count > 1)
-            {
-                // Render every distributed pipe path (tray bundle), not just the representative
-                // centerline; RoundSafe is decided against the centerline as an approximation
-                // since all pipes share the same bend geometry offset by a fixed pitch.
-                foreach (var pipe in row.PipePaths) DrawRoundedPolyline(pipe, brush, diameter, _routeVisuals, row.RoundSafe, row);
-            }
-            else
-            {
-                DrawRoundedSegments(row.RouteSegments, brush, diameter, _routeVisuals, row.RoundSafe, row);
-            }
+            // Draw discrete detailed segments (pipes and elbows) for auto-routes
+            DrawAutoRouteDetailedSegments(row, brush, diameter, _routeVisuals);
             DrawFeaturePoints(row.FeatureWaypoints, isSelected, row);
         }
     }
@@ -1063,17 +1369,17 @@ public partial class MainWindow : Window
             AddWireBox(zone.Bounds, brush, 20.0, _spatialZoneVisuals);
             AddTextLabel(zone.Name, zone.Bounds.Center, _spatialZoneVisuals);
         }
-        foreach (var item in scene.Obstacles) AddBox(item.Bounds, item.IsPassThrough ? Color.FromArgb(30, 148, 163, 184) : Color.FromArgb(72, 156, 163, 175), _obstacleVisuals);
-        foreach (var item in scene.Equipment) AddBox(item.Bounds, Color.FromArgb(77, 245, 158, 11), _equipmentVisuals);
+        foreach (var item in scene.Obstacles) AddBox(item.Bounds, item.IsPassThrough ? Color.FromArgb(30, 148, 163, 184) : Color.FromArgb(72, 156, 163, 175), _obstacleVisuals, item);
+        foreach (var item in scene.Equipment) AddBox(item.Bounds, Color.FromArgb(77, 245, 158, 11), _equipmentVisuals, item);
         foreach (var item in scene.DuctLaterals)
         {
             var color = string.Equals(item.Category, "LATERAL", StringComparison.OrdinalIgnoreCase)
                 ? Color.FromArgb(110, 45, 212, 191)
                 : Color.FromArgb(110, 34, 197, 94);
-            AddBox(item.Bounds, color, _ductVisuals);
+            AddBox(item.Bounds, color, _ductVisuals, item);
         }
-        foreach (var poc in scene.EquipmentPocs.Where(p => p.IsRouteStart)) AddSphere(poc.Position, PocMarkerRadius(poc), Brushes.Red, _pocVisuals);
-        foreach (var poc in scene.DuctLateralPocs.Where(p => p.IsRouteEnd)) AddSphere(poc.Position, PocMarkerRadius(poc), Brushes.DodgerBlue, _pocVisuals);
+        foreach (var poc in scene.EquipmentPocs.Where(p => p.IsRouteStart)) AddSphere(poc.Position, PocMarkerRadius(poc), Brushes.Red, _pocVisuals, poc);
+        foreach (var poc in scene.DuctLateralPocs.Where(p => p.IsRouteEnd)) AddSphere(poc.Position, PocMarkerRadius(poc), Brushes.DodgerBlue, _pocVisuals, poc);
         ApplyLayerVisibility();
     }
 
@@ -1268,10 +1574,33 @@ public partial class MainWindow : Window
 
         var waypoints = ExtractExistingRouteFeatures(path, task, options);
         ApplyStartVerticalStub(task, path, waypoints, options);
+        ApplyEndApproachStub(task, path, waypoints, options);
         var mode = !string.IsNullOrWhiteSpace(task.RoutePathGuid) && string.Equals(task.RoutePathGuid, path.RoutePathGuid, StringComparison.OrdinalIgnoreCase)
             ? "GUID 직접매칭"
             : "조건 fallback";
         return new FeatureRouteInfo(mode, path.RoutePathGuid, waypoints);
+    }
+
+    private static bool IsEquipmentNameMatch(string? taskSource, string? pathSource, string? pathTag)
+    {
+        if (string.IsNullOrWhiteSpace(taskSource)) return true;
+        if (string.IsNullOrWhiteSpace(pathSource) && string.IsNullOrWhiteSpace(pathTag)) return true;
+        
+        var tSrc = taskSource.Trim().ToLower();
+        
+        if (!string.IsNullOrWhiteSpace(pathSource))
+        {
+            var pSrc = pathSource.Trim().ToLower();
+            if (tSrc == pSrc || tSrc.Contains(pSrc) || pSrc.Contains(tSrc)) return true;
+        }
+        
+        if (!string.IsNullOrWhiteSpace(pathTag))
+        {
+            var pTag = pathTag.Trim().ToLower();
+            if (tSrc == pTag || tSrc.Contains(pTag) || pTag.Contains(tSrc)) return true;
+        }
+        
+        return false;
     }
 
     private ExistingRoutePath? FindMatchedExistingRoute(RouteTask task)
@@ -1283,32 +1612,43 @@ public partial class MainWindow : Window
             if (direct != null) return direct;
         }
 
-        // 1. Strict match: must match both group and utility exactly
-        var exactMatch = _scene.ExistingRoutePaths
-            .Where(x => string.Equals(NormalizeGroup(x.Group), NormalizeGroup(task.Group), StringComparison.OrdinalIgnoreCase))
-            .Where(x => string.Equals(NormalizeGroup(x.Utility), NormalizeGroup(task.Utility), StringComparison.OrdinalIgnoreCase))
+        var taskGroup = NormalizeGroup(task.Group);
+        var taskUtil = NormalizeGroup(task.Utility);
+
+        var match = _scene.ExistingRoutePaths
+            .Where(x => string.Equals(NormalizeGroup(x.Group), taskGroup, StringComparison.OrdinalIgnoreCase))
+            .Where(x => string.Equals(NormalizeGroup(x.Utility), taskUtil, StringComparison.OrdinalIgnoreCase))
+            .Where(x => IsEquipmentNameMatch(task.SourceName, x.SourceName, x.EquipmentTag))
             .Where(x => x.Points.Count >= 2)
             .Select(x => new { Path = x, Score = ExistingRouteMatchScore(task, x, exactMetaMatch: true) })
             .OrderBy(x => x.Score)
             .FirstOrDefault(x => x.Score < 8000);
 
-        if (exactMatch != null) return exactMatch.Path;
-
-        // 2. Loose match fallback: relax group/utility checks but penalize mismatches
-        return _scene.ExistingRoutePaths
-            .Where(x => x.Points.Count >= 2)
-            .Select(x => new { Path = x, Score = ExistingRouteMatchScore(task, x, exactMetaMatch: false) })
-            .OrderBy(x => x.Score)
-            .FirstOrDefault(x => x.Score < 10000)?.Path;
+        return match?.Path;
     }
 
     private static double ExistingRouteMatchScore(RouteTask task, ExistingRoutePath path, bool exactMetaMatch)
     {
         if (path.Points.Count < 2) return double.MaxValue;
 
-        // Base distance gap between endpoints (minimum of forward or reverse)
-        var forward = Distance(task.Start, path.Points[0]) + Distance(task.End, path.Points[^1]);
-        var reverse = Distance(task.Start, path.Points[^1]) + Distance(task.End, path.Points[0]);
+        var dStartStart = Distance(task.Start, path.Points[0]);
+        var dEndEnd = Distance(task.End, path.Points[^1]);
+        var forward = dStartStart + dEndEnd;
+
+        var dStartEnd = Distance(task.Start, path.Points[^1]);
+        var dEndStart = Distance(task.End, path.Points[0]);
+        var reverse = dStartEnd + dEndStart;
+
+        // Ensure both endpoints are reasonably close to prevent matching unrelated routes.
+        // Capping individual endpoint distances to 600.0 mm to avoid matching different nozzles.
+        var isForwardMatch = dStartStart < 600.0 && dEndEnd < 600.0;
+        var isReverseMatch = dStartEnd < 600.0 && dEndStart < 600.0;
+
+        if (!isForwardMatch && !isReverseMatch)
+        {
+            return double.MaxValue;
+        }
+
         var score = Math.Min(forward, reverse);
 
         // Z-level (Elevation) Gap: penalize height difference (0.5 weight per mm)
@@ -1363,12 +1703,45 @@ public partial class MainWindow : Window
 
         var oriented = OrientedExistingRoutePoints(path, task);
         if (oriented.Count < 2) return;
+
+        // Skip micro-jitter segments at the beginning (length < 50mm)
         var first = oriented[0];
         var second = oriented[1];
+        int firstRealSegIdx = 0;
+        for (int i = 0; i < oriented.Count - 1; i++)
+        {
+            if (Distance(oriented[i], oriented[i + 1]) >= 50.0)
+            {
+                first = oriented[i];
+                second = oriented[i + 1];
+                firstRealSegIdx = i;
+                break;
+            }
+        }
 
         var legacyDelta = second - first;
         var legacyStartsVertical = DominantAxis(legacyDelta) == 2;
-        var targetZ = legacyStartsVertical ? second.Z : task.End.Z;
+        
+        var targetZ = second.Z;
+        if (legacyStartsVertical)
+        {
+            // Find the first point along the oriented path where the Z coordinate stops changing significantly.
+            // Start scanning from the end of the first real vertical segment.
+            for (int i = firstRealSegIdx + 1; i < oriented.Count - 1; i++)
+            {
+                var delta = oriented[i + 1] - oriented[i];
+                if (Math.Abs(delta.Z) < 10.0)
+                {
+                    targetZ = oriented[i + 1].Z;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            targetZ = task.End.Z;
+        }
+
         if (task.Start.Z > task.End.Z) targetZ = Math.Min(targetZ, task.Start.Z - Math.Max(options.TrayHeight, 100));
         else targetZ = Math.Max(targetZ, task.Start.Z + Math.Max(options.TrayHeight, 100));
 
@@ -1378,6 +1751,68 @@ public partial class MainWindow : Window
         // Required=true: this stub reflects the legacy design's forced start drop and must not be
         // dropped by the engine's tolerance/detour filtering the way optional features can be.
         waypoints.Insert(0, new RouteFeature(verticalPoint, RouteFeatureRole.StartStub, Required: true));
+    }
+    private static void ApplyEndApproachStub(RouteTask task, ExistingRoutePath path, List<RouteFeature> waypoints, RubberBandOptions options)
+    {
+        if (path.Points.Count < 2) return;
+        var oriented = OrientedExistingRoutePoints(path, task);
+        if (oriented.Count < 2) return;
+
+        // Skip micro-jitter segments at the end (length < 50mm)
+        var last = oriented[^1];
+        var prev = oriented[^2];
+        int lastRealSegIdx = oriented.Count - 1;
+        for (int i = oriented.Count - 1; i >= 1; i--)
+        {
+            if (Distance(oriented[i], oriented[i - 1]) >= 50.0)
+            {
+                last = oriented[i];
+                prev = oriented[i - 1];
+                lastRealSegIdx = i;
+                break;
+            }
+        }
+
+        var legacyDelta = last - prev;
+        var legacyEndsVertical = DominantAxis(legacyDelta) == 2;
+
+        double stubLength = 500.0;
+        if (legacyEndsVertical)
+        {
+            // Scan backward from the end to find the first point where the Z coordinate stops changing significantly.
+            // This is the centerline height of the horizontal main pipe connecting to the vertical End Stub.
+            var targetZ = prev.Z;
+            for (int i = lastRealSegIdx - 1; i >= 1; i--)
+            {
+                var delta = oriented[i] - oriented[i - 1];
+                if (Math.Abs(delta.Z) < 10.0)
+                {
+                    targetZ = oriented[i].Z;
+                    break;
+                }
+            }
+            stubLength = Math.Abs(last.Z - targetZ);
+        }
+        else
+        {
+            if (path.EndStubPoints != null && path.EndStubPoints.Count >= 2)
+            {
+                stubLength = Distance(path.EndStubPoints[0], path.EndStubPoints[^1]);
+            }
+        }
+        stubLength = Math.Clamp(stubLength, 250.0, 4000.0);
+
+        if (path.EndEntryDir == null) return;
+        var dir = path.EndEntryDir.Value;
+        double len = dir.Length;
+        if (len < 0.1) return;
+
+        var normalizedDir = new Vec3(dir.X / len, dir.Y / len, dir.Z / len);
+        var approachPoint = task.End - normalizedDir * stubLength;
+        if (Distance(approachPoint, task.Start) < 50 || Distance(approachPoint, task.End) < 50) return;
+
+        waypoints.RemoveAll(f => Distance(f.Position, approachPoint) < Math.Max(options.SnapTolerance, 150));
+        waypoints.Add(new RouteFeature(approachPoint, RouteFeatureRole.EndApproach, Required: true));
     }
     private static List<Vec3> OrientedExistingRoutePoints(ExistingRoutePath path, RouteTask task)
     {
@@ -1389,41 +1824,153 @@ public partial class MainWindow : Window
         if (reverse < forward) points.Reverse();
         return points;
     }
+    private sealed record OrthoSegment(Vec3 Start, Vec3 End, int Axis)
+    {
+        public double Length => (End - Start).Length;
+    }
+
+    private static Vec3 IntersectOrthogonalLines(Vec3 p1, int axis1, Vec3 p2, int axis2)
+    {
+        var x = 0.0;
+        var y = 0.0;
+        var z = 0.0;
+
+        if (axis1 == 0 && axis2 == 1) // X and Y
+        {
+            x = p2.X;
+            y = p1.Y;
+            z = (p1.Z + p2.Z) / 2.0;
+        }
+        else if (axis1 == 1 && axis2 == 0) // Y and X
+        {
+            x = p1.X;
+            y = p2.Y;
+            z = (p1.Z + p2.Z) / 2.0;
+        }
+        else if (axis1 == 0 && axis2 == 2) // X and Z
+        {
+            x = p2.X;
+            y = (p1.Y + p2.Y) / 2.0;
+            z = p1.Z;
+        }
+        else if (axis1 == 2 && axis2 == 0) // Z and X
+        {
+            x = p1.X;
+            y = (p1.Y + p2.Y) / 2.0;
+            z = p2.Z;
+        }
+        else if (axis1 == 1 && axis2 == 2) // Y and Z
+        {
+            x = (p1.X + p2.X) / 2.0;
+            y = p2.Y;
+            z = p1.Z;
+        }
+        else if (axis1 == 2 && axis2 == 1) // Z and Y
+        {
+            x = (p1.X + p2.X) / 2.0;
+            y = p1.Y;
+            z = p2.Z;
+        }
+        else
+        {
+            x = (p1.X + p2.X) / 2.0;
+            y = (p1.Y + p2.Y) / 2.0;
+            z = (p1.Z + p2.Z) / 2.0;
+        }
+
+        return new Vec3(x, y, z);
+    }
+
     private static List<RouteFeature> ExtractExistingRouteFeatures(ExistingRoutePath path, RouteTask task, RubberBandOptions options)
     {
         var source = OrientedExistingRoutePoints(path, task);
-        if (source.Count < 3) return new List<RouteFeature>();
+        if (source.Count < 2) return new List<RouteFeature>();
+
+        // 1. Identify main orthogonal segments, skipping short diagonal elbow fittings
+        var mainSegments = new List<OrthoSegment>();
+        for (var i = 0; i < source.Count - 1; i++)
+        {
+            var delta = source[i + 1] - source[i];
+            var len = delta.Length;
+            if (len < 0.1) continue;
+
+            // Check if axis-aligned
+            var isOrtho = false;
+            var domAxis = -1;
+            for (int ax = 0; ax < 3; ax++)
+            {
+                if (Math.Abs(delta[ax]) / len > 0.85)
+                {
+                    isOrtho = true;
+                    domAxis = ax;
+                    break;
+                }
+            }
+
+            if (isOrtho)
+            {
+                mainSegments.Add(new OrthoSegment(source[i], source[i + 1], domAxis));
+            }
+        }
+
+        // 2. Merge consecutive segments with the same dominant axis
+        var mergedSegments = new List<OrthoSegment>();
+        foreach (var seg in mainSegments)
+        {
+            if (mergedSegments.Count > 0 && mergedSegments[^1].Axis == seg.Axis)
+            {
+                var prev = mergedSegments[^1];
+                mergedSegments[^1] = new OrthoSegment(prev.Start, seg.End, prev.Axis);
+            }
+            else
+            {
+                mergedSegments.Add(seg);
+            }
+        }
 
         var candidates = new List<(double Order, Vec3 Point, RouteFeatureRole Role)>();
         void Add(double order, Vec3 point, RouteFeatureRole role) => candidates.Add((order, point, role));
 
-        Add(1, source[1], RouteFeatureRole.StartStub);
-        Add(source.Count - 2, source[^2], RouteFeatureRole.EndApproach);
-
-        for (var i = 1; i < source.Count - 1; i++)
+        // 3. Intersect consecutive orthogonal segments to find precise centerline elbow intersections
+        for (var j = 0; j < mergedSegments.Count - 1; j++)
         {
-            var prev = source[i] - source[i - 1];
-            var next = source[i + 1] - source[i];
-            if (prev.Length < 1 || next.Length < 1) continue;
+            var seg1 = mergedSegments[j];
+            var seg2 = mergedSegments[j + 1];
 
-            var axisChanged = DominantAxis(prev) != DominantAxis(next);
-            var zChanged = Math.Abs(prev.Z) > 10 || Math.Abs(next.Z) > 10;
-            if (zChanged) Add(i, source[i], RouteFeatureRole.ElevationChange);
-            else if (axisChanged) Add(i, source[i], RouteFeatureRole.Bend);
+            var axis1 = seg1.Axis;
+            var axis2 = seg2.Axis;
+
+            if (axis1 != axis2)
+            {
+                var intersection = IntersectOrthogonalLines(seg1.End, axis1, seg2.Start, axis2);
+
+                var isZ1 = (axis1 == 2);
+                var isZ2 = (axis2 == 2);
+                var role = (isZ1 || isZ2) ? RouteFeatureRole.ElevationChange : RouteFeatureRole.Bend;
+
+                Add(j + 1, intersection, role);
+            }
         }
 
-        for (var i = 0; i < source.Count - 1; i++)
+        // 4. Add trunk guides for long straight segments
+        for (var j = 0; j < mergedSegments.Count; j++)
         {
-            var a = source[i];
-            var b = source[i + 1];
-            var length = Distance(a, b);
+            var seg = mergedSegments[j];
+            var length = seg.Length;
             if (length < 4000) continue;
             var chunks = Math.Min(3, (int)Math.Floor(length / 4000));
             for (var n = 1; n <= chunks; n++)
             {
                 var t = n / (double)(chunks + 1);
-                Add(i + t, Lerp(a, b, t), RouteFeatureRole.TrunkGuide);
+                Add(j + t, Lerp(seg.Start, seg.End, t), RouteFeatureRole.TrunkGuide);
             }
+        }
+
+        // Add start and end stubs if possible
+        if (source.Count >= 3)
+        {
+            Add(1, source[1], RouteFeatureRole.StartStub);
+            Add(source.Count - 2, source[^2], RouteFeatureRole.EndApproach);
         }
 
         var minEndpointDistance = Math.Max(250, options.SnapTolerance);
@@ -1447,8 +1994,6 @@ public partial class MainWindow : Window
         }
         else
         {
-            // Trim by role priority (bends/elevation changes over trunk-guide filler points),
-            // then restore original path order so the rubber line still walks the route in sequence.
             selected = cleaned
                 .Select((item, idx) => (item.Point, item.Role, Idx: idx))
                 .OrderByDescending(x => FeatureRoleWeight(x.Role))
@@ -1782,6 +2327,8 @@ public partial class MainWindow : Window
         ClearVisuals(_pocVisuals);
         ClearVisuals(_selectedEndpointVisuals);
         ClearVisuals(_groupPatternVisuals);
+        ClearVisuals(_highlightVisuals);
+        _infoWindow?.Hide();
         UpdateVisibleObjectText();
     }
 
@@ -1955,6 +2502,69 @@ public partial class MainWindow : Window
         UpdateVisibleObjectText();
     }
 
+    private void DrawDetailedSegments(ExistingRoutePath path, Brush brush, List<Visual3D> bucket)
+    {
+        if (path.Fittings == null || path.Fittings.Count == 0) return;
+
+        foreach (var f in path.Fittings)
+        {
+            if (f.GlbData != null && f.GlbData.Length > 0)
+            {
+                var mesh = GlbParser.Parse(f.GlbData);
+                if (mesh == null) continue;
+
+                GlbParser.TransformMeshToObb(mesh, f.Lbb, f.Rbb, f.Ltb, f.Lbf);
+
+                var material = new DiffuseMaterial(brush);
+                var model = new GeometryModel3D(mesh, material) { BackMaterial = material };
+                var modelVisual = new ModelVisual3D { Content = model };
+
+                bucket.Add(modelVisual);
+                _visualOwners[modelVisual] = f;
+                if (ShouldShowBucket(bucket)) Viewport.Children.Add(modelVisual);
+            }
+            else
+            {
+                // Draw Pipe / Bending cylinders using OBB axes
+                var vX = f.Rbb - f.Lbb;
+                var vY = f.Ltb - f.Lbb;
+                var vZ = f.Lbf - f.Lbb;
+
+                double lenX = vX.Length;
+                double lenY = vY.Length;
+                double lenZ = vZ.Length;
+
+                Vec3 startPt, endPt;
+                if (lenX >= lenY && lenX >= lenZ)
+                {
+                    startPt = f.Lbb + (vY + vZ) * 0.5;
+                    endPt = f.Rbb + (vY + vZ) * 0.5;
+                }
+                else if (lenY >= lenX && lenY >= lenZ)
+                {
+                    startPt = f.Lbb + (vX + vZ) * 0.5;
+                    endPt = f.Ltb + (vX + vZ) * 0.5;
+                }
+                else
+                {
+                    startPt = f.Lbb + (vX + vY) * 0.5;
+                    endPt = f.Lbf + (vX + vY) * 0.5;
+                }
+
+                if ((endPt - startPt).Length < 1.0) continue;
+
+                var diameter = path.DiameterMm > 0 ? path.DiameterMm : 100.0;
+                var pts = new[] { startPt, endPt };
+                var collection = new Point3DCollection(pts.Select(ToPoint3D));
+
+                var tube = new TubeVisual3D { Path = collection, Diameter = diameter, Fill = brush, IsPathClosed = false };
+                bucket.Add(tube);
+                _visualOwners[tube] = f;
+                if (ShouldShowBucket(bucket)) Viewport.Children.Add(tube);
+            }
+        }
+    }
+
 
     private void AddWireBox(Aabb box, Brush brush, double diameter, List<Visual3D> bucket)
     {
@@ -1997,10 +2607,11 @@ public partial class MainWindow : Window
         if (ShouldShowBucket(bucket)) Viewport.Children.Add(visual);
     }
 
-    private void AddSphere(Vec3 point, double radius, Brush brush, List<Visual3D> bucket)
+    private void AddSphere(Vec3 point, double radius, Brush brush, List<Visual3D> bucket, object? owner = null)
     {
         var visual = new SphereVisual3D { Center = ToPoint3D(point), Radius = radius, Fill = brush };
         bucket.Add(visual);
+        if (owner != null) _visualOwners[visual] = owner;
         if (ShouldShowBucket(bucket)) Viewport.Children.Add(visual);
     }
 
@@ -2519,25 +3130,7 @@ public partial class MainWindow : Window
                 sleeveBrush = new SolidColorBrush(Color.FromArgb(110, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
             }
             
-            // 2. 대표 중심선 두께 및 색상 매핑
-            double trunkDiameter;
-            SolidColorBrush trunkBrush;
-            
-            if (isSelected)
-            {
-                trunkDiameter = 75.0; // 굵게 강조
-                trunkBrush = brushes.SolidBrush;
-            }
-            else if (hasSelection)
-            {
-                trunkDiameter = 16.0; // 가늘게 디밍
-                trunkBrush = new SolidColorBrush(Color.FromArgb(30, brushes.SolidBrush.Color.R, brushes.SolidBrush.Color.G, brushes.SolidBrush.Color.B));
-            }
-            else
-            {
-                trunkDiameter = 40.0; // 기본 두께
-                trunkBrush = brushes.SolidBrush;
-            }
+            // 2. 대표 중심선 그리기 비활성화됨 (로컬 변수 매핑 제거)
 
             // A. 멤버 배관 피복 그리기 (기존 관경 대비 정밀 비율 매칭)
             if (row.Geom3DPaths != null)
@@ -2548,14 +3141,7 @@ public partial class MainWindow : Window
                 }
             }
 
-            // B. 대표 중심선 그리기
-            if (row.TrunkPaths != null)
-            {
-                foreach (var line in row.TrunkPaths)
-                {
-                    DrawPath(line, trunkBrush, trunkDiameter, _groupPatternVisuals);
-                }
-            }
+            // B. 대표 중심선 그리기 (사용자 요청으로 대표그룹경로는 표시하지 않음)
         }
 
         ApplyLayerVisibility();
@@ -2590,6 +3176,129 @@ public partial class MainWindow : Window
         camera.FarPlaneDistance = 10000000.0;
         Viewport.InvalidateVisual();
     }
+
+    private void DrawAutoRouteDetailedSegments(ResultRow row, Brush brush, double diameter, List<Visual3D> bucket)
+    {
+        if (row.PipePaths != null && row.PipePaths.Count > 0)
+        {
+            for (int pIdx = 0; pIdx < row.PipePaths.Count; pIdx++)
+            {
+                var points = row.PipePaths[pIdx];
+                if (points.Count < 2) continue;
+                
+                // Draw straight pipe segments from points
+                for (int i = 0; i < points.Count - 1; i++)
+                {
+                    var start = points[i];
+                    var end = points[i + 1];
+                    var length = (end - start).Length;
+                    
+                    var pts = new[] { start, end };
+                    var collection = new Point3DCollection(pts.Select(ToPoint3D));
+                    
+                    var tube = new TubeVisual3D { Path = collection, Diameter = diameter, Fill = brush, IsPathClosed = false };
+                    bucket.Add(tube);
+                    
+                    var autoSeg = new AutoRouteSegment(
+                        row.Task.RoutePathGuid ?? Guid.NewGuid().ToString(),
+                        pIdx * 1000 + i,
+                        start,
+                        end,
+                        length,
+                        diameter,
+                        "PIPE",
+                        row);
+                        
+                    _visualOwners[tube] = autoSeg;
+                    if (ShouldShowBucket(bucket)) Viewport.Children.Add(tube);
+                }
+                
+                // Draw elbow fittings at joints between consecutive segments
+                for (int i = 1; i < points.Count - 1; i++)
+                {
+                    var joint = points[i];
+                    var size = diameter * 1.25;
+                    
+                    var sphere = new SphereVisual3D { Center = ToPoint3D(joint), Radius = size * 0.5, Fill = brush };
+                    bucket.Add(sphere);
+                    
+                    var autoSeg = new AutoRouteSegment(
+                        row.Task.RoutePathGuid ?? Guid.NewGuid().ToString(),
+                        pIdx * 1000 + i + 500,
+                        joint,
+                        joint,
+                        0.0,
+                        diameter,
+                        "ELBOW",
+                        row);
+                        
+                    _visualOwners[sphere] = autoSeg;
+                    if (ShouldShowBucket(bucket)) Viewport.Children.Add(sphere);
+                }
+            }
+        }
+        else if (row.RouteSegments != null && row.RouteSegments.Count > 0)
+        {
+            var segments = row.RouteSegments;
+            
+            // Draw straight pipe segments
+            for (int i = 0; i < segments.Count; i++)
+            {
+                var seg = segments[i];
+                var pts = new[] { seg.Start, seg.End };
+                var collection = new Point3DCollection(pts.Select(ToPoint3D));
+                
+                var tube = new TubeVisual3D { Path = collection, Diameter = diameter, Fill = brush, IsPathClosed = false };
+                bucket.Add(tube);
+                
+                var autoSeg = new AutoRouteSegment(
+                    row.Task.RoutePathGuid ?? Guid.NewGuid().ToString(),
+                    i,
+                    seg.Start,
+                    seg.End,
+                    seg.Length,
+                    diameter,
+                    "PIPE",
+                    row);
+                    
+                _visualOwners[tube] = autoSeg;
+                if (ShouldShowBucket(bucket)) Viewport.Children.Add(tube);
+            }
+
+            // Draw elbow fittings at joints
+            for (int i = 0; i < segments.Count - 1; i++)
+            {
+                var joint = segments[i].End;
+                var size = diameter * 1.25;
+                
+                var sphere = new SphereVisual3D { Center = ToPoint3D(joint), Radius = size * 0.5, Fill = brush };
+                bucket.Add(sphere);
+                
+                var autoSeg = new AutoRouteSegment(
+                    row.Task.RoutePathGuid ?? Guid.NewGuid().ToString(),
+                    i + 500,
+                    joint,
+                    joint,
+                    0.0,
+                    diameter,
+                    "ELBOW",
+                    row);
+                    
+                _visualOwners[sphere] = autoSeg;
+                if (ShouldShowBucket(bucket)) Viewport.Children.Add(sphere);
+            }
+        }
+    }
+
+    private sealed record AutoRouteSegment(
+        string RouteGuid,
+        int SegmentIndex,
+        Vec3 Start,
+        Vec3 End,
+        double Length,
+        double Diameter,
+        string Type, // "PIPE" or "ELBOW"
+        ResultRow ParentRoute);
 }
 
 

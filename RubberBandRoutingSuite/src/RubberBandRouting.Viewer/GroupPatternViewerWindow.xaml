@@ -47,6 +47,7 @@
                                         <StackPanel Orientation="Horizontal">
                                             <Rectangle Width="14" Height="14" Fill="{Binding ColorBrush}" RadiusX="2" RadiusY="2" Margin="0,0,6,0"/>
                                             <TextBlock Text="{Binding ShortId}" FontWeight="SemiBold" Foreground="#7CD4FF" FontFamily="Consolas"/>
+                                            <TextBlock Text="{Binding Utility, StringFormat=' [{0}]'}" FontWeight="SemiBold" Foreground="#A5B4FC" FontSize="11" Margin="4,0,0,0" VerticalAlignment="Center"/>
                                             <Border Background="{Binding AxisBadgeBg}" CornerRadius="3" Padding="5,1" Margin="8,0,0,0">
                                                 <TextBlock Text="{Binding AxisBadge}" FontSize="10" FontWeight="Bold" Foreground="Black"/>
                                             </Border>

@@ -132,17 +132,20 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
     #        즉 start_idx = i (CSF로 진입하는 점까지 포함, Middle Trunk는 그 다음부터 시작)
     start_idx = 1
     matched_csf = False
+    
+    # [1-1] 시작점 Z좌표가 13700.0 이상(A/F구역)인 경우 CSF구역 진입 시점 찾기
     if points[0][2] >= 13700.0:
         for i in range(1, len(points)):
             if points[i][2] <= 13700.0:
-                # CSF 경계를 넘어서는 바로 이 점(i)이 격자보 통과 수직 하강의 끝점.
-                # Start Stub은 points[0..i]까지 (i 포함), Middle Trunk는 points[i..]부터.
+                # CSF 경계(Z <= 13700)를 넘는 최초의 인덱스 i를 격자보 관통 수직 하강의 종료점으로 설정
+                # Start Stub은 points[0..i]까지 포함, Middle Trunk는 그 다음(points[i..])부터 시작
                 start_idx = i
                 matched_csf = True
                 break
             
+    # [1-2] CSF 구역 경계를 찾는 것에 실패한 경우, 기하학적 컷팅 조건 적용
     if not matched_csf:
-        # 첫 번째 유의미한(50mm 이상) 세그먼트의 진행 방향 찾기
+        # 첫 번째 유의미한(50mm 이상) 세그먼트의 진행 방향 축(first_axis) 찾기
         first_axis = -1
         for i in range(len(points) - 1):
             a, b = points[i], points[i+1]
@@ -156,26 +159,29 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
             for i in range(len(points) - 1):
                 a, b = points[i], points[i+1]
                 L = dist(a, b)
+                # 50mm 미만 조각은 필터링
                 if L < 50.0:
                     end_idx = i + 1
                     continue
                 axis = axis_snap(vec_sub(b, a)) // 2
+                # 첫 번째 축 방향과 같은 축으로 진행하는 동안 누적
                 if axis == first_axis:
                     first_run_len += L
                     end_idx = i + 1
                 else:
                     break
                     
-            is_vertical = (first_axis == 2) # Z축
-            # 수직인 경우 격자보 관통 스텁으로 판단하여 그 런의 끝까지 포함
+            is_vertical = (first_axis == 2) # Z축 여부 판정
+            # 수직관통 스텁인 경우 첫 수직 런(Run)의 끝까지 포함
             if is_vertical:
                 start_idx = end_idx
             else:
-                # 수직이 아니면 첫 세그먼트 끝(points[1])까지만 자름
+                # 수평인 경우 첫 번째 세그먼트 끝점까지만 자름
                 start_idx = 1
         else:
             start_idx = 1
             
+    # 최종 START Stub 점열 및 접속자유점(Start Free Point) 획득
     start_stub_pts = points[:start_idx + 1]
     start_free_point = start_stub_pts[-1]
     
@@ -183,6 +189,8 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
     # 종단 PoC(points[-1])에서 시작하여 처음으로 방향이 바뀌는 첫 엘보 정점까지 포함
     end_idx = len(points) - 1
     entry_direction = None
+    
+    # 시작점 인덱스를 초과하는 배관 조각이 남아있을 때만 종단 스캔 시작
     if len(points) - 1 > start_idx:
         # 역방향 기준 첫 번째 유의미한(50mm 이상) 세그먼트 방향 찾기
         last_axis = -1
@@ -190,13 +198,15 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
         for i in range(len(points) - 2, start_idx - 1, -1):
             a, b = points[i], points[i+1]
             if dist(a, b) >= 50.0:
-                last_axis_full = axis_snap(vec_sub(b, a))
-                last_axis = last_axis_full // 2
+                last_axis_full = axis_snap(vec_sub(b, a)) # 6방향 단위벡터 축정렬 인덱스
+                last_axis = last_axis_full // 2          # 3차원 축 인덱스 (0:X, 1:Y, 2:Z)
                 break
 
+        # 종단 진입 방향 단위벡터 저장
         if last_axis_full != -1:
             entry_direction = AXIS_VECTORS[last_axis_full]
 
+        # 역방향으로 동일 진행축 구간 스캔
         if last_axis != -1:
             for i in range(len(points) - 2, start_idx - 1, -1):
                 a, b = points[i], points[i+1]
@@ -205,9 +215,9 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
                     end_idx = i
                     continue
                 curr_axis = axis_snap(vec_sub(b, a)) // 2
+                # 역방향 진행 중 최초로 진행축 방향이 바뀌는 꺾임점(엘보/밴딩) 검출 시 중단
                 if curr_axis != last_axis:
-                    # 방향이 바뀐 첫 엘보 정점은 points[i+1]
-                    end_idx = i + 1
+                    end_idx = i + 1 # 방향이 바뀐 첫 엘보/밴딩 정점 인덱스 지정
                     break
                 else:
                     end_idx = i
@@ -219,10 +229,12 @@ def segment_route(points: list[tuple[float, float, float]]) -> tuple[list, list,
     else:
         end_idx = start_idx
         
+    # 최종 END Stub 점열 및 접속자유점(End Free Point) 획득
     end_stub_pts = points[end_idx:]
     end_free_point = end_stub_pts[0]
     
     # --- 3. MIDDLE_TRUNK 분할 ---
+    # Start Stub의 끝점과 End Stub의 시작점 사이 본선 구간 추출
     middle_trunk_pts = points[start_idx : end_idx + 1]
     if len(middle_trunk_pts) < 2:
         middle_trunk_pts = [start_free_point, end_free_point]
@@ -262,8 +274,11 @@ def load_route_data_bulk(conn) -> list[dict]:
     sql = """
         SELECT 
             rp."ROUTE_PATH_GUID",
+            rp."EQUIPMENT_TAG" AS "equip_tag",
+            rp."TARGET_OWNER_NAME" AS "target_owner",
             sd."FROM_POSX", sd."FROM_POSY", sd."FROM_POSZ",
-            sd."TO_POSX",   sd."TO_POSY",   sd."TO_POSZ"
+            sd."TO_POSX",   sd."TO_POSY",   sd."TO_POSZ",
+            sd."TYPE" AS "type"
         FROM "TB_ROUTE_PATH" rp
         JOIN "TB_ROUTE_SEGMENTS" rs ON rp."ROUTE_PATH_GUID" = rs."ROUTE_PATH_GUID"
         JOIN "TB_ROUTE_SEGMENT_DETAIL" sd ON rs."SEGMENT_GUID" = sd."SEGMENT_GUID"
@@ -295,12 +310,47 @@ def load_route_data_bulk(conn) -> list[dict]:
                 pts.append(pt_to)
                 
         if len(pts) >= 2:
+            equip_tag = details[0].get('equip_tag') or 'Unknown'
+            target_owner = details[0].get('target_owner') or 'Unknown'
             routes.append({
                 'guid': guid,
-                'points': pts
+                'points': pts,
+                'details': details,
+                'equip_tag': equip_tag,
+                'target_owner': target_owner
             })
     print(f"Reconstructed {len(routes)} valid route polylines.")
     return routes
+
+def get_point_type(p: tuple[float, float, float] | None, details: list[dict]) -> str:
+    """
+    지정된 좌표 p가 세그먼트의 어느 피팅 타입(Elbow, Bending 등)에 위치하는지 판정
+    """
+    if not p:
+        return "Unknown"
+    best_type = "PIPE"
+    min_d = 10.0  # 10mm 이내의 최근접 피팅 매칭 허용 오차
+    for d in details:
+        fx, fy, fz = d['FROM_POSX'], d['FROM_POSY'], d['FROM_POSZ']
+        tx, ty, tz = d['TO_POSX'], d['TO_POSY'], d['TO_POSZ']
+        if None in (fx, fy, fz, tx, ty, tz):
+            continue
+        
+        # FROM 또는 TO 지점과 p의 3D 거리 계산
+        d_from = math.sqrt((fx - p[0])**2 + (fy - p[1])**2 + (fz - p[2])**2)
+        d_to = math.sqrt((tx - p[0])**2 + (ty - p[1])**2 + (tz - p[2])**2)
+        curr_d = min(d_from, d_to)
+        
+        if curr_d < min_d:
+            t = (d.get('type') or 'PIPE').strip().upper()
+            # 피팅 타입을 우선하여 매칭 (PIPE나 PIPE_SEGMENT가 아닌 것 우선)
+            if t not in ('PIPE', 'PIPE_SEGMENT', ''):
+                best_type = t
+                min_d = curr_d
+            elif best_type == 'PIPE':
+                best_type = t
+                min_d = curr_d
+    return best_type
 
 def run_segmentation(conn) -> None:
     """
@@ -347,7 +397,8 @@ def run_segmentation(conn) -> None:
     rows = []
     for r in routes:
         guid = r['guid']
-        start_pts, middle_pts, end_pts, start_fp, end_fp, entry_dir = segment_route(r['points'])
+        pts = r['points']
+        start_pts, middle_pts, end_pts, start_fp, end_fp, entry_dir = segment_route(pts)
 
         start_wkt = points_to_wkt_linestringz(start_pts)
         middle_wkt = points_to_wkt_linestringz(middle_pts)
@@ -357,6 +408,25 @@ def run_segmentation(conn) -> None:
         edx, edy, edz = entry_dir if entry_dir is not None else (None, None, None)
 
         rows.append((guid, start_wkt, middle_wkt, end_wkt, start_fp_wkt, end_fp_wkt, edx, edy, edz))
+        
+        # 각 세그먼트별 3D 선분 총 길이 및 전체 배관 길이 계산 (mm)
+        start_len = sum(dist(start_pts[i], start_pts[i+1]) for i in range(len(start_pts)-1)) if len(start_pts) >= 2 else 0.0
+        middle_len = sum(dist(middle_pts[i], middle_pts[i+1]) for i in range(len(middle_pts)-1)) if len(middle_pts) >= 2 else 0.0
+        end_len = sum(dist(end_pts[i], end_pts[i+1]) for i in range(len(end_pts)-1)) if len(end_pts) >= 2 else 0.0
+        total_len = sum(dist(pts[i], pts[i+1]) for i in range(len(pts)-1)) if len(pts) >= 2 else 0.0
+
+        # 분할 기준점의 피팅 타입(Elbow, Bending 등) 판정
+        s_type = get_point_type(start_fp, r.get('details', []))
+        e_type = get_point_type(end_fp, r.get('details', []))
+
+        equip_tag = r['equip_tag']
+        target_owner = r['target_owner']
+
+        # 콘솔 창에 배관별 상세 삼분할 결과 출력 (불필요한 좌표 제거 및 전체 길이/세그먼트 길이 중심 표시)
+        print(f"[Route {guid[:8]}...] [{equip_tag}] -> [{target_owner}] | Total Length: {total_len:6.1f} mm")
+        print(f"  Start Stub: {start_len:6.1f} mm (Type: {s_type}) | "
+              f"Trunk: {middle_len:6.1f} mm | "
+              f"End Stub: {end_len:6.1f} mm (Type: {e_type})")
         
     with conn.cursor() as cur:
         cur.execute('DELETE FROM "TB_ROUTE_PATH_SEGMENTATION"')

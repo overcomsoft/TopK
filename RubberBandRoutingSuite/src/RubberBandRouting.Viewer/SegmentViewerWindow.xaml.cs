@@ -227,6 +227,13 @@ public partial class SegmentViewerWindow : Window
 
         DrawEndpointOwners(path);
 
+        if (path.Fittings != null && path.Fittings.Count > 0)
+        {
+            DrawFittings(path, Colors.White, _visuals3D, Viewport3D);
+            DrawFittings(path, Colors.White, _visualsXY, ViewportXY);
+            DrawFittings(path, Colors.White, _visualsZ, ViewportZ);
+        }
+
         FitCameraToCurrentPath(path.Points);
     }
 
@@ -332,6 +339,32 @@ public partial class SegmentViewerWindow : Window
             AddIndividualMarker(pEnd, new SolidColorBrush(color), diameter * 0.6, _visuals3D, Viewport3D, endMeta);
             AddIndividualMarker(pEnd, new SolidColorBrush(color), diameter * 0.6, _visualsXY, ViewportXY, endMeta);
             AddIndividualMarker(pEnd, new SolidColorBrush(color), diameter * 0.6, _visualsZ, ViewportZ, endMeta);
+        }
+    }
+
+    private void DrawFittings(ExistingRoutePath path, Color color, List<Visual3D> bucket, HelixViewport3D viewport)
+    {
+        if (path.Fittings == null || path.Fittings.Count == 0) return;
+
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+
+        foreach (var f in path.Fittings)
+        {
+            if (f.GlbData == null || f.GlbData.Length == 0) continue;
+
+            var mesh = GlbParser.Parse(f.GlbData);
+            if (mesh == null) continue;
+
+            GlbParser.TransformMeshToObb(mesh, f.Lbb, f.Rbb, f.Ltb, f.Lbf);
+
+            var material = new DiffuseMaterial(brush);
+            var model = new GeometryModel3D(mesh, material) { BackMaterial = material };
+            var modelVisual = new ModelVisual3D { Content = model };
+
+            bucket.Add(modelVisual);
+            viewport.Children.Add(modelVisual);
+            _visualOwners[modelVisual] = path;
         }
     }
 

@@ -14,6 +14,11 @@
 - 선택 경로 흰색 강조와 점수/메타 상세 표시
 - 검색경로 주변 1,000mm 구조 기둥/보 AABB 표시
 - 신형 direct segment schema, 구형 segment-map schema, 시작~종점 직선 fallback 지원
+- 개별 배관/Utility 배관 그룹 검색 모드 전환
+- 그룹 프리셋과 전체 멤버 목록, Size 대응 정책
+- Hungarian 1:1 Pair와 Coverage/Arrangement 그룹 점수
+- Query/Candidate Pair 동일 색상, 미대응·Size 불일치 강조
+- 원좌표/나란히 3D 비교와 그룹별 실제·재구성 geometry 상태
 
 ## 설정
 
@@ -37,7 +42,13 @@ Copy-Item TopK.3DViewer\viewer.settings.example.json TopK.3DViewer\viewer.settin
   "weightPattern": 25,
   "weightVector": 25,
   "weightContext": 25,
-  "redistributeMissingPatternWeight": true
+  "redistributeMissingPatternWeight": true,
+  "searchUnit": "Individual",
+  "groupSizeMatchMode": "PreferExact",
+  "groupMatchedWeight": 80,
+  "groupArrangementWeight": 20,
+  "groupComparisonView": "Original",
+  "showUnmatchedGroupMembers": true
 }
 ```
 
@@ -61,6 +72,8 @@ TopK.3DViewer\bin\Release\net8.0-windows\TopK.3DViewer.exe
 
 ## 화면 사용 순서
 
+### 개별 배관 검색
+
 1. PostgreSQL 접속값 입력 후 `DB 연결 및 조건 로드`를 누른다.
 2. 필요하면 기존 Route 프리셋을 선택한다.
 3. 공정, 장비, Utility 조건과 시작/종점 좌표를 입력한다.
@@ -68,6 +81,26 @@ TopK.3DViewer\bin\Release\net8.0-windows\TopK.3DViewer.exe
 5. `Top-K 검색 및 3D 로드`를 누른다.
 6. 우측 결과 행을 선택해 경로와 점수를 확인한다.
 7. 필요하면 상단 `주변 구조 BIM`을 켜 기둥/보와 경로 관계를 확인한다.
+
+### Utility 배관 그룹 검색
+
+1. `DB 연결 및 조건 로드`를 누른다.
+2. 검색 단위에서 `Utility 배관 그룹`을 선택한다.
+3. `장비 + Utility Group + Utility` 그룹 프리셋을 선택한다.
+4. 프리셋 멤버 목록과 중앙의 기존 Query 배관·장애물을 확인한다.
+5. Size 정책과 그룹 Pair/Arrangement 가중치를 선택한다.
+6. `그룹 Top-K 검색 및 3D 비교`를 누른다.
+7. 우측 후보 그룹을 선택해 매칭 수, Coverage, Arrangement, Size 분포를 확인한다.
+8. `Original` 또는 `SideBySide` 보기로 Query/Candidate 배관 형상을 비교한다.
+
+그룹 3D 색상은 다음 의미이다.
+
+- 같은 색 Query/Candidate: Hungarian Algorithm으로 대응된 Pair
+- 빨강: 미대응 Query 배관
+- 주황: 미대응 Candidate 배관
+- 노란색 강조: Size 불일치 Pair
+- `실제`: 모든 멤버가 DB 상세 polyline
+- `재구성 N`: N개 멤버가 시작/종점 메타데이터 fallback
 
 Context 검색은 `TB_ROUTE_SOURCE_SCOPE_MANIFEST`의 ACTIVE revision을 자동 사용한다. ACTIVE가
 없거나 복수이면 임의 fallback하지 않고 오류를 표시한다.

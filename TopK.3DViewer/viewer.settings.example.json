@@ -11,5 +11,11 @@
   "weightPattern": 0,
   "weightVector": 0,
   "weightContext": 30,
-  "redistributeMissingPatternWeight": true
+  "redistributeMissingPatternWeight": true,
+  "searchUnit": "Individual",
+  "groupSizeMatchMode": "PreferExact",
+  "groupMatchedWeight": 80,
+  "groupArrangementWeight": 20,
+  "groupComparisonView": "Original",
+  "showUnmatchedGroupMembers": true
 }

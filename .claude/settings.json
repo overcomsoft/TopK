@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import PIL; print\\(PIL.__version__\\)\")",
+      "Bash(mkdir -p \"/c/Users/overcom/AppData/Local/Temp/claude/d--DINNO-DEV-AI-AutoRouting-TopKGen/2748fd6f-0cfc-42ca-8c02-fc6713c99b6e/scratchpad\")",
+      "Bash(python make_icon.py)",
+      "Bash(python -c ' *)",
+      "Bash(git log *)",
+      "Bash(xargs grep -l \"GROUP\\\\|BUNDLE\\\\|PATTERN\")",
+      "Bash(python -m py_compile Tools/DesignPatternAnalyzer.py)",
+      "Bash(python Tools/DesignPatternAnalyzer.py --password dinno --host localhost --port 5432 --dbname DDW_AI_DB --user postgres extract --dry-run)",
+      "Bash(python -c \"import sys; print\\(sys.stdout.encoding\\)\")",
+      "Bash(git mv *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(python -m py_compile Tools/ExportGroupPattern.py)",
+      "Bash(python Tools/ExportGroupPattern.py --password dinno --host localhost --port 5432 --dbname DDW_AI_DB --user postgres extract --dry-run)",
+      "Bash(python -m py_compile Tools/ExportGroupPattern.py Tools/AnalyzeCustomGroup.py)",
+      "Bash(PGPASSWORD=dinno psql -h localhost -p 5432 -U postgres -d DDW_AI_DB -c \"\\\\d \\\\\"TB_ROUTE_GROUP_PATTERN\\\\\"\")",
+      "Bash(python Tools/ExportGroupPattern.py --help)",
+      "Bash(python Tools/ExportGroupPattern.py --password dinno --host localhost --port 5432 --dbname DDW_AI_DB --user postgres extract)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\overcom\\AppData\\Local\\Temp\\claude\\d--DINNO-DEV-AI-AutoRouting-TopKGen\\2748fd6f-0cfc-42ca-8c02-fc6713c99b6e\\scratchpad"
+    ]
+  }
+}

@@ -27,11 +27,11 @@ f3.add_run('save_vectors_db(db_params, vectors): ').bold = True
 f3.add_run('psycopg2의 execute_values를 활용해 생성된 30D 벡터 배열과 메타데이터를 TB_ROUTE_FEATURE_VECTOR 테이블에 고속 삽입(Bulk Insert)합니다.')
 
 # --- BuildContextVectors.py ---
-doc.add_heading('3. BuildContextVectors.py (2단계: Context Vector 24D)', level=1)
-doc.add_paragraph('경로 주변의 환경 데이터(TB_BIM_OBSTACLES)를 조회하여 배관의 맥락적(Contextual) 난이도 벡터(24D)를 추출합니다.')
+doc.add_heading('3. BuildContextVectors.py (2단계: Context Vector 30D)', level=1)
+doc.add_paragraph('TB_BIM_OBSTACLE을 BAY 범위로 조회하여 시작·종점의 500/1,000mm 장애물 환경 벡터(30D)를 추출합니다.')
 
 doc.add_heading('주요 알고리즘', level=2)
-doc.add_paragraph('경로의 OBB(Oriented Bounding Box)나 세그먼트 좌표를 기준으로 반경 N(mm) 이내의 장애물 데이터를 R-Tree나 PostGIS(ST_Intersects) 등으로 탐색합니다. 장애물의 밀집도, Clearance(여유 공간) 확보 여부, 교차율 등을 점수화하여 24차원의 Context Vector로 병합합니다.')
+doc.add_paragraph('시작·종점에서 AABB 표면거리 기준 0~500mm와 500~1,000mm shell을 탐색합니다. 기둥·보 개수, 최근접 표면거리·방향, free-space 및 Tier3 특징을 30차원 Context Vector로 병합합니다.')
 
 doc.add_heading('주요 함수', level=2)
 c1 = doc.add_paragraph(style='List Bullet')

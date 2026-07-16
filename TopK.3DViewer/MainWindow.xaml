@@ -64,12 +64,39 @@
                         </Grid>
                     </GroupBox>
 
-                    <GroupBox Header="기존 Route 프리셋">
+                    <GroupBox Header="검색 단위">
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton x:Name="RdoIndividualMode" Content="개별 배관" GroupName="SearchUnit"
+                                         IsChecked="True" Margin="5,3,18,3" Checked="SearchMode_Changed" />
+                            <RadioButton x:Name="RdoGroupMode" Content="Utility 배관 그룹" GroupName="SearchUnit"
+                                         Margin="5,3" Checked="SearchMode_Changed" />
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox x:Name="GrpRoutePreset" Header="기존 Route 프리셋">
                         <StackPanel>
                             <ComboBox x:Name="CmbPreset" DisplayMemberPath="Display"
                                       SelectionChanged="Preset_SelectionChanged" />
                             <TextBlock Text="선택하면 아래 검색조건과 시작/종점 좌표를 자동 입력합니다."
                                        Foreground="#66788A" TextWrapping="Wrap" Margin="4" />
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox x:Name="GrpGroupPreset" Header="Utility 배관 그룹 프리셋" Visibility="Collapsed">
+                        <StackPanel>
+                            <ComboBox x:Name="CmbGroupPreset" DisplayMemberPath="Display"
+                                      SelectionChanged="GroupPreset_SelectionChanged" />
+                            <TextBlock Text="장비 + Utility Group + Utility에 속한 여러 배관을 하나의 Query로 사용합니다."
+                                       Foreground="#66788A" TextWrapping="Wrap" Margin="4" />
+                            <DataGrid x:Name="GridGroupMembers" Height="135" AutoGenerateColumns="False"
+                                      IsReadOnly="True" CanUserAddRows="False" RowHeaderWidth="0">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="#" Binding="{Binding Order}" Width="30" />
+                                    <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="48" />
+                                    <DataGridTextColumn Header="Pattern" Binding="{Binding Pattern}" Width="*" />
+                                    <DataGridTextColumn Header="Route" Binding="{Binding ShortGuid}" Width="95" />
+                                </DataGrid.Columns>
+                            </DataGrid>
                         </StackPanel>
                     </GroupBox>
 
@@ -91,14 +118,14 @@
                             <ComboBox x:Name="CmbUtilityGroup" Grid.Row="2" Grid.Column="1" IsEditable="True" />
                             <TextBlock Grid.Row="3" Text="Utility" VerticalAlignment="Center" />
                             <ComboBox x:Name="CmbUtility" Grid.Row="3" Grid.Column="1" IsEditable="True" />
-                            <TextBlock Grid.Row="4" Text="Size" VerticalAlignment="Center" />
+                            <TextBlock x:Name="LblSize" Grid.Row="4" Text="Size" VerticalAlignment="Center" />
                             <ComboBox x:Name="CmbSize" Grid.Row="4" Grid.Column="1" IsEditable="True" />
-                            <TextBlock Grid.Row="5" Text="방향 Pattern" VerticalAlignment="Center" />
+                            <TextBlock x:Name="LblPattern" Grid.Row="5" Text="방향 Pattern" VerticalAlignment="Center" />
                             <TextBox x:Name="TxtPattern" Grid.Row="5" Grid.Column="1" ToolTip="예: H-R-H" />
                         </Grid>
                     </GroupBox>
 
-                    <GroupBox Header="시작 / 종점 좌표 (mm)">
+                    <GroupBox x:Name="GrpCoordinates" Header="시작 / 종점 좌표 (mm)">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="52" />
@@ -119,6 +146,42 @@
                             <TextBox x:Name="TxtEndY" Grid.Row="2" Grid.Column="2" />
                             <TextBox x:Name="TxtEndZ" Grid.Row="2" Grid.Column="3" />
                         </Grid>
+                    </GroupBox>
+
+                    <GroupBox x:Name="GrpGroupOptions" Header="그룹 매칭 옵션" Visibility="Collapsed">
+                        <StackPanel>
+                            <DockPanel>
+                                <TextBlock Text="Size 정책" Width="105" VerticalAlignment="Center" />
+                                <ComboBox x:Name="CmbGroupSizeMode" SelectedIndex="0"
+                                          SelectionChanged="GroupOption_Changed">
+                                    <ComboBoxItem Content="PreferExact" ToolTip="같은 Size를 우선하고 없으면 다른 Size도 허용" />
+                                    <ComboBoxItem Content="ExactOnly" ToolTip="같은 Size끼리만 Pair 허용" />
+                                    <ComboBoxItem Content="Ignore" ToolTip="Size를 Pair 점수에서 무시" />
+                                </ComboBox>
+                            </DockPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="105" /><ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="90" /><ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Pair 평균 %" VerticalAlignment="Center" />
+                                <TextBox x:Name="TxtGroupMatchedWeight" Grid.Column="1" Text="80"
+                                         LostKeyboardFocus="GroupWeight_LostKeyboardFocus" />
+                                <TextBlock Grid.Column="2" Text="배치 %" VerticalAlignment="Center" />
+                                <TextBox x:Name="TxtGroupArrangementWeight" Grid.Column="3" Text="20"
+                                         LostKeyboardFocus="GroupWeight_LostKeyboardFocus" />
+                            </Grid>
+                            <DockPanel>
+                                <TextBlock Text="3D 비교" Width="105" VerticalAlignment="Center" />
+                                <ComboBox x:Name="CmbGroupViewMode" SelectedIndex="0"
+                                          SelectionChanged="GroupOption_Changed">
+                                    <ComboBoxItem Content="Original" ToolTip="Query와 Candidate를 실제 좌표에 표시" />
+                                    <ComboBoxItem Content="SideBySide" ToolTip="Candidate를 Query 옆으로 평행 이동하여 형상 비교" />
+                                </ComboBox>
+                            </DockPanel>
+                            <CheckBox x:Name="ChkShowUnmatchedGroupMembers" Content="미매칭 멤버 표시 (Query=빨강, Candidate=주황)"
+                                      IsChecked="True" Checked="GroupOption_Changed" Unchecked="GroupOption_Changed" />
+                        </StackPanel>
                     </GroupBox>
 
                     <GroupBox Header="유사도 가중치 (자동 정규화)">
@@ -233,6 +296,22 @@
                                 <DataGridTextColumn Header="Utility" Binding="{Binding Utility}" Width="75" />
                                 <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="50" />
                                 <DataGridTextColumn Header="3D" Binding="{Binding GeometryLabel}" Width="55" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <DataGrid x:Name="GridGroupResults" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                                  Visibility="Collapsed" SelectionMode="Single"
+                                  SelectionChanged="GroupResults_SelectionChanged"
+                                  CanUserAddRows="False" HeadersVisibility="Column" RowHeaderWidth="0"
+                                  RowHeight="34" AlternatingRowBackground="#F2F6FA">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Rank}" Width="30" />
+                                <DataGridTextColumn Header="Score" Binding="{Binding Score, StringFormat=F4}" Width="58" />
+                                <DataGridTextColumn Header="매칭" Binding="{Binding MatchedLabel}" Width="62" />
+                                <DataGridTextColumn Header="Cov" Binding="{Binding Coverage, StringFormat=F2}" Width="44" />
+                                <DataGridTextColumn Header="Arr" Binding="{Binding Arrangement, StringFormat=F2}" Width="44" />
+                                <DataGridTextColumn Header="장비" Binding="{Binding Equipment}" Width="95" />
+                                <DataGridTextColumn Header="Sizes" Binding="{Binding Sizes}" Width="95" />
+                                <DataGridTextColumn Header="3D" Binding="{Binding GeometryLabel}" Width="70" />
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>

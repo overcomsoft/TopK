@@ -1402,3 +1402,214 @@ Viewer는 이 경우 의도적으로 `TB_ROUTE_PATH` 시작~종점 직선을 표
 - `TopK.3DViewer/Models/ViewerModels.cs`: 설정과 화면 모델
 - `TopK.3DViewer/viewer.settings.example.json`: 설정 예제
 - `TopK.3DViewer/README.md`: 프로젝트 단독 빠른 시작 문서
+
+---
+
+# Part D. Utility 배관 그룹 Vector와 Top-K
+
+## 33. 개별 배관 검색과 그룹 검색의 차이
+
+| 검색 단위 | Query | 권장 용도 |
+|---|---|---|
+| 개별 배관 | 한 Route의 시작/종점·Utility·Size | 신규 배관 한 줄의 유사 경로 검색 |
+| Utility 배관 그룹 | 장비 + Utility Group + Utility의 복수 Route | 장비 주변 동일 계통 배관 묶음의 재사용 설계 검색 |
+
+그룹 검색은 Size를 그룹 키에 포함하지 않는다. 동일 Utility에 여러 Size가 섞일 수 있으므로
+검색 시 `PreferExact`, `ExactOnly`, `Ignore` 정책으로 멤버 Pair의 Size 호환성을 제어한다.
+
+## 34. 그룹 테이블 Migration
+
+신규 테이블은 기존 테이블을 변경하지 않는 additive migration이다.
+
+```powershell
+python Tools\MigrateUtilityPipeGroupSchema.py apply `
+  --config Tools\tools.settings.json
+
+python Tools\MigrateUtilityPipeGroupSchema.py verify `
+  --config Tools\tools.settings.json
+```
+
+생성되는 테이블:
+
+- `TB_ROUTE_UTILITY_GROUP_VECTOR`: 그룹 대표 Feature/Context와 배치 통계
+- `TB_ROUTE_UTILITY_GROUP_MEMBER`: 그룹에 포함된 개별 Route와 Size·좌표·provenance
+
+Rollback은 데이터 손실 작업이므로 자동 CLI에서 제공하지 않는다. 운영 승인 후 다음 SQL을
+검토하고 별도로 실행한다.
+
+```text
+Tools/sql/drop_route_utility_group_vector_tables.sql
+```
+
+## 35. 그룹 Vector 생성
+
+ACTIVE Context revision을 기준으로 다음 순서로 실행한다.
+
+```powershell
+python Tools\BuildUtilityPipeGroupVectors.py create-schema `
+  --config Tools\tools.settings.json
+
+python Tools\BuildUtilityPipeGroupVectors.py build `
+  --config Tools\tools.settings.json --scope-mode active --min-members 2
+
+python Tools\BuildUtilityPipeGroupVectors.py validate `
+  --config Tools\tools.settings.json --scope-mode active
+
+python Tools\BuildUtilityPipeGroupVectors.py status `
+  --config Tools\tools.settings.json --scope-mode active
+```
+
+`SOURCE_HASH`가 같은 READY 그룹은 다시 생성하지 않는다. Route 멤버나 개별 Feature/Context가
+변경된 그룹만 갱신하며 사라진 그룹은 `STALE`로 전환한다.
+
+정상 데이터 기준 기대값:
+
+```text
+READY 그룹       : 106
+그룹 멤버        : 747
+Feature coverage : 100%
+Context coverage : 100%
+상세경로 coverage: 100%
+```
+
+## 36. 그룹 검색 CLI
+
+그룹 프리셋 확인:
+
+```powershell
+dotnet run --project TopKSearchStandalone\TopKSearchStandalone.csproj -c Release -- `
+  --list-group-presets --utility-group VACCUM --utility FORELINE `
+  --dbname DDW_AI_DB
+```
+
+그룹 ID 검색:
+
+```powershell
+dotnet run --project TopKSearchStandalone\TopKSearchStandalone.csproj -c Release -- `
+  --group-query-id <GROUP_VECTOR_ID> --group-size-mode PreferExact --k 5 `
+  --dbname DDW_AI_DB
+```
+
+장비 조건으로 Query 그룹 자동 선택:
+
+```powershell
+dotnet run --project TopKSearchStandalone\TopKSearchStandalone.csproj -c Release -- `
+  --group-search --process CVD --equipment TNMHJ04 `
+  --utility-group VACCUM --utility FORELINE --k 5 `
+  --dbname DDW_AI_DB
+```
+
+## 37. 그룹 점수 해석
+
+개별 멤버 Pair는 Position, Pattern, Feature, Context의 가중합에 Size 점수를 곱한다.
+
+```text
+PairAdjusted = (Position×Wpos + Pattern×Wpat + Feature×Wfeat + Context×Wctx)
+             × SizeScore
+```
+
+Hungarian Algorithm이 전체 Pair 합이 최대가 되는 1:1 대응을 선택하고 그룹 점수를 계산한다.
+
+```text
+GroupSimilarity = (MatchedAverage × MatchedWeight
+                 + Arrangement × ArrangementWeight)
+                 × Coverage
+
+Coverage = 2 × MatchedCount / (QueryCount + CandidateCount)
+```
+
+예시:
+
+```text
+Pair 평균   : 0.640552 × 0.80 = 0.512442
+배치 유사도 : 0.591459 × 0.20 = 0.118292
+Coverage    : 0.571429
+최종 유사도 : (0.512442 + 0.118292) × 0.571429 = 0.360419
+```
+
+## 38. Viewer 그룹 검색 사용법
+
+1. Viewer를 Release로 빌드하고 실행한다.
+2. `DB 연결 및 조건 로드`를 누른다.
+3. 검색 단위에서 `Utility 배관 그룹`을 선택한다.
+4. 그룹 프리셋을 선택한다.
+5. 중앙에 Query 그룹 전체 배관과 주변 기둥·보가 표시되는지 확인한다.
+6. Size 정책을 선택한다. 기본값은 `PreferExact`이다.
+7. Pair 평균/Arrangement 가중치를 지정한다. 기본값은 80/20이다.
+8. 3D 비교를 `Original` 또는 `SideBySide`로 선택한다.
+9. `그룹 Top-K 검색 및 3D 비교`를 누른다.
+10. 우측 후보 그룹을 선택하고 Pair 상세 계산을 확인한다.
+
+그룹 결과표:
+
+| 열 | 의미 |
+|---|---|
+| Score | Coverage까지 반영된 최종 그룹 유사도 |
+| 매칭 | `대응 수/Query 수/Candidate 수` |
+| Cov | 멤버 구성 Coverage |
+| Arr | 상대 배치 유사도 |
+| 장비 | 후보 장비 인스턴스 |
+| Sizes | 후보 그룹 Size별 배관 수 |
+| 3D | 전체 실제 형상 또는 재구성 멤버 수 |
+
+3D 색상:
+
+- 같은 Pair 색상: 대응 Query/Candidate
+- 빨강: 미대응 Query
+- 주황: 미대응 Candidate
+- 노랑: Size 불일치 Pair 강조
+- 초록/주황 구: Query 배관 시작/종점
+
+`SideBySide`는 Candidate를 화면에서만 평행이동한다. 검색 점수와 장애물 조회는 항상 DB
+원좌표를 사용한다.
+
+## 39. 정량평가 실행
+
+```powershell
+dotnet run --project TopKSearchStandalone\TopKSearchStandalone.csproj -c Release -- `
+  --group-evaluate --group-evaluate-sample 20 --k 5 `
+  --dbname DDW_AI_DB `
+  --group-evaluate-out Docs\UtilityPipeGroup_TopK_Phase5_Evaluation.md
+```
+
+보고서는 Baseline, Size ExactOnly/Ignore, Context Off, Arrangement Off를 동일 표본에서 비교한다.
+정답 라벨이 없는 DB에서는 Precision/Recall을 임의로 계산하지 않으며 설계자가 표본 Top-K를
+검토해 적합 여부를 라벨링한다.
+
+## 40. 그룹 검색 장애 대응
+
+| 증상 | 확인 및 조치 |
+|---|---|
+| 그룹 프리셋이 비어 있음 | Migration, Vector build, `STATUS='READY'`, ACTIVE scope 확인 |
+| 후보가 K보다 적음 | 같은 Utility Group+Utility의 실제 후보 수가 K보다 적을 수 있음 |
+| Score가 0 | ExactOnly Size 불일치 또는 PreferExact에서 허용 Size 단계 밖인지 확인 |
+| Coverage가 낮음 | Query/Candidate 멤버 수 차이와 미대응 목록 확인 |
+| Size Ignore에서 순위 급변 | Size가 중요한 검색 버킷이므로 PreferExact 유지 권장 |
+| 배관이 직교선으로 표시 | Route GUID와 상세 segment 연결을 확인하고 `재구성` 라벨 확인 |
+| SideBySide 장애물 위치가 다름 | 장애물은 의도적으로 Query 원좌표 주변만 표시 |
+| Viewer가 시작 즉시 종료 | 최신 빌드인지 확인하고 Windows Application 로그의 .NET Runtime 예외 확인 |
+
+## 41. 그룹 검색 운영 체크리스트
+
+### 데이터 준비
+
+- [ ] Context ACTIVE revision이 정확히 1개이다.
+- [ ] Migration apply/verify가 통과했다.
+- [ ] 그룹 build/validate/status가 통과했다.
+- [ ] READY 그룹과 멤버 수가 예상 범위이다.
+
+### 검색 검증
+
+- [ ] Query 자신이 결과에서 제외된다.
+- [ ] 동일 입력의 결과 순서가 반복 실행 시 같다.
+- [ ] Size 정책과 가중치가 JSON에 저장된다.
+- [ ] 결과표의 매칭 수·Coverage·Arrangement를 확인했다.
+- [ ] 실제/재구성 geometry 상태를 확인했다.
+
+### 배포
+
+- [ ] Python 15개 그룹 테스트가 통과했다.
+- [ ] C# 그룹 Matcher 6개 테스트가 통과했다.
+- [ ] TopKSearchStandalone Release 빌드가 성공했다.
+- [ ] TopK.3DViewer Release 빌드가 성공했다.
+- [ ] 신규 PC에서 문서의 명령만으로 Migration→Build→Search를 재현했다.

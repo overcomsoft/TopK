@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UtilityPipeGroup Vector Build Contract v1",
+  "description": "장비+Utility Group+Utility 그룹 Vector와 결정론적 멤버 목록의 공용 생성 계약",
+  "type": "object",
+  "required": [
+    "group_vector_id",
+    "project_scope_key",
+    "model_revision_key",
+    "equipment_instance_key",
+    "utility_group",
+    "utility",
+    "member_count",
+    "size_signature",
+    "member_guids",
+    "feature_centroid",
+    "arrangement",
+    "source_hash",
+    "build_run_id",
+    "encoder_version",
+    "encoder_config_hash",
+    "status",
+    "members"
+  ],
+  "properties": {
+    "group_vector_id": {"type": "string", "minLength": 16},
+    "project_scope_key": {"type": "string", "minLength": 1},
+    "model_revision_key": {"type": "string", "minLength": 1},
+    "process_name": {"type": "string"},
+    "equipment_instance_key": {"type": "string", "minLength": 1},
+    "equipment_name": {"type": "string"},
+    "equipment_family_key": {"type": "string"},
+    "utility_group": {"type": "string", "minLength": 1},
+    "utility": {"type": "string", "minLength": 1},
+    "member_count": {"type": "integer", "minimum": 2},
+    "size_signature": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "member_guids": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "feature_centroid": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {"type": "number", "minimum": -1.0, "maximum": 1.0}
+    },
+    "context_centroid": {
+      "type": ["array", "null"],
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {"type": "number", "minimum": -1.0, "maximum": 1.0}
+    },
+    "arrangement": {"type": "object"},
+    "feature_coverage": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "context_coverage": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "source_hash": {"type": "string", "minLength": 32},
+    "build_run_id": {"type": "string", "format": "uuid"},
+    "encoder_version": {"const": "utility-pipe-group-v1"},
+    "encoder_config": {"type": "object"},
+    "encoder_config_hash": {"type": "string", "minLength": 32},
+    "status": {"enum": ["BUILDING", "READY", "FAILED", "STALE"]},
+    "members": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"$ref": "#/$defs/member"}
+    }
+  },
+  "$defs": {
+    "point3d": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    },
+    "member": {
+      "type": "object",
+      "required": [
+        "route_path_guid",
+        "member_order",
+        "utility",
+        "size",
+        "start_xyz",
+        "end_xyz",
+        "direction_pattern",
+        "total_length_mm",
+        "step_count"
+      ],
+      "properties": {
+        "route_path_guid": {"type": "string", "minLength": 1},
+        "member_order": {"type": "integer", "minimum": 0},
+        "utility": {"type": "string", "minLength": 1},
+        "size": {"type": "string"},
+        "start_xyz": {"$ref": "#/$defs/point3d"},
+        "end_xyz": {"$ref": "#/$defs/point3d"},
+        "direction_pattern": {"type": "string"},
+        "total_length_mm": {"type": "number", "minimum": 0.0},
+        "step_count": {"type": "integer", "minimum": 0},
+        "feature_vector_build_run_id": {"type": "string"},
+        "context_vector_build_run_id": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -22,6 +22,12 @@ public sealed class ViewerSettings
     public double WeightVector { get; set; } = 25;
     public double WeightContext { get; set; } = 25;
     public bool RedistributeMissingPatternWeight { get; set; } = true;
+    public string SearchUnit { get; set; } = "Individual";
+    public string GroupSizeMatchMode { get; set; } = nameof(RoutingAI.Standalone.GroupSizeMatchMode.PreferExact);
+    public double GroupMatchedWeight { get; set; } = 80;
+    public double GroupArrangementWeight { get; set; } = 20;
+    public string GroupComparisonView { get; set; } = "Original";
+    public bool ShowUnmatchedGroupMembers { get; set; } = true;
 
     /// <summary>실제로 읽었거나 새로 생성할 설정 파일. JSON에는 기록하지 않는다.</summary>
     [JsonIgnore]
@@ -48,6 +54,7 @@ public sealed class ViewerSettings
             : new ViewerSettings();
         settings.SettingsFilePath = path;
         settings.EqualizeEnabledWeights();
+        settings.NormalizeGroupWeights();
         return settings;
     }
 
@@ -76,6 +83,7 @@ public sealed class ViewerSettings
     public void Save()
     {
         EqualizeEnabledWeights();
+        NormalizeGroupWeights();
         if (string.IsNullOrWhiteSpace(SettingsFilePath)) SettingsFilePath = ResolveNewSettingsPath();
         var directory = Path.GetDirectoryName(SettingsFilePath);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
@@ -84,6 +92,25 @@ public sealed class ViewerSettings
 
     public RerankWeights ToRerankWeights() =>
         new(WeightPosition, WeightPattern, WeightVector, WeightContext);
+
+    /// <summary>그룹의 Pair 평균과 배치 유사도 가중치를 합계 100%로 정규화한다.</summary>
+    public void NormalizeGroupWeights()
+    {
+        if (!double.IsFinite(GroupMatchedWeight) || !double.IsFinite(GroupArrangementWeight) ||
+            GroupMatchedWeight < 0 || GroupArrangementWeight < 0 ||
+            GroupMatchedWeight + GroupArrangementWeight <= 0)
+            throw new InvalidDataException("그룹 Match/Arrangement 가중치는 0 이상이며 합계가 0보다 커야 합니다.");
+        var sum = GroupMatchedWeight + GroupArrangementWeight;
+        GroupMatchedWeight = GroupMatchedWeight / sum * 100.0;
+        GroupArrangementWeight = GroupArrangementWeight / sum * 100.0;
+
+        if (!Enum.TryParse<RoutingAI.Standalone.GroupSizeMatchMode>(GroupSizeMatchMode, true, out _))
+            GroupSizeMatchMode = nameof(RoutingAI.Standalone.GroupSizeMatchMode.PreferExact);
+        if (!GroupComparisonView.Equals("Original", StringComparison.OrdinalIgnoreCase) &&
+            !GroupComparisonView.Equals("SideBySide", StringComparison.OrdinalIgnoreCase))
+            GroupComparisonView = "Original";
+        SearchUnit = SearchUnit.Equals("Group", StringComparison.OrdinalIgnoreCase) ? "Group" : "Individual";
+    }
 
     private static string ResolveNewSettingsPath()
     {
@@ -135,6 +162,47 @@ public sealed class TopKRouteItem
     public double Length => Search.TotalLengthMm;
     public string Pattern => Search.DirectionPattern;
     public string ShortGuid => Guid.Length > 12 ? Guid[..12] + "…" : Guid;
+}
+
+/// <summary>
+/// UtilityPipeGroup 검색 결과와 후보 그룹 각 배관의 실제 DB polyline을 결합한 화면 항목.
+/// PointsByRouteGuid는 원좌표를 보존하며 Side-by-Side 이동은 렌더링 직전에만 적용한다.
+/// </summary>
+public sealed class TopKGroupItem
+{
+    public required UtilityPipeGroupSearchResult Search { get; init; }
+    public Dictionary<string, List<Point3D>> PointsByRouteGuid { get; init; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> ReconstructedRouteGuids { get; init; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public int Rank => Search.Rank;
+    public double Score => Search.GroupSimilarity;
+    public double Matched => Search.MatchedAverage;
+    public double Coverage => Search.Coverage;
+    public double Arrangement => Search.Arrangement;
+    public string Equipment => Search.Candidate.EquipmentInstanceKey;
+    public string Utility => Search.Candidate.Utility;
+    public int PipeCount => Search.Candidate.MemberCount;
+    public string MatchedLabel => $"{Search.Matches.Count}/{Search.UnmatchedQueryMembers.Count + Search.Matches.Count}/" +
+                                  $"{Search.UnmatchedCandidateMembers.Count + Search.Matches.Count}";
+    public string Sizes => string.Join(", ", Search.Candidate.SizeSignature
+        .OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+        .Select(item => $"{item.Key}:{item.Value}"));
+    public string GroupId => Search.Candidate.GroupVectorId;
+    public int ReconstructedCount => ReconstructedRouteGuids.Count;
+    public int ExactGeometryCount => Math.Max(0, PointsByRouteGuid.Count - ReconstructedCount);
+    public string GeometryLabel => ReconstructedCount == 0 ? "실제" : $"재구성 {ReconstructedCount}";
+}
+
+/// <summary>그룹 프리셋의 멤버 표시에 사용하는 읽기 전용 행.</summary>
+public sealed record UtilityPipeGroupMemberRow(
+    int Order,
+    string RoutePathGuid,
+    string Size,
+    string Pattern,
+    double LengthMm)
+{
+    public string ShortGuid => RoutePathGuid.Length > 12 ? RoutePathGuid[..12] + "…" : RoutePathGuid;
 }
 
 /// <summary>화면에 선택적으로 표시하는 BIM AABB.</summary>

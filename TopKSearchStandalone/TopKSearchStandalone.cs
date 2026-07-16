@@ -1989,12 +1989,76 @@ internal static class Program
         {
             var db = new DbConfig(opt.Host, opt.Port, opt.Dbname, opt.User, opt.Password);
 
+            // UtilityPipeGroup Matcher golden test는 DB 없이 실행한다.
+            if (opt.GroupSelfTest)
+                return UtilityPipeGroupMatcherSelfTests.RunAll();
+
+            if (opt.GroupEvaluate)
+            {
+                var report = await UtilityPipeGroupEvaluation.RunMarkdownAsync(db, opt.GroupEvaluateSample, opt.K);
+                var output = Path.GetFullPath(opt.GroupEvaluateOut);
+                Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+                await File.WriteAllTextAsync(output, report, Encoding.UTF8);
+                Console.WriteLine($"UtilityPipeGroup 평가 보고서: {output}");
+                return 0;
+            }
+
             // (Z) --check-schema 모드: pgvector + 두 테이블의 스키마 무결성 진단
             if (opt.CheckSchema)
             {
                 var rep = await TopKSearchStandalone.CheckSchemaAsync(db);
                 PrintSchemaCheck(rep);
                 return rep.IsHealthy ? 0 : 5;
+            }
+
+            if (opt.ListGroupPresets)
+            {
+                var presets = await UtilityPipeGroupSearch.FetchPresetsAsync(
+                    db, opt.Process, opt.Equipment, opt.UtilityGroup, opt.Utility, opt.PresetLimit);
+                if (opt.Json)
+                    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(presets,
+                        new System.Text.Json.JsonSerializerOptions
+                        {
+                            WriteIndented = true,
+                            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
+                            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+                        }));
+                else
+                    foreach (var preset in presets)
+                        Console.WriteLine($"{preset.GroupVectorId} | {preset.Display}");
+                return 0;
+            }
+
+            // 신규 UtilityPipeGroup Top-K. 기존 개별 Route 검색 분기와 완전히 분리한다.
+            if (!string.IsNullOrWhiteSpace(opt.GroupQueryId) || opt.GroupSearchByIdentity)
+            {
+                var groupOptions = new UtilityPipeGroupSearchOptions
+                {
+                    K = opt.K,
+                    SizeMatchMode = opt.GroupSizeMode,
+                    RequireSameProcess = opt.GroupRequireSameProcess,
+                    EquipmentFamilyKey = opt.GroupEquipmentFamily,
+                };
+                var (groupResults, groupMeta) = opt.GroupSearchByIdentity
+                    ? await UtilityPipeGroupSearch.SearchByIdentityAsync(
+                        db, opt.Process, opt.Equipment, opt.UtilityGroup, opt.Utility, groupOptions)
+                    : await UtilityPipeGroupSearch.SearchAsync(db, opt.GroupQueryId, groupOptions);
+                if (opt.Json)
+                {
+                    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(
+                        new { meta = groupMeta, results = groupResults },
+                        new System.Text.Json.JsonSerializerOptions
+                        {
+                            WriteIndented = true,
+                            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
+                            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+                        }));
+                }
+                else
+                {
+                    PrintGroupResults(groupResults, groupMeta);
+                }
+                return 0;
             }
 
             // (A) --list-presets 모드: TB_ROUTE_PATH 에서 프리셋 후보를 나열하고 종료
@@ -2149,6 +2213,18 @@ internal static class Program
 
         // 스키마 진단 모드
         public bool   CheckSchema   = false;
+
+        // UtilityPipeGroup 검색/테스트
+        public string GroupQueryId = "";
+        public GroupSizeMatchMode GroupSizeMode = GroupSizeMatchMode.PreferExact;
+        public bool GroupRequireSameProcess = false;
+        public string GroupEquipmentFamily = "";
+        public bool GroupSelfTest = false;
+        public bool ListGroupPresets = false;
+        public bool GroupSearchByIdentity = false;
+        public bool GroupEvaluate = false;
+        public int GroupEvaluateSample = 20;
+        public string GroupEvaluateOut = "Docs/UtilityPipeGroup_TopK_Phase5_Evaluation.md";
     }
 
     private static CliOptions ParseArgs(string[] args)
@@ -2182,6 +2258,19 @@ internal static class Program
                 case "--preset-rank":    o.PresetRank   = int.Parse(Next() ?? throw new ArgumentException("--preset-rank requires value")); break;
                 case "--check-schema":   o.CheckSchema  = true; break;
                 case "--use-obstacle-context": o.UseObstacleContext = true; break;
+                case "--group-query-id": o.GroupQueryId = Next() ?? throw new ArgumentException("--group-query-id requires value"); break;
+                case "--group-size-mode": o.GroupSizeMode = Enum.Parse<GroupSizeMatchMode>(
+                    Next() ?? throw new ArgumentException("--group-size-mode requires value"), true); break;
+                case "--group-require-same-process": o.GroupRequireSameProcess = true; break;
+                case "--group-equipment-family": o.GroupEquipmentFamily = Next() ?? throw new ArgumentException("--group-equipment-family requires value"); break;
+                case "--group-self-test": o.GroupSelfTest = true; break;
+                case "--list-group-presets": o.ListGroupPresets = true; break;
+                case "--group-search": o.GroupSearchByIdentity = true; break;
+                case "--group-evaluate": o.GroupEvaluate = true; break;
+                case "--group-evaluate-sample": o.GroupEvaluateSample = int.Parse(
+                    Next() ?? throw new ArgumentException("--group-evaluate-sample requires value")); break;
+                case "--group-evaluate-out": o.GroupEvaluateOut = Next() ??
+                    throw new ArgumentException("--group-evaluate-out requires value"); break;
                 default: throw new ArgumentException($"Unknown option: {a}");
             }
         }
@@ -2258,7 +2347,50 @@ TopKSearchStandalone — TB_ROUTE_FEATURE_VECTOR 기반 Top-K 경로 검색 (단
       [--user postgres] [--password dinno]
 
   종료 코드: 0=정상, 5=차단성 이슈 발견.
+
+[4] UtilityPipeGroup Top-K:
+
+  Query 그룹 목록:
+    dotnet run -- --list-group-presets [--process CLEAN] [--equipment WTNHJ02] \
+      [--utility-group EXHAUST] [--utility ACID] [--preset-limit 100]
+
+  dotnet run -- --group-query-id <GROUP_VECTOR_ID> --k 5 \
+      [--group-size-mode PreferExact|ExactOnly|Ignore] \
+      [--group-require-same-process] [--group-equipment-family <family>] \
+      [--host localhost] [--port 5432] [--dbname DDW_AI_DB] \
+      [--user postgres] [--password dinno] [--json]
+
+  Equipment + Utility Group + Utility로 Query 그룹 자동 선택:
+    dotnet run -- --group-search --process CVD --equipment TNMHJ04 \
+      --utility-group VACCUM --utility FORELINE --k 5 \
+      --dbname DDW_AI_DB --user postgres --password dinno
+
+  Matcher golden test(DB 불필요):
+    dotnet run -- --group-self-test
+
+  실제 READY 그룹 정량 평가(Size/Context/Arrangement A/B 포함):
+    dotnet run -- --group-evaluate --group-evaluate-sample 20 --k 5 \
+      --dbname DDW_AI_DB --group-evaluate-out Docs/UtilityPipeGroup_TopK_Phase5_Evaluation.md
 ");
+    }
+
+    private static void PrintGroupResults(
+        IReadOnlyList<UtilityPipeGroupSearchResult> results,
+        UtilityPipeGroupSearchMeta meta)
+    {
+        Console.WriteLine($"UtilityPipeGroup Top-K: query={meta.QueryGroupId}");
+        Console.WriteLine($"scope={meta.ProjectScopeKey} / {meta.ModelRevisionKey}");
+        Console.WriteLine($"candidates={meta.AnnCandidateCount}, returned={meta.ReturnedCount}, " +
+                          $"elapsed={meta.SearchTimeMs:F1}ms, size={meta.SizeMatchMode}");
+        foreach (var result in results)
+        {
+            Console.WriteLine($"#{result.Rank} score={result.GroupSimilarity:F6} " +
+                              $"matched={result.Matches.Count}/{result.UnmatchedQueryMembers.Count + result.Matches.Count}/" +
+                              $"{result.UnmatchedCandidateMembers.Count + result.Matches.Count} " +
+                              $"coverage={result.Coverage:F4} arrangement={result.Arrangement:F4} " +
+                              $"equipment={result.Candidate.EquipmentInstanceKey}");
+            Console.WriteLine($"   {result.Formula}");
+        }
     }
 
     /// <summary>SchemaCheckReport 를 사람이 읽기 좋은 표로 출력. CLI --check-schema 전용.</summary>

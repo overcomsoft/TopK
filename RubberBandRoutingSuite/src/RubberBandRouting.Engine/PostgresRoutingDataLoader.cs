@@ -84,6 +84,13 @@ public sealed record RouteTask(
     public string UtilityLabel => $"[{(string.IsNullOrWhiteSpace(Group) ? "?" : Group)}] {(string.IsNullOrWhiteSpace(Utility) ? "?" : Utility)}";
 }
 
+public sealed record ExistingRouteFitting(
+    string SegmentDetailGuid,
+    string ModelTemplateId,
+    string Type,
+    Vec3 Lbb, Vec3 Rbb, Vec3 Ltb, Vec3 Lbf,
+    byte[]? GlbData);
+
 public sealed record ExistingRoutePath(
     string RoutePathGuid,
     string? Utility,
@@ -95,7 +102,11 @@ public sealed record ExistingRoutePath(
     List<Vec3> StartStubPoints,
     List<Vec3> MiddleTrunkPoints,
     List<Vec3> EndStubPoints,
-    string? EquipmentTag = null);
+    string? EquipmentTag = null,
+    Vec3? EndEntryDir = null)
+{
+    public List<ExistingRouteFitting> Fittings { get; init; } = new();
+}
 
 public sealed record SpatialZone(
     string Name,
@@ -337,7 +348,8 @@ public sealed class PostgresRoutingDataLoader
                                    ST_AsText(ps.""START_STUB_GEOM"") AS start_wkt,
                                    ST_AsText(ps.""MIDDLE_TRUNK_GEOM"") AS trunk_wkt,
                                    ST_AsText(ps.""END_STUB_GEOM"") AS end_wkt,
-                                   rp.""EQUIPMENT_TAG""
+                                   rp.""EQUIPMENT_TAG"",
+                                   ps.""END_ENTRY_DIR_X"", ps.""END_ENTRY_DIR_Y"", ps.""END_ENTRY_DIR_Z""
                              FROM ""TB_ROUTE_PATH"" rp
                              LEFT JOIN ""TB_ROUTE_PATH_SEGMENTATION"" ps ON rp.""ROUTE_PATH_GUID"" = ps.""ROUTE_PATH_GUID""
                              WHERE rp.""SOURCE_POSX"" BETWEEN @minx AND @maxx
@@ -359,6 +371,15 @@ public sealed class PostgresRoutingDataLoader
             var trunkWkt = r.IsDBNull(7) ? null : r.GetString(7);
             var endWkt = r.IsDBNull(8) ? null : r.GetString(8);
             var equipmentTag = NullStr(r, 9);
+            double? dirX = r.IsDBNull(10) ? null : (double?)r.GetDouble(10);
+            double? dirY = r.IsDBNull(11) ? null : (double?)r.GetDouble(11);
+            double? dirZ = r.IsDBNull(12) ? null : (double?)r.GetDouble(12);
+
+            Vec3? endEntryDir = null;
+            if (dirX.HasValue && dirY.HasValue && dirZ.HasValue)
+            {
+                endEntryDir = new Vec3(dirX.Value, dirY.Value, dirZ.Value);
+            }
 
             var startStub = ParseLineStringZ(startWkt);
             var middleTrunk = ParseLineStringZ(trunkWkt);
@@ -378,8 +399,139 @@ public sealed class PostgresRoutingDataLoader
             {
                 scene.ExistingRoutePaths.Add(new ExistingRoutePath(
                     guid, utility, group, sourceName, targetName, diameterMm,
-                    points, startStub, middleTrunk, endStub, equipmentTag));
+                    points, startStub, middleTrunk, endStub, equipmentTag, endEntryDir));
             }
+        }
+
+        // Load the fittings details and their GLB models in bulk
+        await LoadFittingsForRoutesAsync(conn, scene, minx, miny, maxx, maxy, ct);
+    }
+
+    private static async Task LoadFittingsForRoutesAsync(NpgsqlConnection conn, RoutingScene scene, double minx, double miny, double maxx, double maxy, CancellationToken ct)
+    {
+        var paths = scene.ExistingRoutePaths;
+        if (paths.Count == 0) return;
+
+        var pathsByGuid = paths.ToDictionary(p => p.RoutePathGuid, StringComparer.OrdinalIgnoreCase);
+
+        // 1. Bulk query all segment details with model template id in the same range
+        const string sqlDetails = @"
+            SELECT rs.""ROUTE_PATH_GUID"",
+                   sd.""MODEL_TEMPLATE_ID"", 
+                   sd.""OBB_LEFT_BOTTOM_BACK_X"", sd.""OBB_LEFT_BOTTOM_BACK_Y"", sd.""OBB_LEFT_BOTTOM_BACK_Z"",
+                   sd.""OBB_RIGHT_BOTTOM_BACK_X"", sd.""OBB_RIGHT_BOTTOM_BACK_Y"", sd.""OBB_RIGHT_BOTTOM_BACK_Z"",
+                   sd.""OBB_LEFT_TOP_BACK_X"", sd.""OBB_LEFT_TOP_BACK_Y"", sd.""OBB_LEFT_TOP_BACK_Z"",
+                   sd.""OBB_LEFT_BOTTOM_FRONT_X"", sd.""OBB_LEFT_BOTTOM_FRONT_Y"", sd.""OBB_LEFT_BOTTOM_FRONT_Z"",
+                   sd.""SEGMENT_DETAIL_GUID"", sd.""TYPE""
+            FROM ""TB_ROUTE_SEGMENT_DETAIL"" sd
+            JOIN ""TB_ROUTE_SEGMENTS"" rs ON sd.""SEGMENT_GUID"" = rs.""SEGMENT_GUID""
+            JOIN ""TB_ROUTE_PATH"" rp ON rs.""ROUTE_PATH_GUID"" = rp.""ROUTE_PATH_GUID""
+            WHERE rp.""SOURCE_POSX"" BETWEEN @minx AND @maxx
+              AND rp.""SOURCE_POSY"" BETWEEN @miny AND @maxy";
+
+        var details = new List<PendingFittingDetail>();
+        var uniqueTemplateIds = new HashSet<Guid>();
+
+        await using (var cmd = new NpgsqlCommand(sqlDetails, conn))
+        {
+            AddXy(cmd, minx, miny, maxx, maxy);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+            {
+                var pathGuid = NullStr(r, 0);
+                if (string.IsNullOrWhiteSpace(pathGuid) || !pathsByGuid.ContainsKey(pathGuid)) continue;
+
+                var templateIdVal = r.IsDBNull(1) ? null : r.GetValue(1);
+                Guid templateId = Guid.Empty;
+                if (templateIdVal != null)
+                {
+                    if (templateIdVal is Guid g) templateId = g;
+                    else Guid.TryParse(templateIdVal.ToString(), out templateId);
+                }
+
+                // Read OBB vertices
+                var lbb = new Vec3(Dbl(r, 2), Dbl(r, 3), Dbl(r, 4));
+                var rbb = new Vec3(Dbl(r, 5), Dbl(r, 6), Dbl(r, 7));
+                var ltb = new Vec3(Dbl(r, 8), Dbl(r, 9), Dbl(r, 10));
+                var lbf = new Vec3(Dbl(r, 11), Dbl(r, 12), Dbl(r, 13));
+
+                var detailGuid = NullStr(r, 14) ?? "";
+                var type = NullStr(r, 15) ?? "UNKNOWN";
+
+                if (templateId != Guid.Empty)
+                {
+                    uniqueTemplateIds.Add(templateId);
+                }
+                details.Add(new PendingFittingDetail(pathGuid, templateId, lbb, rbb, ltb, lbf, detailGuid, type));
+            }
+        }
+
+        scene.LoadWarnings.Add($"[세그먼트 로드] DB에서 총 {details.Count}개의 세그먼트 상세 데이터를 로드했습니다. (경로 개수: {paths.Count})");
+
+        if (details.Count == 0) return;
+
+        // 2. Query TB_MODELTEMPLATES and TB_RAWMODELS in bulk to resolve GLB data for each MODEL_TEMPLATE_ID
+        var rawModelData = new Dictionary<Guid, byte[]>();
+        const string sqlModels = @"
+            SELECT mt.""MODEL_TEMPLATE_ID"",
+                   COALESCE(mt.""BLOBs"", rm.""RAWMODEL_DATA"") AS glb_data
+            FROM ""TB_MODELTEMPLATES"" mt
+            LEFT JOIN ""TB_RAWMODELS"" rm ON mt.""RAWMODEL_ID"" = rm.""RAWMODEL_ID""
+            WHERE mt.""MODEL_TEMPLATE_ID"" = ANY(@templateIds)";
+
+        await using (var cmd = new NpgsqlCommand(sqlModels, conn))
+        {
+            cmd.Parameters.AddWithValue("templateIds", uniqueTemplateIds.ToArray());
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+            {
+                var templateIdVal = r.GetValue(0);
+                Guid templateId = templateIdVal is Guid g ? g : Guid.Parse(templateIdVal.ToString()!);
+                var bytes = r.IsDBNull(1) ? null : (byte[])r.GetValue(1);
+                if (bytes != null && bytes.Length > 0)
+                {
+                    rawModelData[templateId] = bytes;
+                }
+            }
+        }
+
+        // 3. Populate existing routes with fittings
+        foreach (var det in details)
+        {
+            if (pathsByGuid.TryGetValue(det.PathGuid, out var path))
+            {
+                rawModelData.TryGetValue(det.TemplateId, out var glb);
+                path.Fittings.Add(new ExistingRouteFitting(
+                    det.DetailGuid,
+                    det.TemplateId.ToString(),
+                    det.Type,
+                    det.Lbb, det.Rbb, det.Ltb, det.Lbf,
+                    glb));
+            }
+        }
+    }
+
+    private class PendingFittingDetail
+    {
+        public string PathGuid { get; }
+        public Guid TemplateId { get; }
+        public Vec3 Lbb { get; }
+        public Vec3 Rbb { get; }
+        public Vec3 Ltb { get; }
+        public Vec3 Lbf { get; }
+        public string DetailGuid { get; }
+        public string Type { get; }
+
+        public PendingFittingDetail(string pathGuid, Guid templateId, Vec3 lbb, Vec3 rbb, Vec3 ltb, Vec3 lbf, string detailGuid, string type)
+        {
+            PathGuid = pathGuid;
+            TemplateId = templateId;
+            Lbb = lbb;
+            Rbb = rbb;
+            Ltb = ltb;
+            Lbf = lbf;
+            DetailGuid = detailGuid;
+            Type = type;
         }
     }
 

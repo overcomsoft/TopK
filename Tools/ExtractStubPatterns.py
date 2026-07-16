@@ -89,7 +89,7 @@ STUB_MAX_MM = 4000.0
 # dir_seq에 보관할 최대 bend 수. 현재 알고리즘은 첫 엘보 중심이므로 넉넉한 방어값이다.
 STUB_MAX_BENDS = 3
 # PoC가 AABB 내부에 없을 때 anchor로 인정할 최대 최근접 거리.
-ANCHOR_MAX_MM = 3000.0
+ANCHOR_MAX_MM = 5000.0
 # route_stub_pattern.feat 및 route_stub_template.avg_feat와 일치해야 하는 차원.
 FEAT_DIM = 24
 
@@ -428,6 +428,8 @@ def extract_samples(conn, args) -> list[StubSample]:
             continue
         start_anchor = find_anchor(equip_anchors, route.source_pos, route.equipment_name, None)
         end_anchor = find_anchor(end_anchors, route.target_pos, None, route.utility)
+        if not end_anchor:
+            end_anchor = find_anchor(equip_anchors, route.target_pos, None, route.utility)
         if not start_anchor:
             skipped["missing_start_anchor"] += 1
         else:
@@ -693,26 +695,39 @@ def make_sample(route: RouteRecord, stub_kind: str, anchor: Anchor) -> StubSampl
     START는 source_pos를 front로, END는 target_pos를 front로 폴리라인을 정렬한다.
     이후 walk_stub으로 잘라낸 점열에 대해 anchor face, 방향열, rise/offset, 24D feature를 계산한다.
     """
+    # [1] 시작 좌표(source_pos)와 종단 좌표(target_pos) 획득
     source = route.source_pos
     target = route.target_pos
     if not source or not target:
         return None
+        
+    # [2] 분석할 기점(PoC) 설정: START면 시작점, END면 끝점을 앞단(front)으로 설정하여 전체 점열 정렬
     oriented = orient_points(route.points, source if stub_kind == "START" else target)
+    
+    # [3] 잘라내기 알고리즘(walk_stub) 실행: PoC부터 최초 엘보/밴딩까지 잘라낸 좌표열 및 진행방향 획득
     walk = walk_stub(oriented, stub_kind)
     if not walk:
         return None
     stub_points, dir_ids = walk
+    
+    # [4] 앵커(장비/덕트/레터럴/부대설비) 기준 매칭 정보 연산
     poc = source if stub_kind == "START" else target
-    face_id, offset = nearest_face(anchor, poc)
-    face = AXIS_NAMES[face_id]
-    dir_seq = [AXIS_NAMES[i] for i in dir_ids]
-    route_unit = unit(vec_sub(target, source))
+    face_id, offset = nearest_face(anchor, poc)  # PoC가 앵커의 어느 면(Face)에 가깝고 얼마나 떨어져(Offset) 있는지 연산
+    face = AXIS_NAMES[face_id]                   # 면 이름을 문자열(예: +z)로 획득
+    dir_seq = [AXIS_NAMES[i] for i in dir_ids]   # 진행방향 시퀀스를 문자열 배열로 획득
+    
+    # [5] 진행 단위벡터 및 특징벡터 생성
+    route_unit = unit(vec_sub(target, source))    # 전체 배관의 주 진행 단위벡터
+    # END Stub의 경우 앵커를 향해 들어오는 역방향 단위벡터로 부호 반전
     dir_unit = list(route_unit if stub_kind == "START" else tuple(-v for v in route_unit))
-    rel = relative_pos(anchor, poc)
-    feat = build_feature(face_id, dir_ids, rel, dir_unit)
-    rise = compute_rise(stub_points, poc, face_id)
-    length = polyline_length(stub_points)
-    pattern_id = stable_id(route.guid, stub_kind, anchor.kind, anchor.name, ",".join(dir_seq), face)
+    rel = relative_pos(anchor, poc)              # 앵커 AABB 기준 PoC의 상대적인 3차원 위치비율 [0..1]
+    feat = build_feature(face_id, dir_ids, rel, dir_unit) # 패턴 매칭을 위한 24D 특징벡터 생성
+    
+    # [6] 라이즈(수직높이), 스텁 길이 등 속성 연산
+    rise = compute_rise(stub_points, poc, face_id) # 앵커 Face 법선축 기준의 라이즈 높이 계산
+    length = polyline_length(stub_points)          # 추출된 Stub의 전체 중심선 길이
+    pattern_id = stable_id(route.guid, stub_kind, anchor.kind, anchor.name, ",".join(dir_seq), face) # 고유한 해시 ID 생성
+    
     return StubSample(
         pattern_id=pattern_id,
         route_path_guid=route.guid,
@@ -755,7 +770,9 @@ def walk_stub(seg: list[tuple[float, float, float]], stub_kind: str) -> tuple[li
     if len(seg) < 2:
         return None
 
+    # [START Stub 추출 로직]: 장비 PoC부터 격자보 하부 관통 수직 하강 구간까지
     if stub_kind == "START":
+        # 첫 번째 유의미한(50mm 이상) 세그먼트의 진행 방향 축(first_axis) 찾기
         first_axis = -1
         for i in range(len(seg) - 1):
             a, b = seg[i], seg[i+1]
@@ -774,22 +791,28 @@ def walk_stub(seg: list[tuple[float, float, float]], stub_kind: str) -> tuple[li
                     end_idx = i + 1
                     continue
                 axis = axis_snap(vec_sub(b, a)) // 2
+                # 첫 번째 축과 동일한 방향인 동안은 진행 길이를 계속 누적
                 if axis == first_axis:
                     first_run_len += L
                     end_idx = i + 1
                 else:
                     break
                     
-            is_vertical = (first_axis == 2)
+            is_vertical = (first_axis == 2) # Z축(2) 여부 판정
+            # 수직관통 스텁인 경우 첫 수직 런의 끝까지 포함
             if is_vertical:
                 cut_idx = end_idx
             else:
+                # 수평 인입 구간인 경우 첫 세그먼트 끝까지만 자름
                 cut_idx = 1
         else:
             cut_idx = 1
             
         stub_pts = seg[:cut_idx + 1]
+        
+    # [END Stub 추출 로직]: 덕트/레터럴/부대설비 PoC로부터 첫 엘보/밴딩까지
     else:
+        # 최초 유의미한 진행 방향 축(last_axis) 탐색
         last_axis = -1
         for i in range(len(seg) - 1):
             a, b = seg[i], seg[i+1]
@@ -802,10 +825,13 @@ def walk_stub(seg: list[tuple[float, float, float]], stub_kind: str) -> tuple[li
             for i in range(len(seg) - 1):
                 a, b = seg[i], seg[i+1]
                 L = dist(a, b)
+                # 50mm 미만 미세 세그먼트는 축 정렬 노이즈이므로 진행축 체크 없이 스킵
                 if L < 50.0:
                     cut_idx = i + 1
                     continue
+                # 현재 세그먼트 진행축 판정
                 curr_axis = axis_snap(vec_sub(b, a)) // 2
+                # 최초의 축 방향과 다른 방향(엘보/밴딩)을 처음 만나는 순간 중단
                 if curr_axis != last_axis:
                     cut_idx = i
                     break
@@ -817,9 +843,10 @@ def walk_stub(seg: list[tuple[float, float, float]], stub_kind: str) -> tuple[li
         elif cut_idx < 1:
             cut_idx = 1
             
+        # 첫 번째 꺾임점 전까지 자른 좌표열
         stub_pts = seg[:cut_idx + 1]
 
-    # dir_ids 계산
+    # 잘라낸 Stub 구간 내 고유 진행 방향(방향열) 인덱스 축약 생성 (최대 4개)
     dir_ids = []
     for a, b in zip(stub_pts, stub_pts[1:]):
         direction = axis_snap(vec_sub(b, a))
@@ -1068,26 +1095,39 @@ def instantiate_stub(template: dict[str, Any], poc: tuple[float, float, float], 
     현재 구현은 template의 평균 rise와 dir_seq를 사용해 2~3점짜리 직교 Stub을 만든다.
     anchor AABB가 명시되면 face 판단 보정에 사용하고, 없으면 template face를 그대로 따른다.
     """
+    # [1] 앵커(설비박스)를 이용한 진출/진입 면(Face)의 축 ID 결정
     if anchor:
         face_id = AXIS_NAMES.index(template["FACE"]) if template.get("FACE") in AXIS_NAMES else nearest_face(anchor, poc)[0]
     else:
-        face_id = AXIS_NAMES.index(template["FACE"]) if template.get("FACE") in AXIS_NAMES else 4
+        face_id = AXIS_NAMES.index(template["FACE"]) if template.get("FACE") in AXIS_NAMES else 4 # 기본값: +z
+        
+    # [2] 템플릿에 저장되어 있던 상대적 진행 방향 시퀀스 로드
     dirs = [AXIS_NAMES.index(x) for x in str(template.get("DIR_SEQ") or "").split(",") if x in AXIS_NAMES]
     if not dirs:
         dirs = [face_id]
+        
+    # [3] START(forward=True)이면 템플릿 방향 그대로 진행, END(forward=False)이면 역방향으로 180도 축 반전
     if not forward:
         dirs = [opposite_axis(d) for d in dirs]
+        
+    # [4] 라이즈 높이와 총 리드인 길이 결정
     rise = float_or_zero(template.get("AVG_RISE_MM"))
     length = float_or_zero(template.get("AVG_STUB_LENGTH_MM")) or STUB_LEADIN_MM
-    lead = min(STUB_LEADIN_MM, max(0.0, length - rise))
+    lead = min(STUB_LEADIN_MM, max(0.0, length - rise)) # 라이즈를 제하고 수평 rack으로 도달하는 남은 길이
+    
+    # [5] 3D 월드 좌표 점열 생성 시작 (기점 PoC부터 차례대로 방향축으로 선분 추가)
     pts = [poc]
     cur = poc
+    # 첫 번째 진행: 앵커 면 법선 방향(dirs[0])으로 라이즈 길이만큼 연장
     first = dirs[0]
     cur = add_axis(cur, first, rise if rise > 0 else min(length, STUB_LEADIN_MM))
     pts.append(cur)
+    
+    # 두 번째 진행: 엘보 절곡 후 다음 진행 방향(dirs[1])으로 남은 길이만큼 연장
     if len(dirs) > 1 and lead > 0:
         cur = add_axis(cur, dirs[1], lead)
         pts.append(cur)
+        
     return {
         "template_id": template.get("TEMPLATE_ID"),
         "stub_kind": template.get("STUB_KIND"),
@@ -1095,7 +1135,7 @@ def instantiate_stub(template: dict[str, Any], poc: tuple[float, float, float], 
         "face": template.get("FACE"),
         "dir_seq": template.get("DIR_SEQ"),
         "points": pts,
-        "free_point": pts[-1],
+        "free_point": pts[-1], # 최종적으로 중간 오토라우터가 바인딩하여 연결할 접속자유점(Free Point)
         "score": float(template.get("SAMPLE_COUNT") or 1),
     }
 
@@ -1116,6 +1156,8 @@ def validate_existing_route(conn, args) -> dict[str, Any]:
     end_anchors = fetch_anchors(conn, "DUCT") + fetch_anchors(conn, "LATERAL")
     start_anchor = find_anchor(equip_anchors, route.source_pos, route.equipment_name, None) if route.source_pos else None
     end_anchor = find_anchor(end_anchors, route.target_pos, None, route.utility) if route.target_pos else None
+    if route.target_pos and not end_anchor:
+        end_anchor = find_anchor(equip_anchors, route.target_pos, None, route.utility)
     start = make_sample(route, "START", start_anchor) if start_anchor else None
     end = make_sample(route, "END", end_anchor) if end_anchor else None
     return {
@@ -1466,20 +1508,35 @@ def find_anchor(anchors: list[Anchor], p: tuple[float, float, float] | None, nam
     if not p:
         return None
     candidates = anchors
+    
+    # [1] 장비명 힌트(name_hint)가 주어진 경우 해당 장비명을 포함하는 앵커만 필터링
     if name_hint:
         filtered = [a for a in candidates if a.name and name_hint.lower() in str(a.name).lower()]
         if filtered:
             candidates = filtered
+            
+    # [2] 유틸리티 힌트(utility_hint)가 주어진 경우 동일 유틸리티 앵커만 필터링 (Fuzzy 매칭 포함: ACID <-> ACID(HOOD) 등)
     if utility_hint:
-        filtered = [a for a in candidates if a.utility == utility_hint]
+        filtered = [
+            a for a in candidates 
+            if a.utility and (
+                utility_hint.lower() in a.utility.lower() or 
+                a.utility.lower() in utility_hint.lower()
+            )
+        ]
         if filtered:
             candidates = filtered
+            
+    # [3] PoC 좌표가 앵커 바운딩 박스(AABB) 내부에 완전히 들어와 있는지 판정 (우선순위 1)
     inside = [a for a in candidates if point_in_aabb(p, a.min_pt, a.max_pt, margin=1.0)]
     if inside:
         return min(inside, key=lambda a: aabb_distance(p, a.min_pt, a.max_pt))
+        
+    # [4] 내부에 없는 경우, 3미터(ANCHOR_MAX_MM) 이내에 가장 가깝게 붙어있는 최단거리 앵커 선택 (우선순위 2)
     nearest = min(candidates, key=lambda a: aabb_distance(p, a.min_pt, a.max_pt), default=None)
     if nearest and aabb_distance(p, nearest.min_pt, nearest.max_pt) <= ANCHOR_MAX_MM:
         return nearest
+        
     return None
 
 

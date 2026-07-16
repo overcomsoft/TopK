@@ -396,7 +396,7 @@ def generate_viewer_html(groups: list[dict], equipments: list[dict], output_path
                 card.className = `p-3 rounded border border-slate-800 bg-slate-850 hover:bg-slate-800 cursor-pointer transition-all duration-150`;
                 card.innerHTML = `
                     <div class="flex justify-between items-center mb-1">
-                        <span class="text-xs font-mono font-bold text-cyan-400">Bundle_${{g.GROUP_ID.substring(0,8)}}</span>
+                        <span class="text-xs font-mono font-bold text-cyan-400">Bundle_${{g.GROUP_ID.substring(0,8)}} [${{g.UTILITY}}]</span>
                         <span class="text-[10px] bg-slate-900 border border-slate-700 px-1.5 py-0.5 rounded text-indigo-300 font-bold uppercase">${{g.PATTERN_SEQ}} Pattern</span>
                     </div>
                     <div class="grid grid-cols-2 gap-1 text-[11px] text-slate-400 mt-2">

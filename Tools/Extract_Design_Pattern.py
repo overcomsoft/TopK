@@ -836,6 +836,7 @@ class DesignFeatureLearner:
                 rp."SOURCE_SIZE",
                 rp."SOURCE_POSX", rp."SOURCE_POSY", rp."SOURCE_POSZ",
                 rp."TARGET_POSX", rp."TARGET_POSY", rp."TARGET_POSZ",
+                rp."PROJECT_SCOPE_KEY", rp."MODEL_REVISION_KEY",
                 sd."FROM_POSX", sd."FROM_POSY", sd."FROM_POSZ",
                 sd."TO_POSX", sd."TO_POSY", sd."TO_POSZ",
                 rs."ORDER" AS seg_order,
@@ -867,6 +868,8 @@ class DesignFeatureLearner:
                     'utility_group': r['UTILITY_GROUP'],
                     'size': r['SOURCE_SIZE'],
                     'source_pos': (float(r.get('SOURCE_POSX') or 0), float(r.get('SOURCE_POSY') or 0), float(r.get('SOURCE_POSZ') or 0))
+                    ,'project_scope_key': r.get('PROJECT_SCOPE_KEY')
+                    ,'model_revision_key': r.get('MODEL_REVISION_KEY')
                 }
 
         # 3D 폴리라인 재구성 (단편화 극복 오차 보정 스냅)
@@ -1518,9 +1521,10 @@ class DesignFeatureLearner:
                 "DIRECTION_PATTERN", "TOTAL_LENGTH_MM", "STEP_COUNT",
                 "START_POSX", "START_POSY", "START_POSZ",
                 "END_POSX", "END_POSY", "END_POSZ",
-                "FEATURE_VECTOR", "FEATURE_VECTOR_JSON"
+                "FEATURE_VECTOR", "FEATURE_VECTOR_JSON", "PROJECT_SCOPE_KEY", "MODEL_REVISION_KEY"
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s::jsonb)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s::vector, %s::jsonb, %s, %s)
             ON CONFLICT ("ROUTE_PATH_GUID")
             DO UPDATE SET
                 "PROCESS_NAME" = EXCLUDED."PROCESS_NAME",
@@ -1538,7 +1542,9 @@ class DesignFeatureLearner:
                 "END_POSY" = EXCLUDED."END_POSY",
                 "END_POSZ" = EXCLUDED."END_POSZ",
                 "FEATURE_VECTOR" = EXCLUDED."FEATURE_VECTOR",
-                "FEATURE_VECTOR_JSON" = EXCLUDED."FEATURE_VECTOR_JSON";
+                "FEATURE_VECTOR_JSON" = EXCLUDED."FEATURE_VECTOR_JSON",
+                "PROJECT_SCOPE_KEY" = EXCLUDED."PROJECT_SCOPE_KEY",
+                "MODEL_REVISION_KEY" = EXCLUDED."MODEL_REVISION_KEY";
         """
         
         # 30D 벡터 차원 정의
@@ -1740,7 +1746,9 @@ class DesignFeatureLearner:
                     p0[0], p0[1], p0[2],
                     pn[0], pn[1], pn[2],
                     vec_literal,
-                    json.dumps(vec)
+                    json.dumps(vec),
+                    meta.get('project_scope_key'),
+                    meta.get('model_revision_key')
                 ))
                 count += 1
         self.conn.commit()
