@@ -16,6 +16,19 @@ using RubberBandRouting.Engine;
 
 namespace RubberBandRouting.Viewer;
 
+/// <summary>
+/// 자동경로 Viewer의 메인 화면과 사용자 동작을 관리한다.
+///
+/// AutoRouteModule 연동 전체 흐름도:
+/// [AutoRoute A* 엔진 선택]
+/// → [ChkUseAutoRouteEngine_Changed: 엔진 선택 상호 배제]
+/// → [ReRouteCurrentAsync: 현재 검색 범위 재실행]
+/// → [ResolveEngine: AutoRouteModuleEngine 생성]
+/// → [ComputeRoutes: 태스크별 장애물·특징점·옵션 구성]
+/// → [AutoRouteModuleEngine.Route: 3차원 A* 탐색]
+/// → [ResultRow 및 결과 그리드 갱신]
+/// → [RedrawAutoRoutes: 3D 경로 렌더링]
+/// </summary>
 public partial class MainWindow : Window
 {
     private readonly List<Visual3D> _areaVisuals = new();
@@ -48,6 +61,11 @@ public partial class MainWindow : Window
     private List<TaskRow> _allTaskRows = new();
     private List<TaskRow> _visibleTaskRows = new();
     private bool _loadedInitialScene;
+    /// <summary>
+    /// 체크박스를 코드로 해제할 때 엔진 변경 이벤트가 서로 재호출되는 것을 막는 상태값.
+    /// true이면 Checked/Unchecked 이벤트에서 아무 작업도 수행하지 않는다.
+    /// </summary>
+    private bool _changingEngineSelection;
     private int _frameCount;
     private static readonly Color[] ExistingRouteGroupColors =
     {
@@ -1037,7 +1055,8 @@ public partial class MainWindow : Window
         var options = ReadOptions();
         var baseObstacles = _scene.CollisionObstacles.ToList();
         var snapshot = rows.Take(max).ToList();
-        var engine = ResolveEngine(); // captured on UI thread; checkbox state isn't safe to read from Task.Run
+        // 백그라운드 Task에서는 WPF 컨트롤을 읽을 수 없으므로 UI 스레드에서 엔진을 먼저 확정한다.
+        var engine = ResolveEngine();
 
         await RunBusyAsync($"{scope} 라우팅 중...", async () =>
         {
@@ -1058,15 +1077,25 @@ public partial class MainWindow : Window
             if (_resultRows.Count > 0) GridResults.SelectedIndex = 0;
             RedrawAutoRoutes(GridResults.SelectedItem as ResultRow);
             var truncated = rows.Count > max ? $" | ⚠ 상한 {max}개 적용, {rows.Count - max}개 생략" : string.Empty;
-            var engineLabel = engine is NativeRubberBandEngine ? "네이티브(C++)" : "관리형(C#)";
+            var engineLabel = engine switch
+            {
+                AutoRouteModuleEngine => "AutoRoute A*(C#)",
+                NativeRubberBandEngine => "네이티브(C++)",
+                _ => "관리형(C#)"
+            };
             var logLabel = engine is ManagedRubberBandEngine ? " (디버그 로그가 Docs/RubberBandRouting_DebugTrace.log에 기록됨)" : "";
             TxtStatus.Text = $"자동설계 완료: {max}/{rows.Count}건, {totalSw.Elapsed.TotalMilliseconds:N0} ms 소요. [{engineLabel}]{truncated}{logLabel}";
             UpdateVisibleObjectText();
         });
     }
 
+    /// <summary>
+    /// 화면의 체크 상태를 공통 경로 엔진 구현체로 변환한다.
+    /// 우선순위는 AutoRouteModule → 네이티브 C++ → 관리형 C# 순서다.
+    /// </summary>
     private IRubberBandEngine ResolveEngine()
     {
+        if (ChkUseAutoRouteEngine.IsChecked == true) return new AutoRouteModuleEngine();
         if (ChkUseNativeEngine.IsChecked == true && NativeRubberBandEngine.IsAvailable) return new NativeRubberBandEngine();
         return new ManagedRubberBandEngine();
     }
@@ -2273,9 +2302,23 @@ public partial class MainWindow : Window
 
     private void LayerToggle_Changed(object sender, RoutedEventArgs e) => ApplyLayerVisibility();
 
+    /// <summary>
+    /// 네이티브 엔진 선택 변경을 처리한다. AutoRoute 엔진과 동시 선택되지 않도록 하고
+    /// DLL 사용 가능 여부를 확인한 뒤 현재 범위의 경로를 다시 계산한다.
+    /// </summary>
     private async void ChkUseNativeEngine_Changed(object sender, RoutedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _changingEngineSelection) return;
+        _changingEngineSelection = true;
+        try
+        {
+            if (ChkUseNativeEngine.IsChecked == true)
+                ChkUseAutoRouteEngine.IsChecked = false;
+        }
+        finally
+        {
+            _changingEngineSelection = false;
+        }
         if (ChkUseNativeEngine.IsChecked == true && !NativeRubberBandEngine.IsAvailable)
         {
             ChkUseNativeEngine.IsChecked = false;
@@ -2283,6 +2326,31 @@ public partial class MainWindow : Window
             return;
         }
         TxtStatus.Text = ChkUseNativeEngine.IsChecked == true ? "네이티브 C++ 엔진을 사용합니다." : "관리형(C#) 엔진을 사용합니다.";
+        await ReRouteCurrentAsync();
+    }
+
+    /// <summary>
+    /// AutoRouteModule 엔진 선택 변경을 처리한다. 네이티브 엔진 선택을 해제하고
+    /// 현재 그룹 또는 유틸리티 경로를 AutoRouteModule로 다시 계산한다.
+    /// </summary>
+    private async void ChkUseAutoRouteEngine_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded || _changingEngineSelection) return;
+        _changingEngineSelection = true;
+        try
+        {
+            if (ChkUseAutoRouteEngine.IsChecked == true)
+                ChkUseNativeEngine.IsChecked = false;
+        }
+        finally
+        {
+            _changingEngineSelection = false;
+        }
+        TxtStatus.Text = ChkUseAutoRouteEngine.IsChecked == true
+            ? "AutoRouteModule 3D voxel A* 엔진을 사용합니다."
+            : ChkUseNativeEngine.IsChecked == true
+                ? "네이티브 C++ 엔진을 사용합니다."
+                : "관리형 C# 엔진을 사용합니다.";
         await ReRouteCurrentAsync();
     }
 

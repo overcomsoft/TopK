@@ -1,0 +1,77 @@
+<Window x:Class="TopK.ThreeDViewer.FeatureGenerationDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="특징점생성" Height="720" Width="960"
+        MinHeight="520" MinWidth="760" WindowStartupLocation="CenterOwner"
+        Background="#EEF2F7">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="220" />
+            <RowDefinition Height="5" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,6">
+            <TextBlock Text="Top-K 특징점·패턴 생성" FontSize="16" FontWeight="SemiBold"
+                       Foreground="#1E3A5F" VerticalAlignment="Center" />
+            <Button x:Name="BtnRefreshScope" Content="ACTIVE scope 새로고침" DockPanel.Dock="Right"
+                    HorizontalAlignment="Right" Click="RefreshScope_Click" />
+        </DockPanel>
+
+        <TextBlock x:Name="TxtActiveScope" Grid.Row="1" Text="ACTIVE scope: 확인 중..."
+                   Foreground="#53657A" Margin="0,0,0,6" />
+
+        <Border Grid.Row="2" Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <DockPanel Grid.Row="0" Margin="6,4">
+                    <TextBlock Text="생성기 목록 (의존 순서대로 표시)" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <Button x:Name="BtnRunAll" Content="전체 순서대로 실행" DockPanel.Dock="Right"
+                            HorizontalAlignment="Right" Background="#1565C0" Foreground="White"
+                            Click="RunAll_Click" />
+                </DockPanel>
+                <DataGrid x:Name="GridGenerators" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowHeight="34"
+                          CanUserAddRows="False" CanUserSortColumns="False">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="#" Binding="{Binding Order}" Width="30" />
+                        <DataGridTextColumn Header="이름" Binding="{Binding DisplayName}" Width="*" />
+                        <DataGridTextColumn Header="대상 테이블" Binding="{Binding TargetTable}" Width="220" />
+                        <DataGridTextColumn Header="상태" Binding="{Binding Status}" Width="80" />
+                        <DataGridTextColumn Header="마지막 실행" Binding="{Binding LastRun}" Width="150" />
+                        <DataGridTemplateColumn Header="" Width="90">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Button Content="생성" Click="RunOne_Click" Tag="{Binding}"
+                                            IsEnabled="{Binding CanRun}" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </Border>
+
+        <GridSplitter Grid.Row="3" HorizontalAlignment="Stretch" Background="#C8D0DA" />
+
+        <Border Grid.Row="4" Background="#FF1E1E1E" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+            <TextBox x:Name="TxtLog" IsReadOnly="True" TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                     FontFamily="Consolas" FontSize="12" Background="#FF1E1E1E" Foreground="#FFD4D4D4"
+                     BorderThickness="0" Padding="6" />
+        </Border>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0">
+            <Button x:Name="BtnSaveLog" Content="로그 저장" Click="SaveLog_Click" />
+            <Button x:Name="BtnClearLog" Content="로그 지우기" Click="ClearLog_Click" />
+            <Button x:Name="BtnCancel" Content="취소" IsEnabled="False" Click="Cancel_Click" />
+            <Button x:Name="BtnClose" Content="닫기" Click="Close_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

@@ -18,7 +18,16 @@
       "Bash(python -m py_compile Tools/ExportGroupPattern.py Tools/AnalyzeCustomGroup.py)",
       "Bash(PGPASSWORD=dinno psql -h localhost -p 5432 -U postgres -d DDW_AI_DB -c \"\\\\d \\\\\"TB_ROUTE_GROUP_PATTERN\\\\\"\")",
       "Bash(python Tools/ExportGroupPattern.py --help)",
-      "Bash(python Tools/ExportGroupPattern.py --password dinno --host localhost --port 5432 --dbname DDW_AI_DB --user postgres extract)"
+      "Bash(python Tools/ExportGroupPattern.py --password dinno --host localhost --port 5432 --dbname DDW_AI_DB --user postgres extract)",
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile Tools/geometry_ip_restore.py Tools/ExtractBendFeaturePoints.py Tools/tests/bend_feature_point_tests.py)",
+      "Bash(../.venv/Scripts/python.exe -m unittest tests.bend_feature_point_tests -v)",
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile Tools/ExtractBendFeaturePoints.py)",
+      "Bash(../.venv/Scripts/python.exe -m unittest tests.bend_feature_point_tests)",
+      "Bash(../.venv/Scripts/python.exe -m py_compile ExtractBendFeaturePoints.py)",
+      "Bash(awk 'NR==4{print length\\($0\\)} NR==7{print length\\($0\\)} NR==8{print length\\($0\\)}' Docs/BendFeaturePoint_Development_Plan.md)",
+      "mcp__claude_ai_Google_Drive__create_file",
+      "Bash(dotnet --version)",
+      "Bash(dotnet run *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\overcom\\AppData\\Local\\Temp\\claude\\d--DINNO-DEV-AI-AutoRouting-TopKGen\\2748fd6f-0cfc-42ca-8c02-fc6713c99b6e\\scratchpad"

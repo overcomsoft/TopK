@@ -75,18 +75,26 @@ Stub sample을 그룹화한 재사용 template 저장 테이블이다.
 
 ## 4. 추출 알고리즘
 
-PDF 문서의 규칙을 반영해 다음 순서로 처리한다.
+> **2026-07 갱신**: Stub 경계(어디까지가 stub이고 어디부터 trunk인지) 판정은 더 이상 이 스크립트가
+> 자체적으로 재구현하지 않는다. `PathSegmenter.segment_route()`를 그대로 재사용해
+> `ExtractBendFeaturePoints.py`와 동일한 정의를 쓴다 — 자세한 배경은
+> `Docs/FeaturePattern_Pipeline_Overlap_Review.md` 3.3절 참고. 아래 6~9번 항목(250mm run
+> 흡수, 800mm/4000mm 상한)은 초기 설계 문서(PDF)의 규칙이었고 실제로는 `walk_stub()`이 이를
+> 구현하지 않은 채 `PathSegmenter`와 사실상 동일한 50mm 임계값 로직을 별도로 복제하고 있었다 —
+> 이번 리팩터링으로 그 복제를 제거했다. `STUB_MIN_DIR_RUN_MM`/`STUB_MAX_MM` 상수와
+> `dir_runs`/`merge_short_runs` 함수는 추출 경로에서 쓰이지 않는 미사용 코드로 남아 있다
+> (`STUB_LEADIN_MM`만 `make-stub`의 신규 stub 인스턴스화에 쓰인다 — 8절 참고).
 
-1. `ROUTE_PATH_GUID`별로 segment/detail 좌표를 읽어 폴리라인을 복원한다.
-2. Start Stub은 `SOURCE_POS`가 앞에 오도록 정렬한다.
-3. End Stub은 `TARGET_POS`가 앞에 오도록 역방향 정렬한다.
-4. 각 세그먼트 방향을 6축 `+x,-x,+y,-y,+z,-z` 중 하나로 스냅한다.
-5. 연속 동일 방향을 run으로 압축한다.
-6. `250mm` 미만 run은 설계 지터로 보고 인접 run에 흡수한다.
-7. 첫 run의 축을 수직축으로 보고, 축이 달라지는 첫 run을 엘보로 판단한다.
-8. Stub 길이는 `수직 run + min(첫 엘보 run, 800mm)`로 자른다.
-9. 전체 Stub 길이는 최대 `4000mm`로 제한한다.
-10. Anchor AABB 기준 face, rise, offset, 24D feature, 3D direction unit을 계산한다.
+현재 처리 순서:
+
+1. `ROUTE_PATH_GUID`별로 segment/detail 좌표를 읽어 폴리라인을 복원한다(ELBOW IP 복원 포함).
+2. route 전체를 `SOURCE_POS`가 앞(`points[0]`)에 오도록 한 번만 정렬한다(`orient_points`).
+3. `PathSegmenter.segment_route()`를 1회 호출해 Start Stub(CSF 평면 Z=13700mm 인식 포함)과
+   End Stub(역방향 첫 엘보 스캔)을 동시에 얻는다 — route 하나당 계산은 한 번뿐이며 Start/End
+   샘플이 이 결과를 나눠 쓴다.
+4. Start Stub은 그대로, End Stub은 PoC(`TARGET_POS`)가 앞에 오도록 뒤집어서 사용한다.
+5. 잘라낸 stub 점열의 방향열(dir_seq, 최대 4개)을 6축 `+x,-x,+y,-y,+z,-z` 스냅으로 만든다.
+6. Anchor AABB 기준 face, rise, offset, 24D feature, 3D direction unit을 계산한다.
 
 ## 5. 실행 예시
 

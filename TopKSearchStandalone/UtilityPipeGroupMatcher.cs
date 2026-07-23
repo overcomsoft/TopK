@@ -7,6 +7,15 @@ namespace RoutingAI.Standalone;
 public static class UtilityPipeGroupMatcher
 {
     private const double RelativeDistanceMaxMm = 50_000.0;
+
+    /// <summary>bendFeature 데이터가 있을 때 Pattern 내부 3분할 비중. 합계 1.0.</summary>
+    private static class BendFeatureShare
+    {
+        public const double Structural = 0.34;
+        public const double CoarseBend = 0.33;
+        public const double BendFeature = 0.33;
+    }
+
     private static readonly double[] StandardNominalSizes =
     [6, 8, 10, 15, 20, 25, 32, 40, 50, 65, 80, 100, 125, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000];
 
@@ -30,7 +39,18 @@ public static class UtilityPipeGroupMatcher
         var bend = query.FeatureVector.Length >= 21 && candidate.FeatureVector.Length >= 21
             ? Clamp01(Cosine(query.FeatureVector.AsSpan(12, 9), candidate.FeatureVector.AsSpan(12, 9)))
             : 0.0;
-        var pattern = patternAvailable ? 0.5 * structural + 0.5 * bend : 0.0;
+        // TB_ROUTE_BEND_FEATURE_POINT(원인 분류가 붙은 개별 꺾임점)이 두 멤버 모두에 존재하면,
+        // Feature[12:20] coarse cosine보다 정밀한 cause-aware 시퀀스 매칭을 Pattern에 섞는다.
+        // 없는 멤버(과거 build 미실행 등)는 기존 structural/bend 50:50 배합으로 그대로 fallback한다.
+        var bendFeatureAvailable = query.BendPoints.Count > 0 && candidate.BendPoints.Count > 0;
+        var bendFeature = bendFeatureAvailable
+            ? BendFeatureMatch(query.BendPoints, candidate.BendPoints)
+            : 0.0;
+        var pattern = !patternAvailable
+            ? 0.0
+            : bendFeatureAvailable
+                ? BendFeatureShare.Structural * structural + BendFeatureShare.CoarseBend * bend + BendFeatureShare.BendFeature * bendFeature
+                : 0.5 * structural + 0.5 * bend;
         var feature = Clamp01(Cosine(query.FeatureVector, candidate.FeatureVector));
         var contextAvailable = query.ContextVector is not null && candidate.ContextVector is not null;
         var context = contextAvailable
@@ -276,6 +296,44 @@ public static class UtilityPipeGroupMatcher
             previous = current;
         }
         return Clamp01(1.0 - (double)previous[b.Length] / Math.Max(a.Length, b.Length));
+    }
+
+    /// <summary>두 멤버의 개별 꺾임점 시퀀스(ordinal 순)를 가중 편집거리로 비교한다.
+    /// 위치(zone)·꺾임유형(transition)·원인(cause)이 모두 같으면 대체비용 0, zone+transition만
+    /// 같으면 0.4, transition만 같으면 0.7, 전혀 다르면 1.0(=삽입/삭제와 동일)을 적용해
+    /// "형상은 비슷한데 원인이 다른" 경우를 완전 불일치보다는 가깝게, 완전 일치보다는 멀게 평가한다.</summary>
+    internal static double BendFeatureMatch(
+        IReadOnlyList<BendFeaturePointSummary> left, IReadOnlyList<BendFeaturePointSummary> right)
+    {
+        if (left.Count == 0 || right.Count == 0) return 0.0;
+        var previous = new double[right.Count + 1];
+        for (var j = 0; j <= right.Count; j++) previous[j] = j;
+        for (var i = 1; i <= left.Count; i++)
+        {
+            var current = new double[right.Count + 1];
+            current[0] = i;
+            for (var j = 1; j <= right.Count; j++)
+            {
+                var substitution = previous[j - 1] + BendPointSubstitutionCost(left[i - 1], right[j - 1]);
+                var deletion = previous[j] + 1.0;
+                var insertion = current[j - 1] + 1.0;
+                current[j] = Math.Min(substitution, Math.Min(deletion, insertion));
+            }
+            previous = current;
+        }
+        var distance = previous[right.Count];
+        return Clamp01(1.0 - distance / Math.Max(left.Count, right.Count));
+    }
+
+    private static double BendPointSubstitutionCost(BendFeaturePointSummary left, BendFeaturePointSummary right)
+    {
+        var zoneMatch = string.Equals(left.SegmentZone, right.SegmentZone, StringComparison.OrdinalIgnoreCase);
+        var transitionMatch = string.Equals(left.TransitionType, right.TransitionType, StringComparison.OrdinalIgnoreCase);
+        var causeMatch = string.Equals(left.Cause, right.Cause, StringComparison.OrdinalIgnoreCase);
+        if (zoneMatch && transitionMatch && causeMatch) return 0.0;
+        if (zoneMatch && transitionMatch) return 0.4;
+        if (transitionMatch) return 0.7;
+        return 1.0;
     }
 
     private static string[] CompressPattern(string pattern)

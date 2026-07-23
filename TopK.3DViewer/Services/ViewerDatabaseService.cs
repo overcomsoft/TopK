@@ -322,6 +322,156 @@ public sealed class ViewerDatabaseService
         return result;
     }
 
+    /// <summary>
+    /// Tools/ExtractBendFeaturePoints.py가 TB_ROUTE_BEND_FEATURE_POINT에 적재한 개별 꺾임점을
+    /// route GUID 목록으로 일괄 조회한다. 이 테이블은 build를 아직 실행하지 않은 환경에서는
+    /// 존재하지 않을 수 있으므로(42P01), 그 경우 빈 목록으로 조용히 fallback한다 — 이 도구는
+    /// 어디까지나 보조 시각화이며 없다고 해서 기존 Top-K/그룹 비교 화면이 막혀서는 안 된다.
+    /// </summary>
+    public async Task<IReadOnlyList<BendFeatureMarker>> LoadBendFeaturePointsAsync(IEnumerable<string> routeGuids)
+    {
+        var guids = routeGuids.Select(x => x.Trim()).Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var result = new List<BendFeatureMarker>();
+        if (guids.Length == 0) return result;
+        const string sql = """
+            SELECT TRIM("ROUTE_PATH_GUID"),"CAUSE","TRANSITION_TYPE","SEGMENT_ZONE",
+                   ST_X("POINT_3D"),ST_Y("POINT_3D"),ST_Z("POINT_3D")
+            FROM "TB_ROUTE_BEND_FEATURE_POINT"
+            WHERE TRIM("ROUTE_PATH_GUID") = ANY(@guids)
+            """;
+        try
+        {
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("guids", guids);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                result.Add(new BendFeatureMarker(
+                    Text(reader, 0), Text(reader, 1), Text(reader, 2), Text(reader, 3),
+                    new Point3D(Number(reader, 4), Number(reader, 5), Number(reader, 6))));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42P01")
+        {
+            // TB_ROUTE_BEND_FEATURE_POINT가 아직 create-schema/build되지 않은 환경.
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Tools/PathSegmenter.py가 TB_ROUTE_PATH_SEGMENTATION에 적재한 Start Stub/Middle Trunk/
+    /// End Stub 3구간 지오메트리를 route GUID 목록으로 일괄 조회한다. ST_DumpPoints로 지오메트리를
+    /// SQL에서 점열로 풀어내므로 C# 쪽에 WKT 파서가 필요 없다. Bend Feature Point와 동일하게
+    /// build 미실행 환경(42P01)에서는 조용히 빈 결과로 fallback한다 — 선택 route 오버레이일 뿐
+    /// 이 데이터가 없다고 기존 화면이 막혀서는 안 된다.
+    /// </summary>
+    public async Task<IReadOnlyList<PathSegmentGeometry>> LoadPathSegmentationBatchAsync(IEnumerable<string> routeGuids)
+    {
+        var guids = routeGuids.Select(x => x.Trim()).Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var result = new List<PathSegmentGeometry>();
+        if (guids.Length == 0) return result;
+        const string sql = """
+            SELECT TRIM("ROUTE_PATH_GUID"),'START' AS kind,(dump).path[1] AS point_idx,
+                   ST_X((dump).geom),ST_Y((dump).geom),ST_Z((dump).geom)
+              FROM (SELECT "ROUTE_PATH_GUID", ST_DumpPoints("START_STUB_GEOM") AS dump
+                      FROM "TB_ROUTE_PATH_SEGMENTATION" WHERE TRIM("ROUTE_PATH_GUID")=ANY(@guids)) t
+            UNION ALL
+            SELECT TRIM("ROUTE_PATH_GUID"),'MIDDLE',(dump).path[1],
+                   ST_X((dump).geom),ST_Y((dump).geom),ST_Z((dump).geom)
+              FROM (SELECT "ROUTE_PATH_GUID", ST_DumpPoints("MIDDLE_TRUNK_GEOM") AS dump
+                      FROM "TB_ROUTE_PATH_SEGMENTATION" WHERE TRIM("ROUTE_PATH_GUID")=ANY(@guids)) t
+            UNION ALL
+            SELECT TRIM("ROUTE_PATH_GUID"),'END',(dump).path[1],
+                   ST_X((dump).geom),ST_Y((dump).geom),ST_Z((dump).geom)
+              FROM (SELECT "ROUTE_PATH_GUID", ST_DumpPoints("END_STUB_GEOM") AS dump
+                      FROM "TB_ROUTE_PATH_SEGMENTATION" WHERE TRIM("ROUTE_PATH_GUID")=ANY(@guids)) t
+             ORDER BY 1,2,3
+            """;
+        try
+        {
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("guids", guids);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            var byGuid = new Dictionary<string, (List<Point3D> Start, List<Point3D> Middle, List<Point3D> End)>(
+                StringComparer.OrdinalIgnoreCase);
+            while (await reader.ReadAsync())
+            {
+                var guid = Text(reader, 0);
+                var kind = Text(reader, 1);
+                if (!byGuid.TryGetValue(guid, out var lists))
+                    byGuid[guid] = lists = ([], [], []);
+                var point = Point(reader, 3);
+                switch (kind)
+                {
+                    case "START": lists.Start.Add(point); break;
+                    case "MIDDLE": lists.Middle.Add(point); break;
+                    default: lists.End.Add(point); break;
+                }
+            }
+            foreach (var (guid, lists) in byGuid)
+                result.Add(new PathSegmentGeometry(guid, lists.Start, lists.Middle, lists.End));
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42P01")
+        {
+            // TB_ROUTE_PATH_SEGMENTATION이 아직 create-schema/build되지 않은 환경.
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// TB_ROUTE_PATH의 시작 PoC(메인장비, EQUIPMENT_NAME)/종단 PoC(TARGET_OWNER_NAME) 정보를
+    /// route GUID 목록으로 일괄 조회한다. 종단 객체 이름은 TB_EQUIPMENTS/TB_DUCT/TB_LATERAL_PIPE와
+    /// 대조해 메인장비/부대장비/덕트/레터럴배관으로 분류한다 — AutoRouteFinder/ObstacleDbLoader.cs와
+    /// RubberBandRoutingSuite의 씬 로더가 이미 같은 세 테이블을 항상 존재하는 것으로 전제하고 읽으므로
+    /// (TB_BIM_OBSTACLE과 동급의 핵심 테이블), 이 함수도 42P01에 대한 방어적 fallback을 두지 않는다.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, RouteEndpointInfo>> LoadRouteEndpointsBatchAsync(
+        IEnumerable<string> routeGuids)
+    {
+        var guids = routeGuids.Select(x => x.Trim()).Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var result = new Dictionary<string, RouteEndpointInfo>(StringComparer.OrdinalIgnoreCase);
+        if (guids.Length == 0) return result;
+
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+        var columns = await LoadColumnsAsync(conn, "TB_ROUTE_PATH");
+        var equipmentColumn = Pick(columns, "EQUIPMENT_NAME", "SOURCE_OWNER_NAME", "EQUIPMENT_TAG");
+
+        var sql = $"""
+            SELECT TRIM(rp."ROUTE_PATH_GUID"), {TextExpression(equipmentColumn)},
+                   COALESCE(TRIM(rp."TARGET_OWNER_NAME"), ''),
+                   CASE
+                       WHEN eq."INSTANCE_NAME" IS NOT NULL
+                            AND UPPER(COALESCE(eq."MAIN_SUB_TYPE", '')) = 'MAINTOOL' THEN 'MAIN_EQUIPMENT'
+                       WHEN eq."INSTANCE_NAME" IS NOT NULL THEN 'AUX_EQUIPMENT'
+                       WHEN du."INSTANCE_NAME" IS NOT NULL THEN 'DUCT'
+                       WHEN lp."INSTANCE_NAME" IS NOT NULL THEN 'LATERAL'
+                       ELSE ''
+                   END
+            FROM "TB_ROUTE_PATH" rp
+            LEFT JOIN "TB_EQUIPMENTS"  eq ON TRIM(eq."INSTANCE_NAME") = TRIM(rp."TARGET_OWNER_NAME")
+            LEFT JOIN "TB_DUCT"        du ON TRIM(du."INSTANCE_NAME") = TRIM(rp."TARGET_OWNER_NAME")
+            LEFT JOIN "TB_LATERAL_PIPE" lp ON TRIM(lp."INSTANCE_NAME") = TRIM(rp."TARGET_OWNER_NAME")
+            WHERE TRIM(rp."ROUTE_PATH_GUID") = ANY(@guids)
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("guids", guids);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var guid = Text(reader, 0);
+            result[guid] = new RouteEndpointInfo(Text(reader, 1), Text(reader, 2), Text(reader, 3));
+        }
+        return result;
+    }
+
     private async Task<List<Point3D>> TryLoadPointsAsync(string sql, string routeGuid)
     {
         try

@@ -27,28 +27,39 @@ public partial class MainWindow : Window
 
     private readonly ObservableCollection<TopKRouteItem> _routes = [];
     private readonly ObservableCollection<TopKGroupItem> _groupRoutes = [];
+    private readonly ObservableCollection<GroupPatternResultItem> _groupPatternResults = [];
+    private readonly ObservableCollection<StubPatternResultItem> _stubPatternResults = [];
     private ViewerSettings _settings = new();
     private ViewerDatabaseService? _database;
     private Point3D _queryStart;
     private Point3D _queryEnd;
     private bool _suppressSelectionRefresh;
     private List<Point3D> _presetRoutePoints = [];
+    private string _presetRouteGuid = "";
     private UtilityPipeGroupDescriptor? _queryGroup;
     private readonly Dictionary<string, List<Point3D>> _queryGroupPoints =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _queryReconstructedRouteGuids =
         new(StringComparer.OrdinalIgnoreCase);
+    private GroupPatternDescriptor? _queryGroupPattern;
+    private StubPatternDescriptor? _queryStubPattern;
+    private List<Point3D> _activePatternScenePoints = [];
     private string _lastWeightProfile = "";
+    private FeatureGenerationDialog? _featureGenerationDialog;
 
     // InitializeComponent가 XAML을 위에서 아래로 생성하는 동안 상단 CheckBox 이벤트가 먼저
     // 발생할 수 있다. 이 시점에는 RdoGroupMode가 아직 null이므로 개별 모드를 기본값으로 본다.
     private bool IsGroupMode => RdoGroupMode?.IsChecked == true;
+    private bool IsGroupPatternMode => RdoGroupPatternMode?.IsChecked == true;
+    private bool IsStubPatternMode => RdoStubPatternMode?.IsChecked == true;
 
     public MainWindow()
     {
         InitializeComponent();
         GridResults.ItemsSource = _routes;
         GridGroupResults.ItemsSource = _groupRoutes;
+        GridGroupPatternResults.ItemsSource = _groupPatternResults;
+        GridStubPatternResults.ItemsSource = _stubPatternResults;
         Loaded += MainWindow_Loaded;
     }
 
@@ -75,6 +86,9 @@ public partial class MainWindow : Window
         TxtGroupArrangementWeight.Text = _settings.GroupArrangementWeight.ToString("G6", CultureInfo.InvariantCulture);
         ChkShowUnmatchedGroupMembers.IsChecked = _settings.ShowUnmatchedGroupMembers;
         ApplySearchModeUi();
+        LegendObstacles.Visibility = ChkShowObstacles.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        LegendBendFeature.Visibility = ChkShowBendFeatures.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        LegendPathSegment.Visibility = ChkShowPathSegments.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         _settings.Save(); // 파일이 없으면 초기 viewer.settings.json을 생성한다.
         TxtStatus.Text = $"DB 연결 및 조건 로드를 실행하세요. 설정: {_settings.SettingsFilePath}";
     }
@@ -90,7 +104,9 @@ public partial class MainWindow : Window
             var catalogTask = _database.LoadFilterCatalogAsync();
             var presetsTask = _database.LoadPresetsAsync();
             var groupPresetsTask = UtilityPipeGroupSearch.FetchPresetsAsync(_settings.ToDbConfig(), limit: 1000);
-            await Task.WhenAll(catalogTask, presetsTask, groupPresetsTask);
+            var groupPatternPresetsTask = GroupPatternSearch.FetchPresetsAsync(_settings.ToDbConfig(), limit: 1000);
+            var stubPatternPresetsTask = StubPatternSearch.FetchPresetsAsync(_settings.ToDbConfig(), limit: 1000);
+            await Task.WhenAll(catalogTask, presetsTask, groupPresetsTask, groupPatternPresetsTask, stubPatternPresetsTask);
 
             SetCombo(CmbProcess, catalogTask.Result.Processes);
             SetCombo(CmbEquipment, catalogTask.Result.Equipments);
@@ -99,8 +115,12 @@ public partial class MainWindow : Window
             SetCombo(CmbSize, catalogTask.Result.Sizes);
             CmbPreset.ItemsSource = presetsTask.Result;
             CmbGroupPreset.ItemsSource = groupPresetsTask.Result;
+            CmbGroupPatternPreset.ItemsSource = groupPatternPresetsTask.Result;
+            CmbStubPatternPreset.ItemsSource = stubPatternPresetsTask.Result;
             TxtStatus.Text = $"연결 성공: {connection}, 개별 프리셋 {presetsTask.Result.Count:N0}건, " +
-                             $"그룹 프리셋 {groupPresetsTask.Result.Count:N0}건";
+                             $"그룹 프리셋 {groupPresetsTask.Result.Count:N0}건, " +
+                             $"다발배관 패턴 {groupPatternPresetsTask.Result.Count:N0}건, " +
+                             $"Stub 패턴 {stubPatternPresetsTask.Result.Count:N0}건";
         });
     }
 
@@ -108,24 +128,41 @@ public partial class MainWindow : Window
     {
         if (!IsLoaded) return;
         ApplySearchModeUi();
-        SaveUiSettings(IsGroupMode ? "Utility 배관 그룹 검색 모드로 변경했습니다." : "개별 배관 검색 모드로 변경했습니다.");
+        var modeLabel = IsGroupMode ? "Utility 배관 그룹"
+            : IsGroupPatternMode ? "다발배관 패턴"
+            : IsStubPatternMode ? "Stub 패턴"
+            : "개별 배관";
+        SaveUiSettings($"{modeLabel} 검색 모드로 변경했습니다.");
     }
 
     private void ApplySearchModeUi()
     {
         if (GrpRoutePreset is null) return;
-        GrpRoutePreset.Visibility = IsGroupMode ? Visibility.Collapsed : Visibility.Visible;
+        var isPatternMode = IsGroupPatternMode || IsStubPatternMode;
+        GrpRoutePreset.Visibility = !IsGroupMode && !isPatternMode ? Visibility.Visible : Visibility.Collapsed;
         GrpGroupPreset.Visibility = IsGroupMode ? Visibility.Visible : Visibility.Collapsed;
-        GrpCoordinates.Visibility = IsGroupMode ? Visibility.Collapsed : Visibility.Visible;
+        GrpGroupPatternPreset.Visibility = IsGroupPatternMode ? Visibility.Visible : Visibility.Collapsed;
+        GrpStubPatternPreset.Visibility = IsStubPatternMode ? Visibility.Visible : Visibility.Collapsed;
+        GrpCoordinates.Visibility = !IsGroupMode && !isPatternMode ? Visibility.Visible : Visibility.Collapsed;
         GrpGroupOptions.Visibility = IsGroupMode ? Visibility.Visible : Visibility.Collapsed;
+        GrpFilters.Visibility = isPatternMode ? Visibility.Collapsed : Visibility.Visible;
+        GrpWeights.Visibility = isPatternMode ? Visibility.Collapsed : Visibility.Visible;
         CmbSize.IsEnabled = !IsGroupMode;
         TxtPattern.IsEnabled = !IsGroupMode;
         LblSize.IsEnabled = !IsGroupMode;
         LblPattern.IsEnabled = !IsGroupMode;
-        GridResults.Visibility = IsGroupMode ? Visibility.Collapsed : Visibility.Visible;
+        GridResults.Visibility = !IsGroupMode && !isPatternMode ? Visibility.Visible : Visibility.Collapsed;
         GridGroupResults.Visibility = IsGroupMode ? Visibility.Visible : Visibility.Collapsed;
-        BtnSearch.Content = IsGroupMode ? "그룹 Top-K 검색 및 3D 비교" : "Top-K 검색 및 3D 로드";
-        TxtResultSummary.Text = IsGroupMode ? "그룹 검색 전" : "검색 전";
+        GridGroupPatternResults.Visibility = IsGroupPatternMode ? Visibility.Visible : Visibility.Collapsed;
+        GridStubPatternResults.Visibility = IsStubPatternMode ? Visibility.Visible : Visibility.Collapsed;
+        BtnSearch.Content = IsGroupMode ? "그룹 Top-K 검색 및 3D 비교"
+            : IsGroupPatternMode ? "유사 다발배관 패턴 검색"
+            : IsStubPatternMode ? "유사 Stub 패턴 검색"
+            : "Top-K 검색 및 3D 로드";
+        TxtResultSummary.Text = IsGroupMode ? "그룹 검색 전"
+            : IsGroupPatternMode ? "다발배관 패턴 검색 전"
+            : IsStubPatternMode ? "Stub 패턴 검색 전"
+            : "검색 전";
     }
 
     private async void Preset_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -141,6 +178,7 @@ public partial class MainWindow : Window
         SetPoint(TxtEndX, TxtEndY, TxtEndZ, preset.End);
         _queryStart = preset.Start;
         _queryEnd = preset.End;
+        _presetRouteGuid = preset.RoutePathGuid;
 
         await RunBusyAsync("프리셋 기존 배관과 주변 장애물 로드 중...", async () =>
         {
@@ -170,6 +208,8 @@ public partial class MainWindow : Window
                 """;
             UpdateSceneGrid();
             if (ChkShowObstacles.IsChecked == true) await LoadAndRenderObstaclesAsync();
+            if (ChkShowBendFeatures.IsChecked == true) await LoadAndRenderBendFeaturesAsync();
+            if (ChkShowPathSegments.IsChecked == true) await LoadAndRenderPathSegmentsAsync();
             ZoomToSelectedRoute();
             TxtStatus.Text = $"프리셋 3D 로드 완료: {preset.RoutePathGuid}, {_presetRoutePoints.Count:N0} points";
         });
@@ -219,9 +259,56 @@ public partial class MainWindow : Window
             TxtResultSummary.Text = "Query 그룹 표시 중 · Top-K 검색 전";
             TxtDetails.Text = BuildQueryGroupDetails(_queryGroup);
             if (ChkShowObstacles.IsChecked == true) await LoadAndRenderObstaclesAsync();
+            if (ChkShowBendFeatures.IsChecked == true) await LoadAndRenderBendFeaturesAsync();
+            if (ChkShowPathSegments.IsChecked == true) await LoadAndRenderPathSegmentsAsync();
             ZoomToSelectedRoute();
             TxtStatus.Text = $"Query 그룹 로드 완료: {_queryGroup.MemberCount}개 배관, " +
                              $"실제 3D {_queryGroupPoints.Values.Count(points => points.Count >= 2)}개";
+        });
+    }
+
+    private async void GroupPatternPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsGroupPatternMode || CmbGroupPatternPreset.SelectedItem is not GroupPatternPreset preset) return;
+        await RunBusyAsync("다발배관 패턴 Query 로드 중...", async () =>
+        {
+            _settings = ReadSettingsFromUi();
+            _settings.Save();
+            _queryGroupPattern = await GroupPatternSearch.LoadAsync(_settings.ToDbConfig(), preset.GroupId)
+                ?? throw new InvalidOperationException($"패턴을 찾을 수 없습니다: {preset.GroupId}");
+
+            _groupPatternResults.Clear();
+            GridGroupPatternResults.SelectedItem = null;
+            RouteLayer.Children.Clear();
+            RenderGroupPatternQuery();
+            UpdateSceneGrid();
+            TxtResultSummary.Text = "Query 패턴 표시 중 · 검색 전";
+            TxtDetails.Text = BuildGroupPatternDetails(_queryGroupPattern, null);
+            ZoomToSelectedRoute();
+            TxtStatus.Text = $"Query 다발배관 패턴 로드 완료: {preset.GroupId}, " +
+                             $"트렁크 라인 {_queryGroupPattern.TrunkLines.Count}개";
+        });
+    }
+
+    private async void StubPatternPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsStubPatternMode || CmbStubPatternPreset.SelectedItem is not StubPatternPreset preset) return;
+        await RunBusyAsync("Stub 패턴 Query 로드 중...", async () =>
+        {
+            _settings = ReadSettingsFromUi();
+            _settings.Save();
+            _queryStubPattern = await StubPatternSearch.LoadAsync(_settings.ToDbConfig(), preset.PatternId)
+                ?? throw new InvalidOperationException($"패턴을 찾을 수 없습니다: {preset.PatternId}");
+
+            _stubPatternResults.Clear();
+            GridStubPatternResults.SelectedItem = null;
+            RouteLayer.Children.Clear();
+            RenderStubPatternQuery();
+            UpdateSceneGrid();
+            TxtResultSummary.Text = "Query Stub 패턴 표시 중 · 검색 전";
+            TxtDetails.Text = BuildStubPatternDetails(_queryStubPattern, null);
+            ZoomToSelectedRoute();
+            TxtStatus.Text = $"Query Stub 패턴 로드 완료: {preset.PatternId}";
         });
     }
 
@@ -235,6 +322,16 @@ public partial class MainWindow : Window
             if (IsGroupMode)
             {
                 await SearchGroupsAsync();
+                return;
+            }
+            if (IsGroupPatternMode)
+            {
+                await SearchGroupPatternsAsync();
+                return;
+            }
+            if (IsStubPatternMode)
+            {
+                await SearchStubPatternsAsync();
                 return;
             }
             _queryStart = ReadPoint(TxtStartX, TxtStartY, TxtStartZ, "시작점");
@@ -263,18 +360,22 @@ public partial class MainWindow : Window
                 redistributeMissingPatternWeight: redistributeMissingPattern);
 
             var pointsByGuid = await _database.LoadRoutePointsBatchAsync(results.Select(r => r.RoutePathGuid));
+            var endpointsByGuid = await _database.LoadRouteEndpointsBatchAsync(results.Select(r => r.RoutePathGuid));
             var loaded = new List<TopKRouteItem>(k);
 
             // 1차: 원본 DB 상세 polyline이 실제 존재하는 후보를 검색점수 순으로 채운다.
             foreach (var result in results)
             {
                 if (!pointsByGuid.TryGetValue(result.RoutePathGuid, out var points) || points.Count < 2) continue;
+                endpointsByGuid.TryGetValue(result.RoutePathGuid, out var endpoint);
                 loaded.Add(new TopKRouteItem
                 {
                     Search = result with { Rank = loaded.Count + 1 },
                     Points = points,
                     GeometrySource = "DB 상세경로",
-                    IsExactGeometry = true
+                    IsExactGeometry = true,
+                    TargetOwnerName = endpoint?.TargetOwnerName ?? "",
+                    TargetKind = endpoint?.TargetKind ?? ""
                 });
                 if (loaded.Count == k) break;
             }
@@ -284,16 +385,20 @@ public partial class MainWindow : Window
             foreach (var result in results.Where(r => loaded.All(x => x.Guid != r.RoutePathGuid)))
             {
                 if (loaded.Count == k) break;
+                endpointsByGuid.TryGetValue(result.RoutePathGuid, out var endpoint);
                 loaded.Add(new TopKRouteItem
                 {
                     Search = result with { Rank = loaded.Count + 1 },
                     Points = BuildMetadataFallbackPolyline(result),
                     GeometrySource = "Feature 메타데이터 재구성(원본 GUID 미연결)",
-                    IsExactGeometry = false
+                    IsExactGeometry = false,
+                    TargetOwnerName = endpoint?.TargetOwnerName ?? "",
+                    TargetKind = endpoint?.TargetKind ?? ""
                 });
             }
 
             _presetRoutePoints = [];
+            _presetRouteGuid = "";
             PresetRouteLayer.Children.Clear();
             _routes.Clear();
             foreach (var route in loaded) _routes.Add(route);
@@ -318,6 +423,8 @@ public partial class MainWindow : Window
                 $"상세경로={exactCount}/{_routes.Count}, Context coverage={meta.ContextCoverage:P1}";
 
             if (ChkShowObstacles.IsChecked == true) await LoadAndRenderObstaclesAsync();
+            if (ChkShowBendFeatures.IsChecked == true) await LoadAndRenderBendFeaturesAsync();
+            if (ChkShowPathSegments.IsChecked == true) await LoadAndRenderPathSegmentsAsync();
             if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
         });
     }
@@ -349,6 +456,8 @@ public partial class MainWindow : Window
         var candidateMembers = results.SelectMany(result => result.Candidate.Members).ToArray();
         var loaded = await _database.LoadRoutePointsBatchAsync(
             candidateMembers.Select(member => member.RoutePathGuid));
+        var endpointsByGuid = await _database.LoadRouteEndpointsBatchAsync(
+            candidateMembers.Select(member => member.RoutePathGuid));
 
         _groupRoutes.Clear();
         foreach (var result in results)
@@ -366,7 +475,10 @@ public partial class MainWindow : Window
                 }
             }
             _groupRoutes.Add(new TopKGroupItem
-                { Search = result, PointsByRouteGuid = points, ReconstructedRouteGuids = reconstructed });
+            {
+                Search = result, PointsByRouteGuid = points, ReconstructedRouteGuids = reconstructed,
+                EndpointsByRouteGuid = endpointsByGuid
+            });
         }
 
         _routes.Clear();
@@ -384,7 +496,191 @@ public partial class MainWindow : Window
         TxtStatus.Text = $"그룹 검색 완료: ANN {meta.AnnCandidateCount:N0}개 → Top-{meta.ReturnedCount:N0}, " +
                          $"Pair W={meta.PairWeightProfile}, Group W={meta.MatchedWeight:P0}/{meta.ArrangementWeight:P0}";
         if (ChkShowObstacles.IsChecked == true) await LoadAndRenderObstaclesAsync();
+        if (ChkShowBendFeatures.IsChecked == true) await LoadAndRenderBendFeaturesAsync();
         if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
+    }
+
+    /// <summary>
+    /// 선택된 다발배관 패턴을 Query로 형상(FEAT) 유사 검색을 실행하고, 결과 트렁크 라인을 3D에
+    /// 겹쳐 그린다. UtilityPipeGroupSearch와 달리 멤버 단위 매칭이 없어 렌더링도 더 단순하다.
+    /// </summary>
+    private async Task SearchGroupPatternsAsync()
+    {
+        if (_queryGroupPattern is null)
+            throw new InvalidOperationException("먼저 다발배관 패턴 프리셋을 선택하세요.");
+        var k = ParseInt(TxtK.Text, "K", 1, 50);
+        var (results, meta) = await GroupPatternSearch.SearchAsync(
+            _settings.ToDbConfig(), _queryGroupPattern.GroupId, new GroupPatternSearchOptions { K = k });
+
+        _groupPatternResults.Clear();
+        foreach (var result in results) _groupPatternResults.Add(new GroupPatternResultItem { Search = result });
+        _routes.Clear();
+        _groupRoutes.Clear();
+        _suppressSelectionRefresh = true;
+        GridGroupPatternResults.SelectedIndex = _groupPatternResults.Count > 0 ? 0 : -1;
+        _suppressSelectionRefresh = false;
+        RenderGroupPatternQuery();
+        UpdateSceneGrid();
+        TxtResultSummary.Text = $"{_groupPatternResults.Count:N0}건 · {meta.SearchTimeMs:F1}ms";
+        TxtStatus.Text = $"다발배관 패턴 검색 완료: ANN {meta.AnnCandidateCount:N0}개 → Top-{meta.ReturnedCount:N0}";
+        if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
+    }
+
+    /// <summary>선택된 Stub 패턴을 Query로 FEAT+DIR_UNIT 유사 검색을 실행하고, 결과 Stub 점열과
+    /// anchor AABB를 3D에 겹쳐 그린다.</summary>
+    private async Task SearchStubPatternsAsync()
+    {
+        if (_queryStubPattern is null)
+            throw new InvalidOperationException("먼저 Stub 패턴 프리셋을 선택하세요.");
+        var k = ParseInt(TxtK.Text, "K", 1, 50);
+        var (results, meta) = await StubPatternSearch.SearchAsync(
+            _settings.ToDbConfig(), _queryStubPattern.PatternId, new StubPatternSearchOptions { K = k });
+
+        _stubPatternResults.Clear();
+        foreach (var result in results) _stubPatternResults.Add(new StubPatternResultItem { Search = result });
+        _routes.Clear();
+        _groupRoutes.Clear();
+        _suppressSelectionRefresh = true;
+        GridStubPatternResults.SelectedIndex = _stubPatternResults.Count > 0 ? 0 : -1;
+        _suppressSelectionRefresh = false;
+        RenderStubPatternQuery();
+        UpdateSceneGrid();
+        TxtResultSummary.Text = $"{_stubPatternResults.Count:N0}건 · {meta.SearchTimeMs:F1}ms";
+        TxtStatus.Text = $"Stub 패턴 검색 완료: ANN {meta.AnnCandidateCount:N0}개 → Top-{meta.ReturnedCount:N0}";
+        if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
+    }
+
+    private void RenderGroupPatternQuery()
+    {
+        PresetRouteLayer.Children.Clear();
+        _activePatternScenePoints = [];
+        if (_queryGroupPattern is null) return;
+        foreach (var line in _queryGroupPattern.TrunkLines)
+        {
+            var points = line.Points.Select(p => new Point3D(p.X, p.Y, p.Z)).ToList();
+            AddPipePath(PresetRouteLayer, points, Colors.DeepSkyBlue, 70, 0.85);
+            _activePatternScenePoints.AddRange(points);
+        }
+    }
+
+    private void GroupPatternResults_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RenderGroupPatternQuery();
+        RouteLayer.Children.Clear();
+        if (GridGroupPatternResults.SelectedItem is GroupPatternResultItem item)
+        {
+            foreach (var line in item.Search.Candidate.TrunkLines)
+            {
+                var points = line.Points.Select(p => new Point3D(p.X, p.Y, p.Z)).ToList();
+                AddPipePath(RouteLayer, points, Colors.LimeGreen, 85, 1.0);
+                _activePatternScenePoints.AddRange(points);
+            }
+            TxtDetails.Text = BuildGroupPatternDetails(_queryGroupPattern, item);
+        }
+        else
+        {
+            TxtDetails.Text = BuildGroupPatternDetails(_queryGroupPattern, null);
+        }
+        UpdateSceneGrid();
+        if (_suppressSelectionRefresh) return;
+        if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
+    }
+
+    private void RenderStubPatternQuery()
+    {
+        PresetRouteLayer.Children.Clear();
+        _activePatternScenePoints = [];
+        if (_queryStubPattern is null) return;
+        AddPipePath(PresetRouteLayer, _queryStubPattern.StubPoints
+            .Select(p => new Point3D(p.X, p.Y, p.Z)).ToList(), Colors.DeepSkyBlue, 60, 0.85);
+        var min = new Point3D(_queryStubPattern.AnchorMin.X, _queryStubPattern.AnchorMin.Y, _queryStubPattern.AnchorMin.Z);
+        var max = new Point3D(_queryStubPattern.AnchorMax.X, _queryStubPattern.AnchorMax.Y, _queryStubPattern.AnchorMax.Z);
+        AddWireBox(PresetRouteLayer, min, max, Colors.SkyBlue);
+        _activePatternScenePoints.AddRange(_queryStubPattern.StubPoints.Select(p => new Point3D(p.X, p.Y, p.Z)));
+        _activePatternScenePoints.Add(min);
+        _activePatternScenePoints.Add(max);
+    }
+
+    private void StubPatternResults_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RenderStubPatternQuery();
+        RouteLayer.Children.Clear();
+        if (GridStubPatternResults.SelectedItem is StubPatternResultItem item)
+        {
+            AddPipePath(RouteLayer, item.StubPoints, Colors.LimeGreen, 75, 1.0);
+            AddWireBox(RouteLayer, item.AnchorMin, item.AnchorMax, Colors.LightGreen);
+            _activePatternScenePoints.AddRange(item.StubPoints);
+            _activePatternScenePoints.Add(item.AnchorMin);
+            _activePatternScenePoints.Add(item.AnchorMax);
+            TxtDetails.Text = BuildStubPatternDetails(_queryStubPattern, item);
+        }
+        else
+        {
+            TxtDetails.Text = BuildStubPatternDetails(_queryStubPattern, null);
+        }
+        UpdateSceneGrid();
+        if (_suppressSelectionRefresh) return;
+        if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
+    }
+
+    private static string BuildGroupPatternDetails(GroupPatternDescriptor? query, GroupPatternResultItem? candidate)
+    {
+        if (query is null) return "다발배관 패턴을 선택하세요.";
+        var text = $"""
+            Query 다발배관 패턴
+            Group ID     : {query.GroupId}
+            Equipment    : {query.EquipmentTag}
+            Utility      : {query.UtilityGroup}/{query.Utility}
+            멤버 수      : {query.NMembers}
+            Pitch        : {query.PitchMm:F1} mm (CV={query.PitchCv:F3}, {(query.IsEqualSpacing ? "등간격" : "비등간격")})
+            Offset Axis  : {query.OffsetAxis}
+            Trunk Z      : {query.TrunkZ:F1}
+            Ortho Bends  : {query.NOrthoBends} ({query.OrthoPattern})
+            """;
+        if (candidate is null) return text;
+        var c = candidate.Search.Candidate;
+        return text + $"""
+
+
+            선택 후보 (Rank {candidate.Rank})
+            Group ID     : {c.GroupId}
+            Similarity   : {candidate.Score:F4}
+            Equipment    : {c.EquipmentTag}
+            멤버 수      : {c.NMembers}
+            Pitch        : {c.PitchMm:F1} mm (CV={c.PitchCv:F3}, {(c.IsEqualSpacing ? "등간격" : "비등간격")})
+            Offset Axis  : {c.OffsetAxis}
+            """;
+    }
+
+    private static string BuildStubPatternDetails(StubPatternDescriptor? query, StubPatternResultItem? candidate)
+    {
+        if (query is null) return "Stub 패턴을 선택하세요.";
+        var text = $"""
+            Query Stub 패턴
+            Pattern ID   : {query.PatternId}
+            Stub Kind    : {query.StubKind} / Anchor {query.AnchorKind} ({query.AnchorName})
+            Equipment    : {query.MainEquipmentName}
+            Utility      : {query.UtilityGroup}/{query.Utility}
+            Size         : {query.Size}
+            Face         : {query.Face}
+            Dir Seq      : {query.DirSeq}
+            Rise/Offset  : {query.RiseMm:F1} / {query.OffsetMm:F1} mm
+            Stub Length  : {query.StubLengthMm:F1} mm
+            """;
+        if (candidate is null) return text;
+        var c = candidate.Search.Candidate;
+        return text + $"""
+
+
+            선택 후보 (Rank {candidate.Rank})
+            Pattern ID   : {c.PatternId}
+            Similarity   : {candidate.Score:F4} (Feature {candidate.FeatureScore:F4} / Direction {candidate.DirectionScore:F4})
+            Equipment    : {c.MainEquipmentName}
+            Size         : {c.Size}
+            Face         : {c.Face}
+            Dir Seq      : {c.DirSeq}
+            Rise/Offset  : {c.RiseMm:F1} / {c.OffsetMm:F1} mm
+            """;
     }
 
     private async void Results_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -396,6 +692,10 @@ public partial class MainWindow : Window
 
         if (ChkShowObstacles.IsChecked == true && _database is not null)
             await RunBusyAsync("선택 경로 주변 장애물 로드 중...", LoadAndRenderObstaclesAsync);
+        if (ChkShowBendFeatures.IsChecked == true && _database is not null)
+            await RunBusyAsync("선택 경로 꺾임특징점 로드 중...", LoadAndRenderBendFeaturesAsync);
+        if (ChkShowPathSegments.IsChecked == true && _database is not null)
+            await RunBusyAsync("선택 경로 구간분할 로드 중...", LoadAndRenderPathSegmentsAsync);
         if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
     }
 
@@ -408,6 +708,10 @@ public partial class MainWindow : Window
         if (_suppressSelectionRefresh || GridGroupResults.SelectedItem is not TopKGroupItem) return;
         if (ChkShowObstacles.IsChecked == true && _database is not null)
             await RunBusyAsync("Query 그룹 주변 장애물 로드 중...", LoadAndRenderObstaclesAsync);
+        if (ChkShowBendFeatures.IsChecked == true && _database is not null)
+            await RunBusyAsync("Query 그룹 꺾임특징점 로드 중...", LoadAndRenderBendFeaturesAsync);
+        if (ChkShowPathSegments.IsChecked == true && _database is not null)
+            await RunBusyAsync("Query 그룹 구간분할 로드 중...", LoadAndRenderPathSegmentsAsync);
         if (ChkAutoZoom.IsChecked == true) ZoomToSelectedRoute();
     }
 
@@ -424,7 +728,8 @@ public partial class MainWindow : Window
             Rank             : {r.Rank}
             Route GUID       : {r.RoutePathGuid}
             Process          : {r.ProcessName}
-            Equipment        : {r.EquipmentName}
+            시작 PoC 메인장비 : {r.EquipmentName}
+            종단 PoC 객체     : {(item.TargetOwnerName.Length > 0 ? item.TargetDisplay : "(정보 없음)")}
             Utility Group    : {r.UtilityGroup}
             Utility / Size   : {r.Utility} / {r.Size}
             Direction Pattern: {r.DirectionPattern}
@@ -456,7 +761,8 @@ public partial class MainWindow : Window
         var r = item.Search;
         var text = new StringBuilder();
         text.AppendLine($"Rank / Group ID : {r.Rank} / {r.Candidate.GroupVectorId}");
-        text.AppendLine($"Process / 장비   : {r.Candidate.ProcessName} / {r.Candidate.EquipmentInstanceKey}");
+        text.AppendLine($"Process / 시작 PoC 메인장비 : {r.Candidate.ProcessName} / {r.Candidate.EquipmentInstanceKey}");
+        text.AppendLine($"종단 PoC 객체    : {(item.TargetSummary.Length > 0 ? item.TargetSummary : "(정보 없음)")}");
         text.AppendLine($"Utility          : {r.Candidate.UtilityGroup} / {r.Candidate.Utility}");
         text.AppendLine($"배관 수 / Size   : {r.Candidate.MemberCount} / {item.Sizes}");
         text.AppendLine($"Geometry         : 실제 {item.ExactGeometryCount} / 재구성 {item.ReconstructedCount}");
@@ -665,6 +971,8 @@ public partial class MainWindow : Window
 
     private async void ObstacleToggle_Changed(object sender, RoutedEventArgs e)
     {
+        if (LegendObstacles is not null)
+            LegendObstacles.Visibility = ChkShowObstacles.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         if (!IsLoaded || ObstacleLayer is null) return;
         if (ChkShowObstacles.IsChecked != true)
         {
@@ -703,6 +1011,107 @@ public partial class MainWindow : Window
         TxtStatus.Text += $", 주변 구조 BIM={obstacles.Count:N0}건";
     }
 
+    private async void BendFeatureToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (LegendBendFeature is not null)
+            LegendBendFeature.Visibility = ChkShowBendFeatures.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        if (!IsLoaded || BendFeatureLayer is null) return;
+        if (ChkShowBendFeatures.IsChecked != true)
+        {
+            BendFeatureLayer.Children.Clear();
+            return;
+        }
+        if (_database is null) return;
+        await RunBusyAsync("꺾임특징점 로드 중...", LoadAndRenderBendFeaturesAsync);
+    }
+
+    /// <summary>
+    /// Tools/ExtractBendFeaturePoints.py가 적재한 TB_ROUTE_BEND_FEATURE_POINT를 현재 화면에
+    /// 표시 중인 배관(개별 선택 Route, 또는 그룹모드의 Query+선택 후보 그룹 멤버)에 한해 조회하고
+    /// 원인(CAUSE)별로 색상을 구분한 큐브 마커로 표시한다. build 미실행 환경에서는 빈 결과로
+    /// 조용히 넘어가므로(ViewerDatabaseService 참고) 이 기능이 없어도 기존 화면은 그대로 동작한다.
+    /// </summary>
+    private async Task LoadAndRenderBendFeaturesAsync()
+    {
+        BendFeatureLayer.Children.Clear();
+        if (_database is null) return;
+        var guids = GetActiveRouteGuids();
+        if (guids.Count == 0) return;
+        var markers = await _database.LoadBendFeaturePointsAsync(guids);
+        foreach (var marker in markers)
+        {
+            const double side = 140;
+            BendFeatureLayer.Children.Add(new BoxVisual3D
+            {
+                Center = marker.Point,
+                Length = side,
+                Width = side,
+                Height = side,
+                Fill = new SolidColorBrush(BendCauseColor(marker.Cause))
+            });
+        }
+        TxtStatus.Text += $", 꺾임특징점={markers.Count:N0}건";
+    }
+
+    private async void PathSegmentToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (LegendPathSegment is not null)
+            LegendPathSegment.Visibility = ChkShowPathSegments.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        if (!IsLoaded || PathSegmentLayer is null) return;
+        if (ChkShowPathSegments.IsChecked != true)
+        {
+            PathSegmentLayer.Children.Clear();
+            return;
+        }
+        if (_database is null) return;
+        await RunBusyAsync("구간분할 로드 중...", LoadAndRenderPathSegmentsAsync);
+    }
+
+    /// <summary>
+    /// Tools/PathSegmenter.py가 적재한 TB_ROUTE_PATH_SEGMENTATION을 현재 화면에 표시 중인
+    /// 배관(개별 선택 Route, 또는 그룹모드의 Query+선택 후보 그룹 멤버)에 한해 조회하고
+    /// Start Stub/Middle Trunk/End Stub을 3색 선으로 겹쳐 그린다. 다발배관 패턴/Stub 패턴
+    /// 모드는 개별 route 선택 개념이 없어 GetActiveRouteGuids가 빈 목록을 돌려주므로 자연히
+    /// 아무것도 그리지 않는다. build 미실행 환경에서는 빈 결과로 조용히 넘어간다.
+    /// </summary>
+    private async Task LoadAndRenderPathSegmentsAsync()
+    {
+        PathSegmentLayer.Children.Clear();
+        if (_database is null) return;
+        var guids = GetActiveRouteGuids();
+        if (guids.Count == 0) return;
+        var segments = await _database.LoadPathSegmentationBatchAsync(guids);
+        foreach (var segment in segments)
+        {
+            AddPipePath(PathSegmentLayer, segment.StartStub.ToList(), Colors.Gold, 95, 0.9);
+            AddPipePath(PathSegmentLayer, segment.MiddleTrunk.ToList(), Colors.WhiteSmoke, 95, 0.55);
+            AddPipePath(PathSegmentLayer, segment.EndStub.ToList(), Colors.Cyan, 95, 0.9);
+        }
+        TxtStatus.Text += $", 구간분할={segments.Count:N0}건";
+    }
+
+    private IReadOnlyList<string> GetActiveRouteGuids()
+    {
+        if (IsGroupMode)
+        {
+            var guids = new HashSet<string>(_queryGroupPoints.Keys, StringComparer.OrdinalIgnoreCase);
+            if (GridGroupResults.SelectedItem is TopKGroupItem group)
+                foreach (var guid in GetDisplayedCandidatePoints(group).Keys) guids.Add(guid);
+            return guids.ToArray();
+        }
+        if (GridResults.SelectedItem is TopKRouteItem route) return [route.Guid];
+        return string.IsNullOrWhiteSpace(_presetRouteGuid) ? [] : [_presetRouteGuid];
+    }
+
+    private static Color BendCauseColor(string cause) => cause switch
+    {
+        "OBSTACLE_AVOID" => Colors.OrangeRed,
+        "DESTINATION_ENTRY" => Colors.LimeGreen,
+        "ZONE_CONSTRAINT" => Colors.DeepSkyBlue,
+        "GROUP_ALIGNMENT" => Colors.MediumPurple,
+        _ => Colors.Gainsboro,
+    };
+
     private void RouteDisplay_Changed(object sender, RoutedEventArgs e) => RenderRoutes();
 
     private void ZoomExtents_Click(object sender, RoutedEventArgs e)
@@ -710,21 +1119,48 @@ public partial class MainWindow : Window
         ZoomToSelectedRoute();
     }
 
+    private void FeatureGeneration_Click(object sender, RoutedEventArgs e)
+    {
+        if (_featureGenerationDialog is { IsLoaded: true })
+        {
+            _featureGenerationDialog.Activate();
+            return;
+        }
+        _settings = ReadSettingsFromUi();
+        _settings.Save();
+        _featureGenerationDialog = new FeatureGenerationDialog(_settings.ToDbConfig(), _settings.PythonExe)
+        {
+            Owner = this
+        };
+        _featureGenerationDialog.Closed += (_, _) => _featureGenerationDialog = null;
+        _featureGenerationDialog.Show();
+    }
+
     private void ClearViewer_Click(object sender, RoutedEventArgs e)
     {
         _routes.Clear();
         _groupRoutes.Clear();
+        _groupPatternResults.Clear();
+        _stubPatternResults.Clear();
         RouteLayer.Children.Clear();
         PresetRouteLayer.Children.Clear();
         _presetRoutePoints = [];
+        _presetRouteGuid = "";
         _queryGroup = null;
         _queryGroupPoints.Clear();
         _queryReconstructedRouteGuids.Clear();
+        _queryGroupPattern = null;
+        _queryStubPattern = null;
+        _activePatternScenePoints = [];
         GridGroupMembers.ItemsSource = null;
         MarkerLayer.Children.Clear();
         ObstacleLayer.Children.Clear();
+        BendFeatureLayer.Children.Clear();
+        PathSegmentLayer.Children.Clear();
         GridResults.SelectedItem = null;
         GridGroupResults.SelectedItem = null;
+        GridGroupPatternResults.SelectedItem = null;
+        GridStubPatternResults.SelectedItem = null;
         TxtDetails.Clear();
         TxtResultSummary.Text = "검색 전";
         TxtStatus.Text = "3D 화면과 검색결과를 초기화했습니다.";
@@ -933,6 +1369,15 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Stub Pattern의 anchor AABB를 얇은 와이어프레임 상자로 표시한다.</summary>
+    private static void AddWireBox(ModelVisual3D layer, Point3D min, Point3D max, Color color)
+    {
+        var edges = new Point3DCollection(24);
+        AddBoxEdges(edges, min, max);
+        edges.Freeze();
+        layer.Children.Add(new LinesVisual3D { Points = edges, Color = color, Thickness = 0.8 });
+    }
+
     /// <summary>동일 유형 장애물을 반투명 솔리드와 외곽선으로 함께 표시한다.</summary>
     private void AddObstacleGroup(IEnumerable<BimObstacle> source, Color fill,
         double opacity, Color outline)
@@ -1048,6 +1493,7 @@ public partial class MainWindow : Window
 
     private IReadOnlyList<Point3D> GetActiveScenePoints()
     {
+        if (IsGroupPatternMode || IsStubPatternMode) return _activePatternScenePoints;
         if (IsGroupMode)
         {
             var points = _queryGroupPoints.Values.SelectMany(route => route).ToList();

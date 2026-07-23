@@ -26,6 +26,15 @@ public sealed record UtilityPipeGroupSearchOptions
     public string EquipmentFamilyKey { get; init; } = "";
 }
 
+/// <summary>Tools/ExtractBendFeaturePoints.py가 TB_ROUTE_BEND_FEATURE_POINT에 적재한 개별 꺾임점 요약.
+/// Docs/BendFeaturePoint_Development_Plan.md 7~8절 산출물을 Pair 매칭에 재사용하기 위한 최소 필드셋이다.</summary>
+public sealed record BendFeaturePointSummary(
+    int OrdinalFromStart,
+    string SegmentZone,
+    double RelPositionBucket,
+    string TransitionType,
+    string Cause);
+
 /// <summary>그룹에 속한 한 배관과 Pair 점수 계산에 필요한 원본 Vector.</summary>
 public sealed record UtilityPipeGroupMember(
     string RoutePathGuid,
@@ -40,7 +49,8 @@ public sealed record UtilityPipeGroupMember(
     [property: JsonIgnore] double[] FeatureVector,
     [property: JsonIgnore] double[]? ContextVector,
     string FeatureProvenance,
-    string ContextProvenance)
+    string ContextProvenance,
+    [property: JsonIgnore] IReadOnlyList<BendFeaturePointSummary> BendPoints)
 {
     public double StartX => StartXyz.X;
     public double StartY => StartXyz.Y;
@@ -48,6 +58,7 @@ public sealed record UtilityPipeGroupMember(
     public double EndX => EndXyz.X;
     public double EndY => EndXyz.Y;
     public double EndZ => EndXyz.Z;
+    public int BendPointCount => BendPoints.Count;
 }
 
 /// <summary>DB 그룹 header와 멤버 전체.</summary>

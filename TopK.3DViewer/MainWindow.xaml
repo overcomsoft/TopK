@@ -18,10 +18,17 @@
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                     <CheckBox x:Name="ChkShowObstacles" Content="선택 경로 주변 장애물" IsChecked="True" Margin="10,0"
                               VerticalAlignment="Center" Checked="ObstacleToggle_Changed" Unchecked="ObstacleToggle_Changed" />
+                    <CheckBox x:Name="ChkShowBendFeatures" Content="꺾임원인 표시" IsChecked="True" Margin="10,0"
+                              VerticalAlignment="Center" Checked="BendFeatureToggle_Changed" Unchecked="BendFeatureToggle_Changed"
+                              ToolTip="TB_ROUTE_BEND_FEATURE_POINT: 주황=장애물회피, 초록=목적지진입, 파랑=구역경계, 보라=그룹정렬, 회색=미분류" />
+                    <CheckBox x:Name="ChkShowPathSegments" Content="구간분할 표시" IsChecked="False" Margin="10,0"
+                              VerticalAlignment="Center" Checked="PathSegmentToggle_Changed" Unchecked="PathSegmentToggle_Changed"
+                              ToolTip="TB_ROUTE_PATH_SEGMENTATION: 노랑=Start Stub, 흰색=Middle Trunk, 청록=End Stub (개별/그룹 모드에서 선택된 route에 오버레이)" />
                     <CheckBox x:Name="ChkShowAllRoutes" Content="Top-K 전체 표시" IsChecked="True" Margin="10,0"
                               VerticalAlignment="Center" Checked="RouteDisplay_Changed" Unchecked="RouteDisplay_Changed" />
                     <Button Content="카메라 맞춤" Click="ZoomExtents_Click" />
                     <Button Content="초기화" Click="ClearViewer_Click" />
+                    <Button Content="특징점생성" Click="FeatureGeneration_Click" />
                 </StackPanel>
                 <TextBlock x:Name="TxtActiveScope" Text="ACTIVE scope: 연결 후 확인"
                            Foreground="#53657A" VerticalAlignment="Center" />
@@ -48,8 +55,10 @@
                                 <ColumnDefinition Width="65" />
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <TextBlock Text="Host" VerticalAlignment="Center" />
                             <TextBox x:Name="TxtHost" Grid.Column="1" />
@@ -57,19 +66,27 @@
                             <TextBlock Grid.Row="1" Text="Database" VerticalAlignment="Center" />
                             <TextBox x:Name="TxtDatabase" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" />
                             <TextBlock Grid.Row="2" Text="User" VerticalAlignment="Center" />
-                            <TextBox x:Name="TxtUser" Grid.Row="2" Grid.Column="1" />
-                            <PasswordBox x:Name="TxtPassword" Grid.Row="2" Grid.Column="2" Margin="3" Padding="5,3" />
+                            <TextBox x:Name="TxtUser" Grid.Row="2" Grid.Column="1" Margin="3,3,43,3" />
+                            <PasswordBox x:Name="TxtPassword" Grid.Row="2" Grid.Column="1" Margin="97,3,3,3" Padding="5,3" Grid.ColumnSpan="2" />
                             <Button Grid.Row="3" Grid.ColumnSpan="3" Content="DB 연결 및 조건 로드"
                                     Background="#1976D2" Foreground="White" Click="Connect_Click" />
                         </Grid>
                     </GroupBox>
 
                     <GroupBox Header="검색 단위">
-                        <StackPanel Orientation="Horizontal">
-                            <RadioButton x:Name="RdoIndividualMode" Content="개별 배관" GroupName="SearchUnit"
-                                         IsChecked="True" Margin="5,3,18,3" Checked="SearchMode_Changed" />
-                            <RadioButton x:Name="RdoGroupMode" Content="Utility 배관 그룹" GroupName="SearchUnit"
-                                         Margin="5,3" Checked="SearchMode_Changed" />
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="RdoIndividualMode" Content="개별 배관" GroupName="SearchUnit"
+                                             IsChecked="True" Margin="5,3,18,3" Checked="SearchMode_Changed" />
+                                <RadioButton x:Name="RdoGroupMode" Content="Utility 배관 그룹" GroupName="SearchUnit"
+                                             Margin="5,3" Checked="SearchMode_Changed" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="RdoGroupPatternMode" Content="다발배관 패턴" GroupName="SearchUnit"
+                                             Margin="5,3,18,3" Checked="SearchMode_Changed" />
+                                <RadioButton x:Name="RdoStubPatternMode" Content="Stub 패턴" GroupName="SearchUnit"
+                                             Margin="5,3" Checked="SearchMode_Changed" />
+                            </StackPanel>
                         </StackPanel>
                     </GroupBox>
 
@@ -100,15 +117,37 @@
                         </StackPanel>
                     </GroupBox>
 
-                    <GroupBox Header="검색 필터">
+                    <GroupBox x:Name="GrpGroupPatternPreset" Header="다발배관 패턴 프리셋" Visibility="Collapsed">
+                        <StackPanel>
+                            <ComboBox x:Name="CmbGroupPatternPreset" DisplayMemberPath="Display"
+                                      SelectionChanged="GroupPatternPreset_SelectionChanged" />
+                            <TextBlock Text="TB_ROUTE_GROUP_PATTERN 중 하나를 고르면 그 형상(FEAT)을 Query로 삼아 비슷한 평행구간을 찾습니다."
+                                       Foreground="#66788A" TextWrapping="Wrap" Margin="4" />
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox x:Name="GrpStubPatternPreset" Header="Stub 패턴 프리셋" Visibility="Collapsed">
+                        <StackPanel>
+                            <ComboBox x:Name="CmbStubPatternPreset" DisplayMemberPath="Display"
+                                      SelectionChanged="StubPatternPreset_SelectionChanged" />
+                            <TextBlock Text="TB_ROUTE_STUB_PATTERN 중 하나를 고르면 그 형상(FEAT+DIR_UNIT)을 Query로 삼아 비슷한 Stub을 찾습니다."
+                                       Foreground="#66788A" TextWrapping="Wrap" Margin="4" />
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox x:Name="GrpFilters" Header="검색 필터">
                         <Grid>
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="90" /><ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="90" />
+                                <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <TextBlock Text="공정" VerticalAlignment="Center" />
                             <ComboBox x:Name="CmbProcess" Grid.Column="1" IsEditable="True" />
@@ -129,10 +168,14 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="52" />
-                                <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Column="1" Text="X" HorizontalAlignment="Center" />
                             <TextBlock Grid.Column="2" Text="Y" HorizontalAlignment="Center" />
@@ -161,8 +204,10 @@
                             </DockPanel>
                             <Grid>
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="105" /><ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="90" /><ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="105" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="90" />
+                                    <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="Pair 평균 %" VerticalAlignment="Center" />
                                 <TextBox x:Name="TxtGroupMatchedWeight" Grid.Column="1" Text="80"
@@ -184,15 +229,18 @@
                         </StackPanel>
                     </GroupBox>
 
-                    <GroupBox Header="유사도 가중치 (자동 정규화)">
+                    <GroupBox x:Name="GrpWeights" Header="유사도 가중치 (자동 정규화)">
                         <StackPanel>
                             <Grid>
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="62" /><ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="62" /><ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="62" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="62" />
+                                    <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <TextBlock Text="Position" VerticalAlignment="Center" />
                                 <TextBox x:Name="TxtWeightPosition" Grid.Column="1" Text="25" ToolTip="시작~종점 상대변위 유사도" LostKeyboardFocus="WeightEditor_LostKeyboardFocus" />
@@ -238,22 +286,99 @@
 
             <!-- 중앙: 3D -->
             <Border Grid.Column="2" Background="#172B4D" BorderBrush="#9AA8B8" BorderThickness="1">
-                <h:HelixViewport3D x:Name="Viewport" Background="#172B4D"
-                                   ShowCoordinateSystem="True" ShowViewCube="True"
-                                   IsHeadLightEnabled="True" ZoomExtentsWhenLoaded="True">
-                    <h:HelixViewport3D.Camera>
-                        <PerspectiveCamera Position="15000,15000,12000"
-                                           LookDirection="-15000,-15000,-9000"
-                                           UpDirection="0,0,1" FieldOfView="45" />
-                    </h:HelixViewport3D.Camera>
-                    <h:SunLight />
-                    <h:GridLinesVisual3D x:Name="SceneGrid" Width="20000" Length="20000" MinorDistance="1000"
-                                         MajorDistance="5000" Thickness="0.4" Fill="#445A78" />
-                    <ModelVisual3D x:Name="ObstacleLayer" />
-                    <ModelVisual3D x:Name="PresetRouteLayer" />
-                    <ModelVisual3D x:Name="RouteLayer" />
-                    <ModelVisual3D x:Name="MarkerLayer" />
-                </h:HelixViewport3D>
+                <Grid>
+                    <h:HelixViewport3D x:Name="Viewport" Background="#172B4D"
+                                       ShowCoordinateSystem="True" ShowViewCube="True"
+                                       IsHeadLightEnabled="True" ZoomExtentsWhenLoaded="True">
+                        <h:HelixViewport3D.Camera>
+                            <PerspectiveCamera Position="15000,15000,12000"
+                                               LookDirection="-15000,-15000,-9000"
+                                               UpDirection="0,0,1" FieldOfView="45" />
+                        </h:HelixViewport3D.Camera>
+                        <h:SunLight />
+                        <h:GridLinesVisual3D x:Name="SceneGrid" Width="20000" Length="20000" MinorDistance="1000"
+                                             MajorDistance="5000" Thickness="0.4" Fill="#445A78" />
+                        <ModelVisual3D x:Name="ObstacleLayer" />
+                        <ModelVisual3D x:Name="PresetRouteLayer" />
+                        <ModelVisual3D x:Name="RouteLayer" />
+                        <ModelVisual3D x:Name="MarkerLayer" />
+                        <ModelVisual3D x:Name="BendFeatureLayer" />
+                        <ModelVisual3D x:Name="PathSegmentLayer" />
+                    </h:HelixViewport3D>
+
+                    <!-- 색상 범례: 각 그룹은 해당 표시 체크박스 상태에 맞춰 코드비하인드에서 Visibility를 갱신한다. -->
+                    <Border Background="#D0122642" BorderBrush="#5A7290" BorderThickness="1" CornerRadius="4"
+                            Padding="10,8" Margin="12" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                            IsHitTestVisible="False">
+                        <StackPanel>
+                            <TextBlock Text="색상 범례" Foreground="White" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,6" />
+
+                            <StackPanel x:Name="LegendMarkers" Margin="0,0,0,6">
+                                <TextBlock Text="시작 / 종점 마커" Foreground="#AEC3DC" FontSize="11" Margin="0,0,0,2" />
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Ellipse Width="12" Height="12" Fill="LimeGreen" Margin="0,0,6,0" />
+                                    <TextBlock Text="시작점 (Start)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Ellipse Width="12" Height="12" Fill="OrangeRed" Margin="0,0,6,0" />
+                                    <TextBlock Text="종점 (End)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel x:Name="LegendBendFeature" Margin="0,0,0,6">
+                                <TextBlock Text="꺾임원인 (Bend Cause)" Foreground="#AEC3DC" FontSize="11" Margin="0,0,0,2" />
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="11" Height="11" Fill="OrangeRed" Margin="0,0,6,0" />
+                                    <TextBlock Text="장애물회피 (OBSTACLE_AVOID)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="11" Height="11" Fill="LimeGreen" Margin="0,0,6,0" />
+                                    <TextBlock Text="목적지진입 (DESTINATION_ENTRY)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="11" Height="11" Fill="DeepSkyBlue" Margin="0,0,6,0" />
+                                    <TextBlock Text="구역경계 (ZONE_CONSTRAINT)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="11" Height="11" Fill="MediumPurple" Margin="0,0,6,0" />
+                                    <TextBlock Text="그룹정렬 (GROUP_ALIGNMENT)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="11" Height="11" Fill="Gainsboro" Margin="0,0,6,0" />
+                                    <TextBlock Text="미분류" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel x:Name="LegendPathSegment" Margin="0,0,0,6" Visibility="Collapsed">
+                                <TextBlock Text="구간분할 (Path Segment)" Foreground="#AEC3DC" FontSize="11" Margin="0,0,0,2" />
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="16" Height="6" Fill="Gold" Margin="0,0,6,0" />
+                                    <TextBlock Text="Start Stub" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="16" Height="6" Fill="WhiteSmoke" Margin="0,0,6,0" />
+                                    <TextBlock Text="Middle Trunk" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="16" Height="6" Fill="Cyan" Margin="0,0,6,0" />
+                                    <TextBlock Text="End Stub" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel x:Name="LegendObstacles">
+                                <TextBlock Text="주변 장애물 (BIM)" Foreground="#AEC3DC" FontSize="11" Margin="0,0,0,2" />
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="12" Height="12" Fill="#7D8C9B" Margin="0,0,6,0" />
+                                    <TextBlock Text="기둥 (Column)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="2,1">
+                                    <Rectangle Width="12" Height="12" Fill="#C86363" Margin="0,0,6,0" />
+                                    <TextBlock Text="보 (Beam)" Foreground="White" FontSize="11" />
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
             </Border>
 
             <GridSplitter Grid.Column="3" HorizontalAlignment="Stretch" Background="#C8D0DA" />
@@ -292,7 +417,8 @@
                                 <DataGridTextColumn Header="#" Binding="{Binding Rank}" Width="35" />
                                 <DataGridTextColumn Header="Score" Binding="{Binding Score, StringFormat=F4}" Width="65" />
                                 <DataGridTextColumn Header="Ctx" Binding="{Binding ContextScore, StringFormat=F3}" Width="55" />
-                                <DataGridTextColumn Header="장비" Binding="{Binding Equipment}" Width="*" />
+                                <DataGridTextColumn Header="시작 장비" Binding="{Binding Equipment}" Width="*" />
+                                <DataGridTextColumn Header="종단 객체" Binding="{Binding TargetDisplay}" Width="*" />
                                 <DataGridTextColumn Header="Utility" Binding="{Binding Utility}" Width="75" />
                                 <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="50" />
                                 <DataGridTextColumn Header="3D" Binding="{Binding GeometryLabel}" Width="55" />
@@ -309,9 +435,39 @@
                                 <DataGridTextColumn Header="매칭" Binding="{Binding MatchedLabel}" Width="62" />
                                 <DataGridTextColumn Header="Cov" Binding="{Binding Coverage, StringFormat=F2}" Width="44" />
                                 <DataGridTextColumn Header="Arr" Binding="{Binding Arrangement, StringFormat=F2}" Width="44" />
-                                <DataGridTextColumn Header="장비" Binding="{Binding Equipment}" Width="95" />
+                                <DataGridTextColumn Header="시작 장비" Binding="{Binding Equipment}" Width="95" />
+                                <DataGridTextColumn Header="종단 객체" Binding="{Binding TargetSummary}" Width="120" />
                                 <DataGridTextColumn Header="Sizes" Binding="{Binding Sizes}" Width="95" />
                                 <DataGridTextColumn Header="3D" Binding="{Binding GeometryLabel}" Width="70" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <DataGrid x:Name="GridGroupPatternResults" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                                  Visibility="Collapsed" SelectionMode="Single"
+                                  SelectionChanged="GroupPatternResults_SelectionChanged"
+                                  CanUserAddRows="False" HeadersVisibility="Column" RowHeaderWidth="0"
+                                  RowHeight="34" AlternatingRowBackground="#F2F6FA">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Rank}" Width="30" />
+                                <DataGridTextColumn Header="Score" Binding="{Binding Score, StringFormat=F4}" Width="60" />
+                                <DataGridTextColumn Header="장비" Binding="{Binding Equipment}" Width="85" />
+                                <DataGridTextColumn Header="본수" Binding="{Binding NMembers}" Width="45" />
+                                <DataGridTextColumn Header="Pitch" Binding="{Binding PitchMm, StringFormat=F0}" Width="55" />
+                                <DataGridTextColumn Header="간격" Binding="{Binding SpacingLabel}" Width="60" />
+                                <DataGridTextColumn Header="축" Binding="{Binding OffsetAxis}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <DataGrid x:Name="GridStubPatternResults" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                                  Visibility="Collapsed" SelectionMode="Single"
+                                  SelectionChanged="StubPatternResults_SelectionChanged"
+                                  CanUserAddRows="False" HeadersVisibility="Column" RowHeaderWidth="0"
+                                  RowHeight="34" AlternatingRowBackground="#F2F6FA">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Rank}" Width="30" />
+                                <DataGridTextColumn Header="Score" Binding="{Binding Score, StringFormat=F4}" Width="60" />
+                                <DataGridTextColumn Header="장비" Binding="{Binding MainEquipmentName}" Width="85" />
+                                <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="48" />
+                                <DataGridTextColumn Header="Face" Binding="{Binding Face}" Width="48" />
+                                <DataGridTextColumn Header="Dir Seq" Binding="{Binding DirSeq}" Width="*" />
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>

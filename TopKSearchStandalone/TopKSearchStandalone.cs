@@ -286,8 +286,8 @@ namespace RoutingAI.Standalone;
 public sealed record DbConfig(
     string Host     = "localhost",
     int    Port     = 5432,
-    string Database = "AUTOROUTINGV7",
-    string User     = "postgres",
+    string Database = "DDW_AI_DB",
+    string User     = "dinno",
     string Password = "dinno")
 {
     /// <summary>Npgsql ConnectionString으로 변환.</summary>

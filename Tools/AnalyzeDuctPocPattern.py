@@ -734,33 +734,22 @@ def resolve_takeoff_equipment_map(conn) -> dict:
 
 def build_equipment_takeoff_patterns(ducts: list, equipment_map: dict) -> list:
     """
-    장비(EQUIPMENT_TAG)까지 확인된 취출구만 모아, (EQUIPMENT_TAG, UTILITY)별로 어떤
-    면(Face) 분포 패턴이 몇 개의 덕트에서 나타나는지 집계합니다.
+    장비(EQUIPMENT_TAG)까지 확인된 취출구만 모아, [장비명, 유틸리티, 덕트구분자, 방향]별로
+    레코드를 분리하여 배치 패턴, 점유 크기(가로/세로), BoundBox 크기 및 공간 데이터 WKT를 산출합니다.
 
     [인자 (Arguments)]
     - ducts (list of dict): fetch_data()의 원본 덕트 목록
     - equipment_map (dict): resolve_takeoff_equipment_map()의 결과
 
     [반환값 (Returns)]
-    - list of dict: {'equipment_tag','utility','signature','n_ducts','n_takeoffs_total',
-      'example_duct_names'} — (EQUIPMENT_TAG, UTILITY, PATTERN_SIGNATURE) 조합별 1행.
-      n_ducts 내림차순으로 정렬되어 가장 흔한 패턴이 먼저 나옵니다.
-
-    [주요 변수 및 동작 개요]
-    - duct_equipment_face_points: 1단계 집계. 덕트 하나가 장비 하나에 여러 취출구를
-      낼 수 있으므로, (덕트명, EQUIPMENT_TAG) 조합 단위로 장비가 확인된 취출구만 모아
-      면(face)별로 (proj_len, proj_transverse) 좌표쌍을 쌓습니다. (덕트가 이론상 여러
-      장비로 취출구를 나눠 낼 가능성을 배제하지 않기 위해 덕트 전체가 아니라 이
-      서브그룹 단위로 시그니처를 만듭니다.)
-    - signature: 면별로 "면:개수:배치형태"를 면 이름 알파벳 순으로 정렬 후 콤마로
-      이어붙인 정규 문자열(예: "LEFT:1:SINGLE,TOP:2:ZIGZAG") — 개수만 같고 배치 형태가
-      다르면(예: 일직선 TOP:3 vs 지그재그 TOP:3) 서로 다른 패턴으로 구분됩니다.
-      classify_layout_pattern()으로 면별 배치 형태(일직선/지그재그/분리형/불규칙)를
-      판정해 시그니처에 포함시킵니다.
-    - pattern_rows: 2단계 집계. (EQUIPMENT_TAG, UTILITY, signature)별로 덕트 수·취출구
-      총합·예시 덕트명(최대 5개)을 누적합니다.
+    - list of dict: 각 원소는 개별 덕트의 개별 면(Face) 단위 레코드 정보.
+      {
+        'equipment_tag', 'utility', 'duct_name', 'face', 'layout', 'n_takeoffs',
+        'takeoff_width_mm', 'takeoff_height_mm', 'boundbox_width_mm', 'boundbox_height_mm',
+        'takeoff_layout_wkt'
+      }
     """
-    # 1단계: 덕트별 · 장비별로 확인된 취출구만 모아 면별 (길이축, 횡방향) 좌표 수집
+    # 1단계: 덕트별 · 장비별로 확인된 취출구만 모아 면별 (길이축, 횡방향, 반경, X, Y, Z) 좌표 수집
     duct_equipment_face_points = {}
     for duct in ducts:
         if not any(equipment_map.get(t.get('id')) for t in duct['takeoffs']):
@@ -774,78 +763,107 @@ def build_equipment_takeoff_patterns(ducts: list, equipment_map: dict) -> list:
             entry = duct_equipment_face_points.setdefault(
                 key, {'utility': duct['utility'], 'faces': {}, 'n_takeoffs': 0}
             )
+            # (proj_len, proj_transverse, radius, x, y, z) 튜플 저장
             entry['faces'].setdefault(takeoff['face'], []).append(
-                (takeoff['proj_len'], takeoff['proj_transverse'])
+                (takeoff['proj_len'], takeoff['proj_transverse'], takeoff['radius'], takeoff['x'], takeoff['y'], takeoff['z'])
             )
             entry['n_takeoffs'] += 1
 
-    # 2단계: (EQUIPMENT_TAG, UTILITY, signature)로 재집계
-    pattern_rows = {}
+    # 2단계: [장비명, 유틸리티, 덕트명, 방향] 기준으로 분리하여 데이터 산출
+    pattern_rows = []
     for (duct_name, equipment_tag), entry in duct_equipment_face_points.items():
-        sig_parts = []
-        for face, points in sorted(entry['faces'].items()):
+        for face, points in entry['faces'].items():
+            # 1. 길이축 정렬 및 레이아웃 분석
             points_sorted = sorted(points, key=lambda pt: pt[0])  # 길이축 위치 순 정렬
             layout = classify_layout_pattern([pt[1] for pt in points_sorted])['layout']
-            sig_parts.append(f"{face}:{len(points)}:{layout}")
-        signature = ",".join(sig_parts)
 
-        key = (equipment_tag, entry['utility'], signature)
-        row = pattern_rows.setdefault(key, {
-            'equipment_tag': equipment_tag,
-            'utility': entry['utility'],
-            'signature': signature,
-            'n_ducts': 0,
-            'n_takeoffs_total': 0,
-            'example_duct_names': [],
-        })
-        row['n_ducts'] += 1
-        row['n_takeoffs_total'] += entry['n_takeoffs']
-        if len(row['example_duct_names']) < 5:
-            row['example_duct_names'].append(duct_name)
+            # 2. 물리 점유 크기(반경 포함) 및 순수 BoundBox 크기(중심점) 계산을 위한 리스트
+            all_len_r = []
+            all_trans_r = []
+            all_len = []
+            all_trans = []
+            coords_list = []
 
-    return sorted(pattern_rows.values(), key=lambda r: (-r['n_ducts'], r['equipment_tag'], r['utility']))
+            for proj_len, proj_transverse, radius, x, y, z in points:
+                # 반경 포함 경계
+                all_len_r.append(proj_len + radius)
+                all_len_r.append(proj_len - radius)
+                all_trans_r.append(proj_transverse + radius)
+                all_trans_r.append(proj_transverse - radius)
+                
+                # 순수 중심점 경계
+                all_len.append(proj_len)
+                all_trans.append(proj_transverse)
+                
+                # 3D 절대 좌표 보관
+                coords_list.append((x, y, z))
+
+            width_r = max(all_trans_r) - min(all_trans_r) if all_trans_r else 0.0
+            height_r = max(all_len_r) - min(all_len_r) if all_len_r else 0.0
+
+            width_bbox = max(all_trans) - min(all_trans) if all_trans else 0.0
+            height_bbox = max(all_len) - min(all_len) if all_len else 0.0
+
+            # 3. WKT 공간데이터 기하 생성
+            takeoff_layout_wkt = build_multipoint_z_wkt(coords_list)
+
+            pattern_rows.append({
+                'equipment_tag': equipment_tag,
+                'utility': entry['utility'],
+                'duct_name': duct_name,
+                'face': face,
+                'layout': layout,
+                'n_takeoffs': len(points),
+                'takeoff_width_mm': round(width_r, 1),
+                'takeoff_height_mm': round(height_r, 1),
+                'boundbox_width_mm': round(width_bbox, 1),
+                'boundbox_height_mm': round(height_bbox, 1),
+                'takeoff_layout_wkt': takeoff_layout_wkt
+            })
+
+    # 장비명, 유틸리티, 덕트명, 방향 순으로 정렬
+    return sorted(pattern_rows, key=lambda r: (r['equipment_tag'], r['utility'], r['duct_name'], r['face']))
 
 
 def print_equipment_pattern_summary(patterns: list) -> None:
-    """(EQUIPMENT_TAG, UTILITY, PATTERN_SIGNATURE)별 집계 결과를 콘솔에 표로 출력합니다."""
+    """[장비명, 유틸리티, 덕트명, 방향]별 집계 결과를 콘솔에 표로 출력합니다."""
     if not patterns:
         print("No equipment-linked takeoff patterns found (TARGET_GUID exact match yielded nothing).")
         return
 
-    n_ducts_total = sum(p['n_ducts'] for p in patterns)
-    print(f"\n=== Duct-Equipment Takeoff Pattern Summary ({len(patterns)} distinct patterns, {n_ducts_total} ducts) ===")
-    print(f"  {'EQUIPMENT_TAG':22s} {'UTILITY':14s} {'SIGNATURE (face:count:layout)':34s} {'N_DUCTS':8s} N_TAKEOFFS")
+    print(f"\n=== Duct-Equipment Takeoff Pattern Summary ({len(patterns)} records) ===")
+    print(f"  {'EQUIPMENT_TAG':22s} {'UTILITY':12s} {'DUCT_NAME':38s} {'FACE':8s} {'LAYOUT':11s} N_T WIDTH_R HEIGHT_R BBOX_W BBOX_H")
     for p in patterns:
-        print(f"  {p['equipment_tag']:22s} {p['utility']:14s} {p['signature']:34s} {p['n_ducts']:<8d} {p['n_takeoffs_total']}")
+        print(f"  {p['equipment_tag']:22s} {p['utility']:12s} {p['duct_name']:38s} {p['face']:8s} {p['layout']:11s} {p['n_takeoffs']:<3d} {p['takeoff_width_mm']:7.1f} {p['takeoff_height_mm']:8.1f} {p['boundbox_width_mm']:6.1f} {p['boundbox_height_mm']:.1f}")
 
 
 def save_equipment_patterns(conn, patterns: list) -> None:
     """
-    (EQUIPMENT_TAG, UTILITY, PATTERN_SIGNATURE) 집계 결과를
-    TB_DUCT_EQUIPMENT_TAKEOFF_PATTERN에 UPSERT합니다. 매 실행마다 그 시점의 DB 상태를
-    그대로 반영해야 하므로, 저장 전에 기존 행을 전부 비우고(TRUNCATE) 새로 채웁니다
-    (UNIQUE 키 upsert만으로는 이번 실행에서 사라진 조합 — 예: 이전엔 있었지만 지금은
-    관측되지 않는 시그니처 — 이 남아있게 되는 문제를 피하기 위함).
+    집계 결과를 TB_DUCT_EQUIPMENT_TAKEOFF_PATTERN에 삽입합니다.
+    매 실행마다 DDL에서 테이블을 드롭 후 재생성하므로 일반 INSERT로 안전하게 채웁니다.
     """
     if not patterns:
         print("No equipment-linked patterns to save.")
         return
 
+    sql = '''
+        INSERT INTO "TB_DUCT_EQUIPMENT_TAKEOFF_PATTERN"
+            ("EQUIPMENT_TAG", "UTILITY", "DUCT_NAME", "FACE", "LAYOUT", "N_TAKEOFFS",
+             "TAKEOFF_WIDTH_MM", "TAKEOFF_HEIGHT_MM", "BOUNDBOX_WIDTH_MM", "BOUNDBOX_HEIGHT_MM",
+             "TAKEOFF_LAYOUT", "ANALYZED_AT")
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, ST_GeomFromText(%s, 0), now())
+    '''
     with conn.cursor() as cur:
-        cur.execute('TRUNCATE TABLE "TB_DUCT_EQUIPMENT_TAKEOFF_PATTERN"')
-        sql = '''
-            INSERT INTO "TB_DUCT_EQUIPMENT_TAKEOFF_PATTERN"
-                ("EQUIPMENT_TAG", "UTILITY", "PATTERN_SIGNATURE", "N_DUCTS",
-                 "N_TAKEOFFS_TOTAL", "EXAMPLE_DUCT_NAMES", "ANALYZED_AT")
-            VALUES (%s, %s, %s, %s, %s, %s, now())
-        '''
         for p in patterns:
             cur.execute(sql, (
-                p['equipment_tag'], p['utility'], p['signature'], p['n_ducts'],
-                p['n_takeoffs_total'], Json(p['example_duct_names']),
+                p['equipment_tag'], p['utility'], p['duct_name'], p['face'], p['layout'], p['n_takeoffs'],
+                p['takeoff_width_mm'], p['takeoff_height_mm'], p['boundbox_width_mm'], p['boundbox_height_mm'],
+                p['takeoff_layout_wkt'],
             ))
     conn.commit()
     print(f"Saved {len(patterns)} equipment takeoff patterns to TB_DUCT_EQUIPMENT_TAKEOFF_PATTERN.")
+
+
 
 
 def export_face_pattern_png(ducts: list, out_path: str) -> None:

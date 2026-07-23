@@ -28,6 +28,7 @@ public sealed class ViewerSettings
     public double GroupArrangementWeight { get; set; } = 20;
     public string GroupComparisonView { get; set; } = "Original";
     public bool ShowUnmatchedGroupMembers { get; set; } = true;
+    public string PythonExe { get; set; } = "python";
 
     /// <summary>실제로 읽었거나 새로 생성할 설정 파일. JSON에는 기록하지 않는다.</summary>
     [JsonIgnore]
@@ -162,6 +163,13 @@ public sealed class TopKRouteItem
     public double Length => Search.TotalLengthMm;
     public string Pattern => Search.DirectionPattern;
     public string ShortGuid => Guid.Length > 12 ? Guid[..12] + "…" : Guid;
+
+    /// <summary>종단 PoC 대상 객체 이름(TB_ROUTE_PATH.TARGET_OWNER_NAME). ViewerDatabaseService.
+    /// LoadRouteEndpointsBatchAsync로 검색 직후 일괄 조회해 채운다.</summary>
+    public string TargetOwnerName { get; init; } = "";
+    /// <summary>종단 객체 분류: MAIN_EQUIPMENT/AUX_EQUIPMENT/DUCT/LATERAL 중 하나, 미확인이면 "".</summary>
+    public string TargetKind { get; init; } = "";
+    public string TargetDisplay => TargetOwnerName.Length == 0 ? "" : $"{TargetOwnerName} ({RouteEndpointInfo.KindLabel(TargetKind)})";
 }
 
 /// <summary>
@@ -192,6 +200,31 @@ public sealed class TopKGroupItem
     public int ReconstructedCount => ReconstructedRouteGuids.Count;
     public int ExactGeometryCount => Math.Max(0, PointsByRouteGuid.Count - ReconstructedCount);
     public string GeometryLabel => ReconstructedCount == 0 ? "실제" : $"재구성 {ReconstructedCount}";
+
+    /// <summary>그룹 멤버 route guid → 종단 PoC 대상 객체 요약. ViewerDatabaseService.
+    /// LoadRouteEndpointsBatchAsync로 후보 그룹의 전체 멤버를 일괄 조회해 채운다.</summary>
+    public IReadOnlyDictionary<string, RouteEndpointInfo> EndpointsByRouteGuid { get; init; } =
+        new Dictionary<string, RouteEndpointInfo>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>멤버들의 종단 객체가 모두 같으면 "이름 (종류)", 섞여 있으면 종류별 건수 요약.</summary>
+    public string TargetSummary
+    {
+        get
+        {
+            var entries = Search.Candidate.Members
+                .Select(m => EndpointsByRouteGuid.TryGetValue(m.RoutePathGuid, out var info) ? info : null)
+                .Where(info => info is not null && info.TargetOwnerName.Length > 0)
+                .Select(info => info!)
+                .ToList();
+            if (entries.Count == 0) return "";
+            var distinctNames = entries.Select(e => e.TargetOwnerName)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (distinctNames.Count == 1) return entries[0].TargetDisplay;
+            return string.Join(" · ", entries
+                .GroupBy(e => e.TargetKind)
+                .Select(g => $"{RouteEndpointInfo.KindLabel(g.Key)} {g.Count()}"));
+        }
+    }
 }
 
 /// <summary>그룹 프리셋의 멤버 표시에 사용하는 읽기 전용 행.</summary>
@@ -207,3 +240,70 @@ public sealed record UtilityPipeGroupMemberRow(
 
 /// <summary>화면에 선택적으로 표시하는 BIM AABB.</summary>
 public sealed record BimObstacle(string Type, Point3D Minimum, Point3D Maximum);
+
+/// <summary>TB_ROUTE_PATH 한 건의 시작 PoC(메인장비)/종단 PoC(대상 객체) 요약. 종단 객체 이름을
+/// TB_EQUIPMENTS/TB_DUCT/TB_LATERAL_PIPE와 대조해 분류한다(AutoRouteFinder/ObstacleDbLoader.cs의
+/// MAIN_SUB_TYPE="MainTool" 판정과 동일 규칙).</summary>
+public sealed record RouteEndpointInfo(string SourceEquipmentName, string TargetOwnerName, string TargetKind)
+{
+    public static string KindLabel(string kind) => kind switch
+    {
+        "MAIN_EQUIPMENT" => "메인장비",
+        "AUX_EQUIPMENT" => "부대장비",
+        "DUCT" => "덕트",
+        "LATERAL" => "레터럴배관",
+        _ => "미확인"
+    };
+
+    public string TargetKindLabel => KindLabel(TargetKind);
+    public string TargetDisplay => TargetOwnerName.Length == 0 ? "" : $"{TargetOwnerName} ({TargetKindLabel})";
+}
+
+/// <summary>TB_ROUTE_BEND_FEATURE_POINT 한 행을 3D 마커로 표시하기 위한 최소 필드셋.</summary>
+public sealed record BendFeatureMarker(
+    string RouteGuid, string Cause, string TransitionType, string SegmentZone, Point3D Point);
+
+/// <summary>TB_ROUTE_PATH_SEGMENTATION 한 행 — 선택된 route에 오버레이로 겹쳐 그리는
+/// Start Stub/Middle Trunk/End Stub 3구간 폴리라인.</summary>
+public sealed record PathSegmentGeometry(
+    string RouteGuid,
+    IReadOnlyList<Point3D> StartStub,
+    IReadOnlyList<Point3D> MiddleTrunk,
+    IReadOnlyList<Point3D> EndStub);
+
+/// <summary>Group/Bundle Pattern 검색 결과 한 건을 화면에 표시하기 위한 래퍼.</summary>
+public sealed class GroupPatternResultItem
+{
+    public required GroupPatternSearchResult Search { get; init; }
+    public int Rank => Search.Rank;
+    public double Score => Search.Similarity;
+    public string GroupId => Search.Candidate.GroupId;
+    public string Equipment => Search.Candidate.EquipmentTag;
+    public string UtilityGroup => Search.Candidate.UtilityGroup;
+    public string Utility => Search.Candidate.Utility;
+    public int NMembers => Search.Candidate.NMembers;
+    public double PitchMm => Search.Candidate.PitchMm;
+    public string SpacingLabel => Search.Candidate.IsEqualSpacing ? "등간격" : "비등간격";
+    public string OffsetAxis => Search.Candidate.OffsetAxis;
+}
+
+/// <summary>Stub Pattern 검색 결과 한 건을 화면에 표시하기 위한 래퍼.</summary>
+public sealed class StubPatternResultItem
+{
+    public required StubPatternSearchResult Search { get; init; }
+    public int Rank => Search.Rank;
+    public double Score => Search.Similarity;
+    public double FeatureScore => Search.FeatureSimilarity;
+    public double DirectionScore => Search.DirectionSimilarity;
+    public string PatternId => Search.Candidate.PatternId;
+    public string MainEquipmentName => Search.Candidate.MainEquipmentName;
+    public string UtilityGroup => Search.Candidate.UtilityGroup;
+    public string Utility => Search.Candidate.Utility;
+    public string Size => Search.Candidate.Size;
+    public string Face => Search.Candidate.Face;
+    public string DirSeq => Search.Candidate.DirSeq;
+    public List<Point3D> StubPoints =>
+        Search.Candidate.StubPoints.Select(p => new Point3D(p.X, p.Y, p.Z)).ToList();
+    public Point3D AnchorMin => new(Search.Candidate.AnchorMin.X, Search.Candidate.AnchorMin.Y, Search.Candidate.AnchorMin.Z);
+    public Point3D AnchorMax => new(Search.Candidate.AnchorMax.X, Search.Candidate.AnchorMax.Y, Search.Candidate.AnchorMax.Z);
+}

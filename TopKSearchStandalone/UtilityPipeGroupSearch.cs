@@ -270,19 +270,39 @@ public static class UtilityPipeGroupSearch
              WHERE m."GROUP_VECTOR_ID"=ANY(@ids)
              ORDER BY m."GROUP_VECTOR_ID",m."MEMBER_ORDER",BTRIM(m."ROUTE_PATH_GUID")
             """;
+        var rows = new List<(string GroupId, string RouteGuid, int MemberOrder, string Utility, string Size,
+            (double, double, double) Start, (double, double, double) End, string DirectionPattern,
+            double TotalLength, int StepCount, double[] FeatureVector, double[]? ContextVector,
+            string FeatureProvenance, string ContextProvenance)>();
+        await using (var command = new NpgsqlCommand(sql, connection))
+        {
+            command.Parameters.AddWithValue("ids", ids);
+            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                rows.Add((
+                    Text(reader, 0), Text(reader, 1), reader.GetInt32(2), Text(reader, 3), Text(reader, 4),
+                    Point(reader, 5), Point(reader, 8), Text(reader, 11), Number(reader, 12), reader.GetInt32(13),
+                    ParseVector(Text(reader, 14), 30), reader.IsDBNull(15) ? null : ParseVector(Text(reader, 15), 30),
+                    Text(reader, 16), Text(reader, 17)));
+            }
+        }
+
+        var bendByGuid = await FetchBendPointsAsync(
+            connection, headers[0], rows.Select(row => row.RouteGuid).Distinct(StringComparer.Ordinal).ToArray())
+            .ConfigureAwait(false);
+
         var members = headers.ToDictionary(header => header.GroupVectorId,
             _ => new List<UtilityPipeGroupMember>(), StringComparer.Ordinal);
-        await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue("ids", ids);
-        await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
-        while (await reader.ReadAsync().ConfigureAwait(false))
+        foreach (var row in rows)
         {
-            var groupId = Text(reader, 0);
-            members[groupId].Add(new(
-                Text(reader, 1), reader.GetInt32(2), Text(reader, 3), Text(reader, 4),
-                Point(reader, 5), Point(reader, 8), Text(reader, 11), Number(reader, 12), reader.GetInt32(13),
-                ParseVector(Text(reader, 14), 30), reader.IsDBNull(15) ? null : ParseVector(Text(reader, 15), 30),
-                Text(reader, 16), Text(reader, 17)));
+            members[row.GroupId].Add(new(
+                row.RouteGuid, row.MemberOrder, row.Utility, row.Size,
+                row.Start, row.End, row.DirectionPattern, row.TotalLength, row.StepCount,
+                row.FeatureVector, row.ContextVector, row.FeatureProvenance, row.ContextProvenance,
+                bendByGuid.TryGetValue(row.RouteGuid, out var bendPoints)
+                    ? bendPoints
+                    : (IReadOnlyList<BendFeaturePointSummary>)Array.Empty<BendFeaturePointSummary>()));
         }
         var result = new Dictionary<string, UtilityPipeGroupDescriptor>(StringComparer.Ordinal);
         foreach (var header in headers)
@@ -291,6 +311,42 @@ public static class UtilityPipeGroupSearch
                 throw new InvalidOperationException(
                     $"그룹 {header.GroupVectorId}의 선언 멤버 {header.MemberCount}개와 Vector 연결 {members[header.GroupVectorId].Count}개가 다릅니다.");
             result[header.GroupVectorId] = header with { Members = members[header.GroupVectorId] };
+        }
+        return result;
+    }
+
+    /// <summary>Tools/ExtractBendFeaturePoints.py가 적재한 개별 꺾임점을 배관 GUID별로 조회한다.
+    /// 테이블이 아직 build되지 않은 환경(TB_ROUTE_BEND_FEATURE_POINT 미생성)에서도 그룹 검색
+    /// 자체는 fallback(구조 패턴 50:50)으로 동작해야 하므로, 조회 실패는 조용히 빈 결과로 처리한다.</summary>
+    private static async Task<Dictionary<string, List<BendFeaturePointSummary>>> FetchBendPointsAsync(
+        NpgsqlConnection connection, UtilityPipeGroupDescriptor scopeSource, IReadOnlyList<string> routeGuids)
+    {
+        var result = new Dictionary<string, List<BendFeaturePointSummary>>(StringComparer.Ordinal);
+        if (routeGuids.Count == 0) return result;
+        const string sql = """
+            SELECT BTRIM("ROUTE_PATH_GUID"),"ORDINAL_FROM_START","SEGMENT_ZONE","REL_POSITION_BUCKET","TRANSITION_TYPE","CAUSE"
+              FROM "TB_ROUTE_BEND_FEATURE_POINT"
+             WHERE "PROJECT_SCOPE_KEY"=@project AND "MODEL_REVISION_KEY"=@revision
+               AND BTRIM("ROUTE_PATH_GUID")=ANY(@guids)
+             ORDER BY BTRIM("ROUTE_PATH_GUID"),"ORDINAL_FROM_START"
+            """;
+        try
+        {
+            await using var command = new NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue("project", scopeSource.ProjectScopeKey);
+            command.Parameters.AddWithValue("revision", scopeSource.ModelRevisionKey);
+            command.Parameters.AddWithValue("guids", routeGuids.ToArray());
+            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                var guid = Text(reader, 0);
+                if (!result.TryGetValue(guid, out var list)) result[guid] = list = new List<BendFeaturePointSummary>();
+                list.Add(new(reader.GetInt32(1), Text(reader, 2), Number(reader, 3), Text(reader, 4), Text(reader, 5)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42P01")
+        {
+            // TB_ROUTE_BEND_FEATURE_POINT가 아직 create-schema/build되지 않은 환경.
         }
         return result;
     }

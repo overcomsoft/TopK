@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bend Feature Point Build Contract v1",
+  "description": "배관 꺾임특징점(개별 인스턴스 + 빈도 집계 템플릿)의 공용 생성 계약. Docs/BendFeaturePoint_Development_Plan.md 8절 참고.",
+  "type": "object",
+  "required": ["bend_point", "bend_pattern"],
+  "$defs": {
+    "point3d": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    },
+    "segment_zone": {"enum": ["START_STUB", "MIDDLE_TRUNK", "END_STUB"]},
+    "transition_type": {"enum": ["V_TO_H", "H_TO_V", "H_TO_H", "V_TO_V"]},
+    "cause": {"enum": ["OBSTACLE_AVOID", "DESTINATION_ENTRY", "ZONE_CONSTRAINT", "GROUP_ALIGNMENT", "UNKNOWN"]},
+    "bend_point": {
+      "type": "object",
+      "description": "TB_ROUTE_BEND_FEATURE_POINT 한 행에 대응.",
+      "required": [
+        "route_path_guid", "project_scope_key", "model_revision_key",
+        "equipment_key", "utility_group", "utility",
+        "ordinal_from_start", "ordinal_from_end", "segment_zone", "rel_position_bucket",
+        "transition_type", "axis_before", "axis_after", "cause", "cause_evidence",
+        "is_elbow_restored_ip", "is_horizontal_sequence", "point_3d", "build_run_id"
+      ],
+      "properties": {
+        "route_path_guid": {"type": "string", "minLength": 1},
+        "project_scope_key": {"type": "string", "minLength": 1},
+        "model_revision_key": {"type": "string", "minLength": 1},
+        "equipment_key": {"type": "string", "minLength": 1},
+        "utility_group": {"type": "string", "minLength": 1},
+        "utility": {"type": "string", "minLength": 1},
+        "ordinal_from_start": {"type": "integer", "minimum": 0},
+        "ordinal_from_end": {"type": "integer", "minimum": 0},
+        "segment_zone": {"$ref": "#/$defs/segment_zone"},
+        "rel_position_bucket": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "transition_type": {"$ref": "#/$defs/transition_type"},
+        "axis_before": {"enum": ["+x", "-x", "+y", "-y", "+z", "-z"]},
+        "axis_after": {"enum": ["+x", "-x", "+y", "-y", "+z", "-z"]},
+        "cause": {"$ref": "#/$defs/cause"},
+        "cause_evidence": {"type": "object"},
+        "is_elbow_restored_ip": {"type": "boolean"},
+        "ip_restore_skew_dist_mm": {"type": ["number", "null"], "minimum": 0.0},
+        "anchor_rel_position": {"anyOf": [{"$ref": "#/$defs/point3d"}, {"type": "null"}]},
+        "is_horizontal_sequence": {"type": "boolean"},
+        "point_3d": {"$ref": "#/$defs/point3d"},
+        "build_run_id": {"type": "string", "format": "uuid"}
+      },
+      "additionalProperties": false
+    },
+    "bend_pattern": {
+      "type": "object",
+      "description": "TB_ROUTE_BEND_FEATURE_PATTERN 한 행에 대응.",
+      "required": [
+        "pattern_id", "project_scope_key", "model_revision_key",
+        "equipment_key", "utility_group", "utility",
+        "transition_type", "segment_zone", "rel_position_bucket",
+        "sample_count", "bend_instance_count", "total_routes_in_scope", "frequency_score",
+        "dominant_cause", "cause_confidence", "cause_breakdown",
+        "member_bend_ids", "source_hash", "build_run_id"
+      ],
+      "properties": {
+        "pattern_id": {"type": "string", "minLength": 16},
+        "project_scope_key": {"type": "string", "minLength": 1},
+        "model_revision_key": {"type": "string", "minLength": 1},
+        "equipment_key": {"type": "string", "minLength": 1},
+        "utility_group": {"type": "string", "minLength": 1},
+        "utility": {"type": "string", "minLength": 1},
+        "transition_type": {"$ref": "#/$defs/transition_type"},
+        "segment_zone": {"$ref": "#/$defs/segment_zone"},
+        "rel_position_bucket": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "sample_count": {"type": "integer", "minimum": 1},
+        "bend_instance_count": {"type": "integer", "minimum": 1},
+        "total_routes_in_scope": {"type": "integer", "minimum": 1},
+        "frequency_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "dominant_cause": {"$ref": "#/$defs/cause"},
+        "cause_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "cause_breakdown": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 1}
+        },
+        "position_consistency": {"type": ["number", "null"]},
+        "representative_point": {"anyOf": [{"$ref": "#/$defs/point3d"}, {"type": "null"}]},
+        "avg_position": {"anyOf": [{"$ref": "#/$defs/point3d"}, {"type": "null"}]},
+        "position_std_mm": {"type": ["number", "null"], "minimum": 0.0},
+        "avg_anchor_rel_position": {"anyOf": [{"$ref": "#/$defs/point3d"}, {"type": "null"}]},
+        "anchor_rel_std": {"type": ["number", "null"], "minimum": 0.0},
+        "member_bend_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer"}
+        },
+        "source_hash": {"type": "string", "minLength": 32},
+        "build_run_id": {"type": "string", "format": "uuid"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "bend_point": {"$ref": "#/$defs/bend_point"},
+    "bend_pattern": {"$ref": "#/$defs/bend_pattern"}
+  }
+}
